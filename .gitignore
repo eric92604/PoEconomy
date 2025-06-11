@@ -246,9 +246,10 @@ docker-compose.override.yml
 *.tmp
 *.temp 
 
-# Large data files
+# Data files
 data/
 pg_backup/
+ml/training_data/
 
 # Cursor files
 .cursor/
