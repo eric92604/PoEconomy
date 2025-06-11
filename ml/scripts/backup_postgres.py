@@ -1,8 +1,14 @@
 import os
+import sys
 import subprocess
 from datetime import datetime
+
+# Add parent directory to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.database import get_db_connection
 from dotenv import load_dotenv
 
+# Load environment variables for backup script
 load_dotenv(dotenv_path="server/.env")
 
 BACKUP_DIR = "pg_backup"

@@ -1,21 +1,11 @@
 import os
 import csv
 import sys
-import psycopg2
 from psycopg2 import sql
-from dotenv import load_dotenv
 
-load_dotenv(dotenv_path="server/.env")
-
-def get_db_connection():
-    """Establishes a connection to the PostgreSQL database using .env credentials."""
-    return psycopg2.connect(
-        dbname=os.getenv("DB_NAME"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT", "5432"),
-    )
+# Add parent directory to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.database import get_db_connection
 
 def get_id(cursor, table, name_column, value):
     """Fetches the id from a table where name_column = value."""
