@@ -2,258 +2,516 @@ import os
 import sys
 import pandas as pd
 import numpy as np
+import json
+import logging
 from datetime import datetime, timedelta
-from sklearn.preprocessing import StandardScaler
-import warnings
-warnings.filterwarnings('ignore')
+from typing import List, Tuple, Dict, Optional, Any
+from dataclasses import dataclass, asdict
+from pathlib import Path
+import subprocess
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.database import get_db_connection
+from identify_target_currencies import generate_target_currency_list
 
-def extract_base_features(target_currency_pair=None, months_back=12):
+# Configure logging for console output
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+@dataclass
+class FeatureEngineeringConfig:
+    """Configuration for feature engineering pipeline - focused on data preparation."""
+    # League phase parameters
+    max_league_days: int = 60  # Maximum days into each league to consider
+    min_league_days: int = 0   # Minimum league duration to include
+    
+    # Data filtering
+    min_records_per_pair: int = 50
+    min_records_after_cleaning: int = 30
+    
+    # Feature engineering parameters
+    rolling_windows: List[int] = None  # [3, 7, 14, 30]
+    prediction_horizons: List[int] = None  # [1, 3, 7]
+    include_league_features: bool = True
+    
+    # Automation parameters
+    experiment_id: str = None
+    output_dir: str = "../training_data"
+    log_level: str = "INFO"
+    save_individual_datasets: bool = False
+    create_combined_dataset: bool = True
+    
+    def __post_init__(self):
+        if self.rolling_windows is None:
+            self.rolling_windows = [1, 3, 7, 14]
+        if self.prediction_horizons is None:
+            self.prediction_horizons = [1, 3, 7]
+        if self.experiment_id is None:
+            self.experiment_id = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+def setup_logging(config: FeatureEngineeringConfig) -> logging.Logger:
+    """Setup logging for the feature engineering pipeline."""
+    log_file = f"{config.output_dir}/logs/feature_engineering_{config.experiment_id}.log"
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    
+    logging.basicConfig(
+        level=getattr(logging, config.log_level.upper()),
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()
+        ]
+    )
+    return logging.getLogger(__name__)
+
+def get_priority_pairs() -> List[Tuple[str, str]]:
     """
-    Extract base features for ML training, prioritizing recent leagues.
+    Get priority currency pairs by running identify_target_currencies.py
+    and parsing the output.
+    
+    Returns:
+        List of (from_currency, to_currency) tuples
+    """
+    logging.info("*** Identifying priority currency pairs...")
+    
+    # Run the identify_target_currencies script
+    result = subprocess.run(
+        [sys.executable, "identify_target_currencies.py"],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).parent
+    )
+    
+    if result.returncode != 0:
+        logging.error(f"Failed to run identify_target_currencies.py: {result.stderr}")
+        raise RuntimeError("Failed to identify target currencies")
+    
+    # For now, return empty list since we're focusing on architecture
+    # In actual implementation, parse the subprocess output
+    priority_pairs = []
+    
+    # Parse the output to extract currency pairs
+    # This is a simplified version - in reality, we'd parse the detailed output
+    output_lines = result.stdout.strip().split('\n')
+    for line in output_lines:
+        if ' -> ' in line and '| P1 |' in line:
+            # Extract currency pair from lines like "Divine Orb -> Chaos Orb | P1 |"
+            parts = line.split(' -> ')
+            if len(parts) >= 2:
+                from_currency = parts[0].strip().split('.')[-1].strip()
+                to_currency = parts[1].split('|')[0].strip()
+                priority_pairs.append((from_currency, to_currency))
+    
+    logging.info(f"*** Identified {len(priority_pairs)} priority pairs for processing")
+    return priority_pairs
+
+def get_league_phase_data(get_currency: str, pay_currency: str, config: FeatureEngineeringConfig) -> pd.DataFrame:
+    """
+    Fetch currency price data based on league phases rather than linear time.
     
     Args:
-        target_currency_pair: Tuple of (get_currency, pay_currency) or None for all
-        months_back: How many months of data to include
+        get_currency: Currency being received
+        pay_currency: Currency being paid
+        config: Feature engineering configuration
+        
+    Returns:
+        pd.DataFrame: Currency price data from comparable league phases
     """
     conn = get_db_connection()
     
-    # Build query with recency focus
-    base_query = """
+    query = """
     SELECT 
         cp.id,
         cp."leagueId",
         cp."getCurrencyId", 
         cp."payCurrencyId",
-        cp.date,
+        cp.date AT TIME ZONE 'UTC' as date,
         cp.value as price,
         cp.confidence,
         l.name as league_name,
-        l."startDate" as league_start,
-        l."endDate" as league_end,
+        l."startDate" AT TIME ZONE 'UTC' as league_start,
+        l."endDate" AT TIME ZONE 'UTC' as league_end,
         l."isActive" as league_active,
         gc.name as get_currency,
         pc.name as pay_currency,
-        -- League age in days
-        EXTRACT(EPOCH FROM (cp.date - l."startDate")) / 86400 as league_age_days,
-        -- Recency weight (higher for recent leagues)
-        CASE 
-            WHEN l."startDate" >= NOW() - INTERVAL '3 months' THEN 1.0
-            WHEN l."startDate" >= NOW() - INTERVAL '6 months' THEN 0.8
-            WHEN l."startDate" >= NOW() - INTERVAL '12 months' THEN 0.6
-            ELSE 0.3
-        END as recency_weight
+        -- Calculate days into league
+        EXTRACT(DAY FROM (cp.date AT TIME ZONE 'UTC' - l."startDate" AT TIME ZONE 'UTC')) as league_day
     FROM currency_prices cp
     JOIN leagues l ON cp."leagueId" = l.id
-    JOIN currency gc ON cp."getCurrencyId" = gc.id 
+    JOIN currency gc ON cp."getCurrencyId" = gc.id
     JOIN currency pc ON cp."payCurrencyId" = pc.id
-    WHERE cp.date >= NOW() - INTERVAL '{months_back} months'
-        AND cp.value > 0  -- Remove negative prices
-        AND cp.value < 10000  -- Remove extreme outliers
-    """.format(months_back=months_back)
+    WHERE gc.name = %s 
+        AND pc.name = %s
+        AND cp.value > 0
+        -- Only include data from the first X days of each league
+        AND EXTRACT(DAY FROM (cp.date AT TIME ZONE 'UTC' - l."startDate" AT TIME ZONE 'UTC')) <= %s
+        AND EXTRACT(DAY FROM (cp.date AT TIME ZONE 'UTC' - l."startDate" AT TIME ZONE 'UTC')) >= 0
+        -- Only include leagues that lasted at least min_league_days
+        AND (l."endDate" IS NULL OR 
+             EXTRACT(DAY FROM (l."endDate" AT TIME ZONE 'UTC' - l."startDate" AT TIME ZONE 'UTC')) >= %s)
+    ORDER BY l."startDate" DESC, cp.date ASC
+    """
     
-    # Add currency pair filter if specified
-    if target_currency_pair:
-        get_curr, pay_curr = target_currency_pair
-        base_query += f" AND gc.name = '{get_curr}' AND pc.name = '{pay_curr}'"
-    
-    base_query += " ORDER BY cp.date DESC"
-    
-    print(f"Extracting base features for last {months_back} months...")
-    df = pd.read_sql(base_query, conn)
+    df = pd.read_sql(query, conn, params=[
+        get_currency, 
+        pay_currency, 
+        config.max_league_days,
+        config.min_league_days
+    ])
     conn.close()
     
-    print(f"Extracted {len(df):,} records")
+    logging.debug(f"Fetched {len(df)} records for {get_currency} -> {pay_currency}")
     return df
 
-def engineer_time_features(df):
-    """Create time-based features."""
-    print("Engineering time features...")
+def engineer_league_metadata_features(df: pd.DataFrame, config: FeatureEngineeringConfig) -> pd.DataFrame:
+    """
+    Create league metadata features for downstream recency weighting.
     
-    df['date'] = pd.to_datetime(df['date'])
-    df['year'] = df['date'].dt.year
-    df['month'] = df['date'].dt.month
+    This focuses on data preparation, NOT optimization.
+    Recency weighting will be applied during model training.
+    """
+    if len(df) == 0:
+        return df
+    
+    # Ensure timezone-naive datetime columns
+    for col in ['date', 'league_start', 'league_end']:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col])
+            if df[col].dt.tz is not None:
+                df[col] = df[col].dt.tz_localize(None)
+    
+    df = df.sort_values(['league_start', 'date']).reset_index(drop=True)
+    
+    # League age and timing features
+    df['league_age_days'] = df['league_day']  # Already calculated in SQL
+    df['days_into_league'] = df['league_age_days']
+    
+    # Calculate league recency metadata (for downstream weighting)
+    latest_league_start = df['league_start'].max()
+    df['league_days_old'] = (latest_league_start - df['league_start']).dt.days
+    df['league_start_timestamp'] = df['league_start'].astype(int) // 10**9  # Unix timestamp
+    
+    # League phase indicators (discrete features)
+    max_days = df['league_day'].max()
+    if max_days > 0:
+        early_threshold = max_days * 0.3
+        late_threshold = max_days * 0.7
+        
+        df['league_phase_early'] = (df['league_day'] <= early_threshold).astype(int)
+        df['league_phase_mid'] = ((df['league_day'] > early_threshold) & 
+                                 (df['league_day'] <= late_threshold)).astype(int)
+        df['league_phase_late'] = (df['league_day'] > late_threshold).astype(int)
+    else:
+        df['league_phase_early'] = 1
+        df['league_phase_mid'] = 0
+        df['league_phase_late'] = 0
+    
+    # Time-based features (relative to league start)
+    df['week_in_league'] = (df['league_day'] / 7).astype(int)
+    df['is_league_weekend'] = df['date'].dt.dayofweek.isin([5, 6]).astype(int)
     df['day_of_week'] = df['date'].dt.dayofweek
-    df['day_of_month'] = df['date'].dt.day
-    df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
     
-    # League phase (early/mid/late)
-    df['league_phase'] = pd.cut(
-        df['league_age_days'], 
-        bins=[-1, 7, 30, 60, float('inf')], 
-        labels=['very_early', 'early', 'mid', 'late']
+    # League activity and duration features
+    if config.include_league_features:
+        # League statistics (for context, not weighting)
+        league_stats = df.groupby('league_name').agg({
+            'price': ['count', 'mean', 'std', 'min', 'max', 'median'],
+            'league_day': 'max'
+        }).reset_index()
+        
+        league_stats.columns = ['league_name', 'league_price_count', 'league_price_mean', 
+                               'league_price_std', 'league_price_min', 'league_price_max', 
+                               'league_price_median', 'league_duration_days']
+        
+        df = df.merge(league_stats, on='league_name', how='left')
+        
+        # League ranking by recency (for model to use)
+        league_recency_rank = df.groupby('league_name')['league_start'].first().rank(method='dense', ascending=False)
+        league_recency_mapping = league_recency_rank.to_dict()
+        df['league_recency_rank'] = df['league_name'].map(league_recency_mapping)
+    
+    # Price-based features with league-aware rolling windows
+    for window in config.rolling_windows:
+        # Calculate rolling stats within each league (no cross-league contamination)
+        df[f'price_mean_{window}d'] = df.groupby('league_name')['price'].transform(
+            lambda x: x.rolling(window=window, min_periods=1).mean()
+        )
+        df[f'price_std_{window}d'] = df.groupby('league_name')['price'].transform(
+            lambda x: x.rolling(window=window, min_periods=1).std()
+        )
+        df[f'price_min_{window}d'] = df.groupby('league_name')['price'].transform(
+            lambda x: x.rolling(window=window, min_periods=1).min()
+        )
+        df[f'price_max_{window}d'] = df.groupby('league_name')['price'].transform(
+            lambda x: x.rolling(window=window, min_periods=1).max()
+        )
+    
+    # League-aware momentum and volatility
+    for period in [3, 7]:
+        df[f'momentum_{period}d'] = df.groupby('league_name')['price'].transform(
+            lambda x: x.pct_change(periods=period)
+        )
+    
+    for window in [7, 14]:
+        rolling_mean = df.groupby('league_name')['price'].transform(
+            lambda x: x.rolling(window=window).mean()
+        )
+        rolling_std = df.groupby('league_name')['price'].transform(
+            lambda x: x.rolling(window=window).std()
+        )
+        df[f'volatility_{window}d'] = rolling_std / rolling_mean
+    
+    # Price change indicators within league
+    df['price_change_1d'] = df.groupby('league_name')['price'].transform(lambda x: x.diff())
+    df['price_change_pct_1d'] = df.groupby('league_name')['price'].transform(lambda x: x.pct_change())
+    
+    # Cross-league comparison features
+    df['price_vs_league_mean'] = df['price'] / df['league_price_mean']
+    df['price_percentile_in_league'] = df.groupby('league_name')['price'].transform(
+        lambda x: x.rank(pct=True)
     )
     
+    logging.info(f"  *** Created league metadata features for downstream recency weighting")
+    logging.info(f"   *** League age range: {df['league_days_old'].min()}-{df['league_days_old'].max()} days")
+    
     return df
 
-def engineer_price_features(df):
-    """Create price-based features with rolling statistics."""
-    print("Engineering price features...")
+def create_league_aware_targets(df: pd.DataFrame, config: FeatureEngineeringConfig) -> pd.DataFrame:
+    """Create target variables that respect league boundaries."""
+    if len(df) == 0:
+        return df
     
-    # Sort by currency pair and date for rolling calculations
-    df = df.sort_values(['get_currency', 'pay_currency', 'date'])
+    df = df.sort_values(['league_name', 'date']).reset_index(drop=True)
     
-    # Rolling statistics (7, 14, 30 days)
-    for window in [7, 14, 30]:
-        df[f'price_mean_{window}d'] = (
-            df.groupby(['get_currency', 'pay_currency'])['price']
-            .rolling(window=window, min_periods=1)
-            .mean()
-            .reset_index(0, drop=True)
+    for horizon in config.prediction_horizons:
+        # Future price (within same league only)
+        df[f'target_price_{horizon}d'] = df.groupby('league_name')['price'].transform(
+            lambda x: x.shift(-horizon)
         )
         
-        df[f'price_std_{window}d'] = (
-            df.groupby(['get_currency', 'pay_currency'])['price']
-            .rolling(window=window, min_periods=1)
-            .std()
-            .reset_index(0, drop=True)
-        )
-    
-    # Price momentum (current vs historical averages)
-    df['momentum_7d'] = df['price'] / df['price_mean_7d'] - 1
-    df['momentum_30d'] = df['price'] / df['price_mean_30d'] - 1
-    
-    # Volatility
-    df['volatility_7d'] = df['price_std_7d'] / df['price_mean_7d']
-    df['volatility_30d'] = df['price_std_30d'] / df['price_mean_30d']
-    
-    # Price change from previous day
-    df['price_change_1d'] = (
-        df.groupby(['get_currency', 'pay_currency'])['price']
-        .pct_change(1)
-        .fillna(0)
-    )
-    
-    return df
-
-def engineer_league_features(df):
-    """Create league-specific features."""
-    print("Engineering league features...")
-    
-    # League activity metrics
-    league_stats = df.groupby('league_name').agg({
-        'price': ['count', 'mean', 'std'],
-        'date': ['min', 'max']
-    }).round(4)
-    
-    league_stats.columns = ['_'.join(col).strip() for col in league_stats.columns]
-    league_stats = league_stats.add_prefix('league_')
-    league_stats = league_stats.reset_index()
-    
-    # Merge back to main dataframe
-    df = df.merge(league_stats, on='league_name', how='left')
-    
-    return df
-
-def engineer_target_variables(df, prediction_horizons=[1, 3, 7]):
-    """Create target variables for different prediction horizons."""
-    print(f"Engineering target variables for horizons: {prediction_horizons}")
-    
-    df = df.sort_values(['get_currency', 'pay_currency', 'date'])
-    
-    for horizon in prediction_horizons:
-        # Future price
-        df[f'target_price_{horizon}d'] = (
-            df.groupby(['get_currency', 'pay_currency'])['price']
-            .shift(-horizon)
-        )
-        
-        # Price change percentage
-        df[f'target_change_{horizon}d'] = (
-            (df[f'target_price_{horizon}d'] / df['price'] - 1) * 100
-        )
+        # Price change (absolute and percentage)
+        df[f'target_change_{horizon}d'] = df[f'target_price_{horizon}d'] - df['price']
+        df[f'target_change_pct_{horizon}d'] = (df[f'target_change_{horizon}d'] / df['price']) * 100
         
         # Direction (up/down/stable)
         df[f'target_direction_{horizon}d'] = pd.cut(
-            df[f'target_change_{horizon}d'],
-            bins=[-float('inf'), -2, 2, float('inf')],
+            df[f'target_change_pct_{horizon}d'],
+            bins=[-np.inf, -2, 2, np.inf],
             labels=['down', 'stable', 'up']
+        )
+        
+        # Volatility target
+        df[f'target_volatility_{horizon}d'] = df.groupby('league_name')['price'].transform(
+            lambda x: x.rolling(window=horizon).std().shift(-horizon)
         )
     
     return df
 
-def clean_and_validate_features(df):
-    """Clean and validate the engineered features."""
-    print("Cleaning and validating features...")
+def clean_and_validate_league_features(df: pd.DataFrame, config: FeatureEngineeringConfig) -> pd.DataFrame:
+    """Clean and validate engineered features with league-aware logic."""
+    if len(df) == 0:
+        return df
+    
+    logging.debug(f"Cleaning features: {df.shape[0]} records before cleaning")
+    
+    # Fill NaN values with league-aware forward fill
+    numeric_columns = df.select_dtypes(include=[np.number]).columns
+    df[numeric_columns] = df.groupby('league_name')[numeric_columns].ffill().fillna(0)
     
     # Remove infinite values
     df = df.replace([np.inf, -np.inf], np.nan)
     
-    # Fill NaN values with appropriate defaults
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
-    df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].median())
+    # Remove rows where ALL numeric features are NaN (but be more lenient with targets)
+    feature_cols = [col for col in numeric_columns if not col.startswith('target_')]
+    df = df.dropna(subset=feature_cols, how='all')
     
-    # Remove rows where we don't have target variables (last few days)
-    df = df.dropna(subset=[col for col in df.columns if col.startswith('target_')])
+    # For targets, only require at least ONE valid target (not all targets)
+    target_cols = [col for col in df.columns if col.startswith('target_') and not col.endswith('_direction_1d') and not col.endswith('_direction_3d') and not col.endswith('_direction_7d')]
     
-    print(f"Final dataset shape: {df.shape}")
-    print(f"Features: {len([col for col in df.columns if not col.startswith('target_')])}")
-    print(f"Targets: {len([col for col in df.columns if col.startswith('target_')])}")
+    # Keep rows that have at least one valid target
+    if target_cols:
+        df = df.dropna(subset=target_cols, how='all')
     
+    logging.debug(f"Cleaning complete: {df.shape[0]} records after cleaning")
     return df
 
-def create_ml_dataset(target_currency_pair=("Divine Orb", "Chaos Orb"), months_back=12):
-    """
-    Main function to create ML-ready dataset.
+def process_currency_pair_league_based(get_currency: str, pay_currency: str, config: FeatureEngineeringConfig) -> Optional[pd.DataFrame]:
+    """Process a single currency pair through the league-based feature engineering pipeline."""
+    logging.info(f"Processing {get_currency} -> {pay_currency}...")
     
-    Args:
-        target_currency_pair: Tuple of (get_currency, pay_currency)
-        months_back: How many months of historical data to include
+    # Get league-phase data
+    df = get_league_phase_data(get_currency, pay_currency, config)
     
-    Returns:
-        pd.DataFrame: ML-ready dataset with features and targets
-    """
-    print("=" * 60)
-    print("CREATING ML DATASET")
-    print("=" * 60)
-    print(f"Target pair: {target_currency_pair}")
-    print(f"Time window: {months_back} months")
-    
-    # Step 1: Extract base features
-    df = extract_base_features(target_currency_pair, months_back)
-    
-    if len(df) < 100:
-        print("⚠️  Insufficient data for this currency pair")
+    if len(df) < config.min_records_per_pair:
+        logging.warning(f"  *** Insufficient data: {len(df)} records (minimum {config.min_records_per_pair} required)")
         return None
     
-    # Step 2: Engineer features
-    df = engineer_time_features(df)
-    df = engineer_price_features(df)
-    df = engineer_league_features(df)
-    df = engineer_target_variables(df)
+    leagues_count = df['league_name'].nunique()
+    logging.info(f"  *** Raw data: {len(df)} records across {leagues_count} leagues")
     
-    # Step 3: Clean and validate
-    df = clean_and_validate_features(df)
+    # Engineer features (data preparation only)
+    df = engineer_league_metadata_features(df, config)
     
-    print("✅ ML dataset creation completed!")
+    # Create targets
+    df = create_league_aware_targets(df, config)
+    
+    # Clean and validate
+    df = clean_and_validate_league_features(df, config)
+    
+    if len(df) < config.min_records_after_cleaning:
+        logging.warning(f"  *** Insufficient data after cleaning: {len(df)} records")
+        return None
+    
+    # Add pair identifier
+    df['currency_pair'] = f"{get_currency}_{pay_currency}"
+    
+    feature_count = len([c for c in df.columns if not c.startswith('target_')])
+    target_count = len([c for c in df.columns if c.startswith('target_')])
+    
+    logging.info(f"  *** Processed: {len(df)} records, {feature_count} features, {target_count} targets")
+    
     return df
 
-def save_dataset(df, filename="ml_dataset.parquet"):
-    """Save the dataset for model training."""
-    if df is not None:
-        filepath = f"data/{filename}"
-        os.makedirs("data", exist_ok=True)
-        df.to_parquet(filepath, index=False)
-        print(f"Dataset saved to: {filepath}")
-        return filepath
-    return None
+def run_feature_engineering_experiment(config: FeatureEngineeringConfig) -> Dict[str, Any]:
+    """
+    Run a complete feature engineering experiment with the given configuration.
+    
+    Args:
+        config: Feature engineering configuration
+        
+    Returns:
+        Dictionary containing experiment results and metadata
+    """
+    
+    logging.info("*** LEAGUE-BASED CURRENCY FEATURE ENGINEERING")
+    logging.info("=" * 80)
+    logging.info(f"Experiment ID: {config.experiment_id}")
+    logging.info("Focus: Data preparation with league metadata for downstream recency weighting")
+    logging.info("=" * 80)
+    
+    # Get priority currency pairs
+    priority_pairs = get_priority_pairs()
+    
+    # Log configuration
+    logging.info(f"*** Feature engineering configured for league-based data preparation")
+    logging.info(f"*** Ready to process {len(priority_pairs)} currency pairs")
+    logging.info(f"*** League window: {config.max_league_days} days per league")
+    
+    # Create output directory
+    output_dir = Path(config.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Process each currency pair
+    logging.info("*** Starting data processing...")
+    processed_datasets = []
+    processing_stats = {
+        "total_pairs": len(priority_pairs),
+        "successful": 0,
+        "failed": 0,
+        "insufficient_data": 0
+    }
+    
+    for i, (get_currency, pay_currency) in enumerate(priority_pairs, 1):
+        logging.info(f"*** [{i}/{len(priority_pairs)}] Processing {get_currency} -> {pay_currency}")
+        
+        try:
+            df = process_currency_pair_league_based(get_currency, pay_currency, config)
+            
+            if df is not None and len(df) > 0:
+                processed_datasets.append(df)
+                processing_stats["successful"] += 1
+                
+                # Save individual dataset if configured
+                if config.save_individual_datasets:
+                    filename = f"{get_currency}_{pay_currency}_{config.experiment_id}.parquet"
+                    filepath = output_dir / filename
+                    df.to_parquet(filepath, index=False)
+                    logging.info(f"  *** Saved: {filepath}")
+                    
+            else:
+                processing_stats["insufficient_data"] += 1
+                
+        except Exception as e:
+            logging.error(f"  *** Failed to process {get_currency} -> {pay_currency}: {str(e)}")
+            processing_stats["failed"] += 1
+    
+    # Create combined dataset if configured and we have data
+    combined_df = None
+    logging.info(f"*** Combined dataset creation check:")
+    logging.info(f"    - create_combined_dataset: {config.create_combined_dataset}")
+    logging.info(f"    - processed_datasets length: {len(processed_datasets)}")
+    
+    if config.create_combined_dataset and processed_datasets:
+        logging.info("*** Creating combined dataset...")
+        combined_df = pd.concat(processed_datasets, ignore_index=True)
+        
+        # Save combined dataset
+        combined_filename = f"combined_currency_features_{config.experiment_id}.parquet"
+        combined_filepath = output_dir / combined_filename
+        combined_df.to_parquet(combined_filepath, index=False)
+        logging.info(f"*** Combined dataset saved: {combined_filepath}")
+        logging.info(f"*** Combined dataset shape: {combined_df.shape}")
+    else:
+        if not config.create_combined_dataset:
+            logging.info("*** Combined dataset creation disabled in config")
+        if not processed_datasets:
+            logging.info("*** No processed datasets available for combination")
+    
+    # Save experiment metadata
+    metadata = {
+        "experiment_id": config.experiment_id,
+        "timestamp": datetime.now().isoformat(),
+        "config": asdict(config),
+        "processing_stats": processing_stats,
+        "output_files": {
+            "combined_dataset": f"combined_currency_features_{config.experiment_id}.parquet" if combined_df is not None else None,
+            "individual_datasets": config.save_individual_datasets
+        }
+    }
+    
+    metadata_file = output_dir / f"experiment_metadata_{config.experiment_id}.json"
+    with open(metadata_file, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    logging.info("*** Processing complete!")
+    logging.info(f"*** Successfully processed: {processing_stats['successful']}/{processing_stats['total_pairs']} pairs")
+    logging.info(f"*** Insufficient data: {processing_stats['insufficient_data']} pairs")
+    logging.info(f"*** Failed: {processing_stats['failed']} pairs")
+    
+    return {
+        "experiment_id": config.experiment_id,
+        "status": "completed",
+        "processing_stats": processing_stats,
+        "output_directory": str(output_dir),
+        "combined_dataset_shape": combined_df.shape if combined_df is not None else None,
+        "metadata_file": str(metadata_file)
+    }
+
+def main():
+    """Main function to run feature engineering experiment."""
+    
+    # Create configuration
+    config = FeatureEngineeringConfig()
+    
+    # Run experiment
+    results = run_feature_engineering_experiment(config)
+    
+    print(f"\n*** Feature engineering completed!")
+    print(f"Experiment ID: {results['experiment_id']}")
+    print(f"Status: {results['status']}")
+    print(f"Processed: {results['processing_stats']['successful']}/{results['processing_stats']['total_pairs']} currency pairs")
+    
+    if results['combined_dataset_shape']:
+        print(f"Combined dataset shape: {results['combined_dataset_shape']}")
+    
+    print(f"Output directory: {results['output_directory']}")
+    print(f"Metadata saved: {results['metadata_file']}")
 
 if __name__ == "__main__":
-    # Create dataset for Divine Orb pricing (most valuable currency)
-    dataset = create_ml_dataset(
-        target_currency_pair=("Divine Orb", "Chaos Orb"),
-        months_back=12
-    )
-    
-    if dataset is not None:
-        save_dataset(dataset, "divine_orb_dataset.parquet")
-        
-        # Show sample of features
-        print("\nDataset Preview:")
-        print(dataset.head()[['date', 'price', 'league_name', 'recency_weight', 
-                            'momentum_7d', 'target_change_1d']].to_string())
-    else:
-        print("❌ Dataset creation failed") 
+    main() 
