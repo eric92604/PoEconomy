@@ -250,6 +250,7 @@ docker-compose.override.yml
 data/
 pg_backup/
 ml/training_data/
+ml/models/
 
 # Cursor files
 .cursor/
