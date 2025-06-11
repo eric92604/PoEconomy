@@ -542,7 +542,7 @@ class ImprovedCurrencyTrainer:
 def main():
     """Main function to run improved currency-specific training."""
     # Use relative path to work from ml/scripts directory
-    data_path = "../../ml/training_data/combined_currency_features_exp_20250611_013044.parquet"
+    data_path = "./ml/training_data/combined_currency_features_exp_20250611_162923.parquet"
     
     trainer = ImprovedCurrencyTrainer(data_path)
     

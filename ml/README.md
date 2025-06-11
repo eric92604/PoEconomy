@@ -9,9 +9,8 @@ This directory contains the **currency-specific machine learning implementation*
 ### Core Implementation (Production-Ready)
 ```
 scripts/
-├── train_models.py                     # 🎯 MAIN: Currency-specific training pipeline
-├── test_training.py                    # ✅ Testing script for validation
-└── currency_insights_summary.py         # 📊 Results summary and insights
+├── train_models.py                     # Currency-specific training pipeline
+├── test_training.py                    # Testing script for validation
 ```
 
 ### Analysis & Utilities
@@ -48,7 +47,7 @@ python train_models.py
 python test_training.py
 ```
 
-## 🔧 Key Technical Features
+## Key Technical Features
 
 ### Currency-Specific Approach
 - **Independent models** for each currency pair
@@ -69,7 +68,7 @@ python test_training.py
 - **Feature selection** using SelectKBest for high-dimensional data
 - **Outlier removal** with conservative IQR-based cleaning
 
-## 🚀 Production Deployment
+## Production Deployment
 
 ### Model Storage
 - Models saved as `.pkl` files in `ml/models/currency_specific/`
@@ -83,7 +82,7 @@ The currency-specific models are designed for:
 - **Automated retraining** with new market data
 - **Confidence scoring** for prediction reliability
 
-## 🔬 Implementation Details
+## Implementation Details
 
 ### Feature Engineering Pipeline
 **File**: `feature_engineering.py`

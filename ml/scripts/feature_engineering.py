@@ -42,7 +42,7 @@ class FeatureEngineeringConfig:
     
     # Automation parameters
     experiment_id: str = None
-    output_dir: str = "../training_data"
+    output_dir: str = "ml/training_data"
     log_level: str = "INFO"
     save_individual_datasets: bool = False
     create_combined_dataset: bool = True
@@ -73,43 +73,62 @@ def setup_logging(config: FeatureEngineeringConfig) -> logging.Logger:
 def get_priority_pairs() -> List[Tuple[str, str]]:
     """
     Get priority currency pairs by running identify_target_currencies.py
-    and parsing the output.
+    and parsing the output, with fallback to default pairs.
     
     Returns:
         List of (from_currency, to_currency) tuples
     """
     logging.info("*** Identifying priority currency pairs...")
     
-    # Run the identify_target_currencies script
-    result = subprocess.run(
-        [sys.executable, "identify_target_currencies.py"],
-        capture_output=True,
-        text=True,
-        cwd=Path(__file__).parent
-    )
+    try:
+        # Run the identify_target_currencies script
+        result = subprocess.run(
+            [sys.executable, "identify_target_currencies.py"],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).parent,
+            timeout=30  # Add timeout to prevent hanging
+        )
+        
+        if result.returncode == 0:
+            # Parse the output to extract currency pairs
+            priority_pairs = []
+            output_lines = result.stdout.strip().split('\n')
+            for line in output_lines:
+                if ' -> ' in line and '| P1 |' in line:
+                    # Extract currency pair from lines like "Divine Orb -> Chaos Orb | P1 |"
+                    parts = line.split(' -> ')
+                    if len(parts) >= 2:
+                        from_currency = parts[0].strip().split('.')[-1].strip()
+                        to_currency = parts[1].split('|')[0].strip()
+                        priority_pairs.append((from_currency, to_currency))
+            
+            if priority_pairs:
+                logging.info(f"*** Identified {len(priority_pairs)} priority pairs from script")
+                return priority_pairs
+        
+        logging.warning(f"Script failed or returned no pairs: {result.stderr}")
+            
+    except Exception as e:
+        logging.warning(f"Failed to run identify_target_currencies.py: {str(e)}")
     
-    if result.returncode != 0:
-        logging.error(f"Failed to run identify_target_currencies.py: {result.stderr}")
-        raise RuntimeError("Failed to identify target currencies")
+    # Fallback to hardcoded high-value currency pairs
+    fallback_pairs = [
+        ("Divine Orb", "Chaos Orb"),
+        ("Mirror of Kalandra", "Chaos Orb"),
+        ("Hinekora's Lock", "Chaos Orb"),
+        ("Exalted Orb", "Chaos Orb"),
+        ("Ancient Orb", "Chaos Orb"),
+        ("Annulment Orb", "Chaos Orb"),
+        ("Awakener's Orb", "Chaos Orb"),
+        ("Crusader's Exalted Orb", "Chaos Orb"),
+        ("Hunter's Exalted Orb", "Chaos Orb"),
+        ("Redeemer's Exalted Orb", "Chaos Orb"),
+        ("Warlord's Exalted Orb", "Chaos Orb")
+    ]
     
-    # For now, return empty list since we're focusing on architecture
-    # In actual implementation, parse the subprocess output
-    priority_pairs = []
-    
-    # Parse the output to extract currency pairs
-    # This is a simplified version - in reality, we'd parse the detailed output
-    output_lines = result.stdout.strip().split('\n')
-    for line in output_lines:
-        if ' -> ' in line and '| P1 |' in line:
-            # Extract currency pair from lines like "Divine Orb -> Chaos Orb | P1 |"
-            parts = line.split(' -> ')
-            if len(parts) >= 2:
-                from_currency = parts[0].strip().split('.')[-1].strip()
-                to_currency = parts[1].split('|')[0].strip()
-                priority_pairs.append((from_currency, to_currency))
-    
-    logging.info(f"*** Identified {len(priority_pairs)} priority pairs for processing")
-    return priority_pairs
+    logging.info(f"*** Using fallback currency pairs: {len(fallback_pairs)} pairs")
+    return fallback_pairs
 
 def get_league_phase_data(get_currency: str, pay_currency: str, config: FeatureEngineeringConfig) -> pd.DataFrame:
     """
@@ -133,7 +152,6 @@ def get_league_phase_data(get_currency: str, pay_currency: str, config: FeatureE
         cp."payCurrencyId",
         cp.date AT TIME ZONE 'UTC' as date,
         cp.value as price,
-        cp.confidence,
         l.name as league_name,
         l."startDate" AT TIME ZONE 'UTC' as league_start,
         l."endDate" AT TIME ZONE 'UTC' as league_end,
@@ -175,6 +193,13 @@ def engineer_league_metadata_features(df: pd.DataFrame, config: FeatureEngineeri
     
     This focuses on data preparation, NOT optimization.
     Recency weighting will be applied during model training.
+    
+    Args:
+        df: DataFrame with raw currency price data from PostgreSQL
+        config: Feature engineering configuration
+        
+    Returns:
+        DataFrame with engineered league metadata features
     """
     if len(df) == 0:
         return df
@@ -250,6 +275,18 @@ def engineer_league_metadata_features(df: pd.DataFrame, config: FeatureEngineeri
         )
         df[f'price_max_{window}d'] = df.groupby('league_name')['price'].transform(
             lambda x: x.rolling(window=window, min_periods=1).max()
+        )
+        
+        # Additional rolling features for better price modeling
+        df[f'price_median_{window}d'] = df.groupby('league_name')['price'].transform(
+            lambda x: x.rolling(window=window, min_periods=1).median()
+        )
+        df[f'price_range_{window}d'] = df[f'price_max_{window}d'] - df[f'price_min_{window}d']
+        
+        # Robust z-score calculation with proper handling of zero standard deviation
+        df[f'price_zscore_{window}d'] = df.groupby('league_name')['price'].transform(
+            lambda x: (x - x.rolling(window=window, min_periods=1).mean()) / 
+                     np.maximum(x.rolling(window=window, min_periods=1).std(), 1e-8)
         )
     
     # League-aware momentum and volatility
@@ -429,10 +466,21 @@ def run_feature_engineering_experiment(config: FeatureEngineeringConfig) -> Dict
                 
                 # Save individual dataset if configured
                 if config.save_individual_datasets:
-                    filename = f"{get_currency}_{pay_currency}_{config.experiment_id}.parquet"
-                    filepath = output_dir / filename
-                    df.to_parquet(filepath, index=False)
-                    logging.info(f"  *** Saved: {filepath}")
+                    try:
+                        # Clean currency names for safe filenames
+                        safe_get = get_currency.replace(" ", "_").replace("'", "")
+                        safe_pay = pay_currency.replace(" ", "_").replace("'", "")
+                        filename = f"{safe_get}_{safe_pay}_{config.experiment_id}.parquet"
+                        filepath = output_dir / filename
+                        
+                        # Ensure parent directory exists
+                        filepath.parent.mkdir(parents=True, exist_ok=True)
+                        
+                        df.to_parquet(filepath, index=False)
+                        logging.info(f"  *** Individual dataset saved: {filepath}")
+                        
+                    except Exception as e:
+                        logging.error(f"  *** Failed to save individual dataset for {get_currency}->{pay_currency}: {str(e)}")
                     
             else:
                 processing_stats["insufficient_data"] += 1
@@ -448,15 +496,24 @@ def run_feature_engineering_experiment(config: FeatureEngineeringConfig) -> Dict
     logging.info(f"    - processed_datasets length: {len(processed_datasets)}")
     
     if config.create_combined_dataset and processed_datasets:
-        logging.info("*** Creating combined dataset...")
-        combined_df = pd.concat(processed_datasets, ignore_index=True)
-        
-        # Save combined dataset
-        combined_filename = f"combined_currency_features_{config.experiment_id}.parquet"
-        combined_filepath = output_dir / combined_filename
-        combined_df.to_parquet(combined_filepath, index=False)
-        logging.info(f"*** Combined dataset saved: {combined_filepath}")
-        logging.info(f"*** Combined dataset shape: {combined_df.shape}")
+        try:
+            logging.info("*** Creating combined dataset...")
+            combined_df = pd.concat(processed_datasets, ignore_index=True)
+            
+            # Save combined dataset
+            combined_filename = f"combined_currency_features_{config.experiment_id}.parquet"
+            combined_filepath = output_dir / combined_filename
+            
+            # Ensure parent directory exists
+            combined_filepath.parent.mkdir(parents=True, exist_ok=True)
+            
+            combined_df.to_parquet(combined_filepath, index=False)
+            logging.info(f"*** Combined dataset saved: {combined_filepath}")
+            logging.info(f"*** Combined dataset shape: {combined_df.shape}")
+            
+        except Exception as e:
+            logging.error(f"Failed to save combined dataset: {str(e)}")
+            combined_df = None
     else:
         if not config.create_combined_dataset:
             logging.info("*** Combined dataset creation disabled in config")
@@ -475,9 +532,19 @@ def run_feature_engineering_experiment(config: FeatureEngineeringConfig) -> Dict
         }
     }
     
-    metadata_file = output_dir / f"experiment_metadata_{config.experiment_id}.json"
-    with open(metadata_file, 'w') as f:
-        json.dump(metadata, f, indent=2)
+    try:
+        metadata_file = output_dir / f"experiment_metadata_{config.experiment_id}.json"
+        # Ensure parent directory exists
+        metadata_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        logging.info(f"*** Experiment metadata saved: {metadata_file}")
+        
+    except Exception as e:
+        logging.error(f"Failed to save experiment metadata: {str(e)}")
+        metadata_file = output_dir / "metadata_save_failed.txt"
     
     logging.info("*** Processing complete!")
     logging.info(f"*** Successfully processed: {processing_stats['successful']}/{processing_stats['total_pairs']} pairs")
@@ -499,19 +566,35 @@ def main():
     # Create configuration
     config = FeatureEngineeringConfig()
     
-    # Run experiment
-    results = run_feature_engineering_experiment(config)
+    # Setup logging before processing
+    setup_logging(config)
     
-    print(f"\n*** Feature engineering completed!")
-    print(f"Experiment ID: {results['experiment_id']}")
-    print(f"Status: {results['status']}")
-    print(f"Processed: {results['processing_stats']['successful']}/{results['processing_stats']['total_pairs']} currency pairs")
+    # Ensure output directory exists and convert to absolute path
+    output_path = Path(config.output_dir).resolve()
+    config.output_dir = str(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
     
-    if results['combined_dataset_shape']:
-        print(f"Combined dataset shape: {results['combined_dataset_shape']}")
+    logging.info(f"Starting feature engineering experiment: {config.experiment_id}")
+    logging.info(f"Output directory: {config.output_dir}")
     
-    print(f"Output directory: {results['output_directory']}")
-    print(f"Metadata saved: {results['metadata_file']}")
+    try:
+        # Run experiment
+        results = run_feature_engineering_experiment(config)
+        
+        print(f"\n*** Feature engineering completed!")
+        print(f"Experiment ID: {results['experiment_id']}")
+        print(f"Status: {results['status']}")
+        print(f"Processed: {results['processing_stats']['successful']}/{results['processing_stats']['total_pairs']} currency pairs")
+        
+        if results['combined_dataset_shape']:
+            print(f"Combined dataset shape: {results['combined_dataset_shape']}")
+        
+        print(f"Output directory: {results['output_directory']}")
+        print(f"Metadata saved: {results['metadata_file']}")
+        
+    except Exception as e:
+        logging.error(f"Feature engineering failed: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     main() 
