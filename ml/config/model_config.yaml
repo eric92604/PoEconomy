@@ -1,0 +1,76 @@
+# Model Training Configuration
+
+# Data Settings
+data:
+  train_test_split: 0.8
+  validation_split: 0.1
+  time_series_split: 5
+  target_column: "price"
+  feature_columns:
+    - "current_price"
+    - "historical_prices"
+    - "price_volatility"
+    - "trade_volume"
+    - "supply_demand_ratio"
+    - "price_momentum"
+    - "league_age"
+    - "recency_weight"
+
+# LightGBM Settings
+lightgbm:
+  objective: "regression"
+  metric: "rmse"
+  boosting_type: "gbdt"
+  num_leaves: 31
+  learning_rate: 0.05
+  feature_fraction: 0.8
+  bagging_fraction: 0.8
+  bagging_freq: 5
+  min_child_samples: 20
+  num_iterations: 1000
+  early_stopping_rounds: 50
+
+# LSTM Settings
+lstm:
+  input_size: 72
+  hidden_size: 128
+  num_layers: 2
+  output_size: 1
+  batch_size: 32
+  num_epochs: 100
+  learning_rate: 0.001
+  dropout: 0.2
+
+# Prophet Settings
+prophet:
+  changepoint_prior_scale: 0.05
+  seasonality_prior_scale: 10.0
+  holidays_prior_scale: 10.0
+  seasonality_mode: "multiplicative"
+
+# Ensemble Settings
+ensemble:
+  weights:
+    lightgbm: 0.6
+    lstm: 0.3
+    prophet: 0.1
+
+# Training Settings
+training:
+  random_seed: 42
+  n_trials: 100
+  cv_folds: 5
+  early_stopping_patience: 10
+
+# Evaluation Metrics
+metrics:
+  - mae
+  - rmse
+  - mape
+  - directional_accuracy
+
+# Model Output
+output:
+  model_dir: "ml/models"
+  metrics_dir: "ml/metrics"
+  logs_dir: "ml/logs" 
