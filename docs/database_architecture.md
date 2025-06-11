@@ -45,7 +45,7 @@ Indexes: PK (id), UNIQUE (name), isBaseCurrency, name
 | getCurrencyId  | integer                           | no       |         | FK → currency(id) |
 | payCurrencyId  | integer                           | no       |         | FK → currency(id) |
 | date           | date                              | no       |         | Indexed     |
-| value          | numeric(10,5)                     | no       |         |              |
+| value          | numeric                           | no       |         |              |
 | confidence     | enum_currency_prices_confidence   | no       |         | Indexed     |
 | created        | timestamp with time zone          | no       | now()   |              |
 | updated        | timestamp with time zone          | no       | now()   |              |

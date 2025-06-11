@@ -6,13 +6,14 @@ This document outlines the comprehensive plan for training machine learning mode
 ## 1. Data Collection and Preparation
 
 ### 1.1 Data Sources
-- Historical league data from PostgreSQL database
+- Historical league data from PostgreSQL database (recent leagues prioritized for relevance)
 - Current league data from PoE API
 - Trade volume data
 
 ### 1.2 Data Features
 #### Time-based Features
 - League age (days since start)
+- Recency weight (higher for recent leagues, lower for older leagues)
 
 #### Currency-specific Features
 - Current price
@@ -31,12 +32,14 @@ This document outlines the comprehensive plan for training machine learning mode
    - Remove outliers
    - Normalize/standardize features
    - Handle timezone differences
+   - **Downweight or exclude data from older leagues with outdated economic systems**
 
 2. **Feature Engineering**
    - Create rolling statistics (mean, std, min, max)
    - Calculate price momentum indicators
    - Generate interaction features
    - Create lag features for time series
+   - **Add recency-based features or weights to emphasize recent league data**
 
 3. **Data Validation**
    - Verify data consistency
@@ -66,8 +69,9 @@ This document outlines the comprehensive plan for training machine learning mode
 ### 2.2 Model Training Strategy
 1. **Data Splitting**
    - Time-based cross-validation
-   - League-based validation
+   - League-based validation (recent leagues prioritized)
    - Hold-out test set
+   - **Consider recency weighting in training and validation splits**
 
 2. **Hyperparameter Tuning**
    - Bayesian optimization
@@ -137,6 +141,7 @@ This document outlines the comprehensive plan for training machine learning mode
    - Outliers
    - Data leakage
    - Timezone issues
+   - **Irrelevant or outdated trends from older leagues**
 
 2. **Model Issues**
    - Overfitting
@@ -254,6 +259,8 @@ This document outlines the comprehensive plan for training machine learning mode
 ## 10. Conclusion
 
 This plan provides a comprehensive framework for developing and deploying machine learning models for currency price forecasting in Path of Exile. By following this structured approach, we can create reliable, accurate predictions while maintaining system stability and performance.
+
+**Special consideration is given to the recency and relevance of league data, ensuring that recent leagues have a greater influence on model training and predictions, while older leagues are downweighted or excluded as appropriate.**
 
 The recommended model architecture combines the strengths of LightGBM and LSTM, with Prophet providing additional stability. This ensemble approach should provide robust predictions across different market conditions and league types.
 
