@@ -141,9 +141,9 @@ def check_data_quality():
     for col in quality_stats.columns:
         value = quality_stats[col].iloc[0]
         if value > 0 and col != 'total_records':
-            print(f"⚠️  {col}: {value}")
+            print(f"WARNING: {col}: {value}")
         elif col == 'total_records':
-            print(f"✅ {col}: {value:,}")
+            print(f"*** {col}: {value:,}")
     
     # Check date distribution
     date_dist_query = """

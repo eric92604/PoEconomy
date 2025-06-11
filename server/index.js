@@ -79,13 +79,13 @@ async function startServer() {
   try {
     // Test database connection
     await sequelize.authenticate();
-    console.log('✅ Database connection established successfully.');
+    console.log('*** Database connection established successfully.');
     
     app.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`);
-      console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-      console.log(`🔗 API status: http://localhost:${PORT}/api/status`);
+      console.log(`*** Server running on port ${PORT}`);
+      console.log(`*** Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`*** Health check: http://localhost:${PORT}/health`);
+      console.log(`*** API status: http://localhost:${PORT}/api/status`);
     });
   } catch (error) {
     console.error('❌ Unable to start server:', error);

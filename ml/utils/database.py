@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from typing import Optional
 
 # Load environment variables from server/.env
-load_dotenv(dotenv_path="server/.env")
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "server", ".env"))
 
 def get_db_connection():
     """
@@ -87,7 +87,7 @@ if __name__ == "__main__":
     # Test the connection when run directly
     print("Testing database connection...")
     if test_connection():
-        print("✅ Database connection successful!")
+        print("*** Database connection successful!")
         
         # Show table counts
         tables = ['leagues', 'currency', 'currency_prices', 'items', 'item_prices', 'predictions']
