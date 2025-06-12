@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from typing import List, Tuple, Dict, Optional, Any
 from dataclasses import dataclass, asdict
 from pathlib import Path
-import subprocess
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -36,8 +35,8 @@ class FeatureEngineeringConfig:
     min_records_after_cleaning: int = 30
     
     # Feature engineering parameters
-    rolling_windows: List[int] = None  # [3, 7, 14, 30]
-    prediction_horizons: List[int] = None  # [1, 3, 7]
+    rolling_windows: List[int] = None
+    prediction_horizons: List[int] = None
     include_league_features: bool = True
     
     # Automation parameters
@@ -72,8 +71,7 @@ def setup_logging(config: FeatureEngineeringConfig) -> logging.Logger:
 
 def get_priority_pairs() -> List[Tuple[str, str]]:
     """
-    Get priority currency pairs by running identify_target_currencies.py
-    and parsing the output, with fallback to default pairs.
+    Get priority currency pairs by directly calling identify_target_currencies functions.
     
     Returns:
         List of (from_currency, to_currency) tuples
@@ -81,54 +79,22 @@ def get_priority_pairs() -> List[Tuple[str, str]]:
     logging.info("*** Identifying priority currency pairs...")
     
     try:
-        # Run the identify_target_currencies script
-        result = subprocess.run(
-            [sys.executable, "identify_target_currencies.py"],
-            capture_output=True,
-            text=True,
-            cwd=Path(__file__).parent,
-            timeout=30  # Add timeout to prevent hanging
-        )
+        # Directly call the function to get currency pairs
+        target_pairs = generate_target_currency_list()
         
-        if result.returncode == 0:
-            # Parse the output to extract currency pairs
+        if target_pairs:
+            # Convert to simple tuple format expected by feature engineering
             priority_pairs = []
-            output_lines = result.stdout.strip().split('\n')
-            for line in output_lines:
-                if ' -> ' in line and '| P1 |' in line:
-                    # Extract currency pair from lines like "Divine Orb -> Chaos Orb | P1 |"
-                    parts = line.split(' -> ')
-                    if len(parts) >= 2:
-                        from_currency = parts[0].strip().split('.')[-1].strip()
-                        to_currency = parts[1].split('|')[0].strip()
-                        priority_pairs.append((from_currency, to_currency))
+            for pair in target_pairs:
+                priority_pairs.append((pair['get_currency'], pair['pay_currency']))
             
-            if priority_pairs:
-                logging.info(f"*** Identified {len(priority_pairs)} priority pairs from script")
-                return priority_pairs
-        
-        logging.warning(f"Script failed or returned no pairs: {result.stderr}")
+            logging.info(f"*** Identified {len(priority_pairs)} priority pairs from database analysis")
+            return priority_pairs
+        else:
+            logging.warning("No target pairs returned from database analysis")
             
     except Exception as e:
-        logging.warning(f"Failed to run identify_target_currencies.py: {str(e)}")
-    
-    # Fallback to hardcoded high-value currency pairs
-    fallback_pairs = [
-        ("Divine Orb", "Chaos Orb"),
-        ("Mirror of Kalandra", "Chaos Orb"),
-        ("Hinekora's Lock", "Chaos Orb"),
-        ("Exalted Orb", "Chaos Orb"),
-        ("Ancient Orb", "Chaos Orb"),
-        ("Annulment Orb", "Chaos Orb"),
-        ("Awakener's Orb", "Chaos Orb"),
-        ("Crusader's Exalted Orb", "Chaos Orb"),
-        ("Hunter's Exalted Orb", "Chaos Orb"),
-        ("Redeemer's Exalted Orb", "Chaos Orb"),
-        ("Warlord's Exalted Orb", "Chaos Orb")
-    ]
-    
-    logging.info(f"*** Using fallback currency pairs: {len(fallback_pairs)} pairs")
-    return fallback_pairs
+        logging.warning(f"Failed to get target currencies from database: {str(e)}")
 
 def get_league_phase_data(get_currency: str, pay_currency: str, config: FeatureEngineeringConfig) -> pd.DataFrame:
     """
@@ -214,7 +180,7 @@ def engineer_league_metadata_features(df: pd.DataFrame, config: FeatureEngineeri
     df = df.sort_values(['league_start', 'date']).reset_index(drop=True)
     
     # League age and timing features
-    df['league_age_days'] = df['league_day']  # Already calculated in SQL
+    df['league_age_days'] = df['league_day']
     df['days_into_league'] = df['league_age_days']
     
     # Calculate league recency metadata (for downstream weighting)
@@ -225,8 +191,8 @@ def engineer_league_metadata_features(df: pd.DataFrame, config: FeatureEngineeri
     # League phase indicators (discrete features)
     max_days = df['league_day'].max()
     if max_days > 0:
-        early_threshold = max_days * 0.3
-        late_threshold = max_days * 0.7
+        early_threshold = max_days * 0.2
+        late_threshold = max_days * 0.4
         
         df['league_phase_early'] = (df['league_day'] <= early_threshold).astype(int)
         df['league_phase_mid'] = ((df['league_day'] > early_threshold) & 
@@ -408,10 +374,15 @@ def process_currency_pair_league_based(get_currency: str, pay_currency: str, con
     # Add pair identifier
     df['currency_pair'] = f"{get_currency}_{pay_currency}"
     
+    # Ensure league_name is preserved for model evaluation
+    if 'league_name' not in df.columns:
+        logging.warning("League name information missing - this may affect model evaluation")
+    
     feature_count = len([c for c in df.columns if not c.startswith('target_')])
     target_count = len([c for c in df.columns if c.startswith('target_')])
     
     logging.info(f"  *** Processed: {len(df)} records, {feature_count} features, {target_count} targets")
+    logging.info(f"  *** League coverage: {df['league_name'].nunique()} leagues" if 'league_name' in df.columns else "  *** No league information available")
     
     return df
 
@@ -429,7 +400,6 @@ def run_feature_engineering_experiment(config: FeatureEngineeringConfig) -> Dict
     logging.info("*** LEAGUE-BASED CURRENCY FEATURE ENGINEERING")
     logging.info("=" * 80)
     logging.info(f"Experiment ID: {config.experiment_id}")
-    logging.info("Focus: Data preparation with league metadata for downstream recency weighting")
     logging.info("=" * 80)
     
     # Get priority currency pairs
@@ -510,6 +480,20 @@ def run_feature_engineering_experiment(config: FeatureEngineeringConfig) -> Dict
             combined_df.to_parquet(combined_filepath, index=False)
             logging.info(f"*** Combined dataset saved: {combined_filepath}")
             logging.info(f"*** Combined dataset shape: {combined_df.shape}")
+            
+            # Log league distribution for model evaluation planning
+            if 'league_name' in combined_df.columns:
+                league_dist = combined_df['league_name'].value_counts()
+                logging.info(f"*** League distribution in combined dataset:")
+                for league, count in league_dist.items():
+                    logging.info(f"    {league}: {count:,} records")
+                
+                if 'Settlers' in league_dist:
+                    logging.info(f"*** Settlers league data available for model evaluation: {league_dist['Settlers']:,} records")
+                else:
+                    logging.warning("*** No Settlers league data found - models will use standard evaluation")
+            else:
+                logging.warning("*** No league information in combined dataset - models will use standard evaluation")
             
         except Exception as e:
             logging.error(f"Failed to save combined dataset: {str(e)}")
