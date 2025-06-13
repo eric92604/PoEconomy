@@ -26,6 +26,14 @@ from optuna.pruners import MedianPruner
 from config.training_config import ModelConfig, ProcessingConfig
 from utils.logging_utils import MLLogger
 
+# Check for PyTorch availability
+try:
+    import torch
+    import torch.nn as nn
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
 
 @dataclass
 class ModelMetrics:
