@@ -1,12 +1,8 @@
-#!/usr/bin/env python3
 """
-This script implements a feature engineering pipeline with:
-- Centralized configuration management
-- Comprehensive data validation and quality checks
-- Modular feature engineering components
-- Robust error handling and recovery
-- Experiment tracking and reproducibility
-- Parallel processing capabilities
+Feature engineering pipeline module.
+
+This module contains the pipeline orchestration for feature engineering,
+separating the orchestration logic from the core feature engineering functionality.
 """
 
 import sys
@@ -30,7 +26,8 @@ warnings.filterwarnings('ignore')
 # Import utilities
 from config.training_config import MLConfig, DataConfig, ProcessingConfig, get_production_config
 from utils.logging_utils import setup_ml_logging, MLLogger, ProgressLogger
-from utils.data_processing import DataProcessor, DataValidator, FeatureEngineer, load_and_validate_data
+from utils.data_processing import DataProcessor, DataValidator
+from utils.feature_engineering import FeatureEngineer
 from utils.database import get_db_connection
 from utils.identify_target_currencies import generate_target_currency_list
 
@@ -103,7 +100,8 @@ class FeatureEngineeringPipeline:
             self.logger.info(f"Loaded raw data: {raw_data.shape}")
             
             # Get target currency pairs
-            target_currencies = generate_target_currency_list()
+            target_currency_data = generate_target_currency_list()
+            target_currencies = [f"{pair['get_currency']} -> {pair['pay_currency']}" for pair in target_currency_data]
             self.processing_stats['total_currency_pairs'] = len(target_currencies)
             
             self.logger.info(f"Processing {len(target_currencies)} currency pairs")
@@ -148,21 +146,45 @@ class FeatureEngineeringPipeline:
                 # Query to get currency price data with league information
                 query = """
                 SELECT 
-                    cp.currency_pair,
-                    cp.price,
-                    cp.date,
+                    cp.id,
+                    cp."leagueId",
+                    cp."getCurrencyId", 
+                    cp."payCurrencyId",
+                    cp.date AT TIME ZONE 'UTC' as date,
+                    cp.value as price,
                     l.name as league_name,
-                    l.start_date as league_start,
-                    l.end_date as league_end
+                    l."startDate" AT TIME ZONE 'UTC' as league_start,
+                    l."endDate" AT TIME ZONE 'UTC' as league_end,
+                    l."isActive" as league_active,
+                    gc.name as get_currency,
+                    pc.name as pay_currency,
+                    -- Create currency_pair column
+                    CONCAT(gc.name, ' -> ', pc.name) as currency_pair,
+                    -- Calculate days into league
+                    EXTRACT(DAY FROM (cp.date AT TIME ZONE 'UTC' - l."startDate" AT TIME ZONE 'UTC')) as league_day
                 FROM currency_prices cp
-                JOIN leagues l ON cp.league_id = l.id
-                WHERE cp.date >= l.start_date 
-                    AND (l.end_date IS NULL OR cp.date <= l.end_date)
-                    AND cp.date >= CURRENT_DATE - INTERVAL '2 years'  -- Limit to recent data
-                ORDER BY cp.currency_pair, cp.date
+                JOIN leagues l ON cp."leagueId" = l.id
+                JOIN currency gc ON cp."getCurrencyId" = gc.id
+                JOIN currency pc ON cp."payCurrencyId" = pc.id
+                WHERE cp.value > 0
+                    -- Only include data from the first X days of each league
+                    AND EXTRACT(DAY FROM (cp.date AT TIME ZONE 'UTC' - l."startDate" AT TIME ZONE 'UTC')) <= %s
+                    AND EXTRACT(DAY FROM (cp.date AT TIME ZONE 'UTC' - l."startDate" AT TIME ZONE 'UTC')) >= 0
+                    -- Only include leagues that lasted at least min_league_days
+                    AND (l."endDate" IS NULL OR 
+                        EXTRACT(DAY FROM (l."endDate" AT TIME ZONE 'UTC' - l."startDate" AT TIME ZONE 'UTC')) >= %s)
+                ORDER BY l."startDate" DESC, cp.date ASC
                 """
                 
-                df = pd.read_sql_query(query, conn)
+                # Pass the required parameters
+                df = pd.read_sql_query(
+                    query, 
+                    conn, 
+                    params=[
+                        self.config.data.max_league_days,
+                        self.config.data.min_league_days
+                    ]
+                )
                 conn.close()
                 
                 if df.empty:
@@ -173,10 +195,10 @@ class FeatureEngineeringPipeline:
                 df['date'] = pd.to_datetime(df['date'])
                 df['league_start'] = pd.to_datetime(df['league_start'])
                 
-                # Filter by league duration if configured
-                if self.config.data.max_league_days > 0:
+                # League day filtering is already done in SQL query
+                # Just ensure league_day column exists for other processing
+                if 'league_day' not in df.columns:
                     df['league_day'] = (df['date'] - df['league_start']).dt.days
-                    df = df[df['league_day'] <= self.config.data.max_league_days]
                 
                 self.logger.info(f"Loaded {len(df)} records for {df['currency_pair'].nunique()} currency pairs")
                 
@@ -200,7 +222,7 @@ class FeatureEngineeringPipeline:
         
         for currency_pair in target_currencies:
             try:
-                result = self._process_single_currency(raw_data, currency_pair)
+                result = self._process_currency_pair(raw_data, currency_pair)
                 if result is not None:
                     self.processed_datasets.append(result)
                     self.processing_stats['successful_processing'] += 1
@@ -239,7 +261,7 @@ class FeatureEngineeringPipeline:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_currency = {
-                executor.submit(self._process_single_currency_worker, raw_data, currency_pair): currency_pair
+                executor.submit(self._process_currency_pair_worker, raw_data, currency_pair): currency_pair
                 for currency_pair in target_currencies
             }
             
@@ -267,48 +289,49 @@ class FeatureEngineeringPipeline:
         
         progress.complete()
     
-    def _process_single_currency(self, raw_data: pd.DataFrame, currency_pair: str) -> Optional[pd.DataFrame]:
+    def _process_currency_pair(self, df: pd.DataFrame, currency_pair: str) -> Optional[pd.DataFrame]:
         """
         Process a single currency pair.
         
         Args:
-            raw_data: Raw dataframe
+            df: Complete dataframe
             currency_pair: Currency pair to process
             
         Returns:
-            Processed dataframe or None if failed
+            Processed dataframe for this currency pair or None if failed
         """
-        # Filter data for this currency pair
-        currency_data = raw_data[raw_data['currency_pair'] == currency_pair].copy()
-        
-        if len(currency_data) < self.config.data.min_records_per_pair:
-            self.logger.warning(
-                f"Insufficient data for {currency_pair}: {len(currency_data)} records"
-            )
-            self.processing_stats['insufficient_data'] += 1
-            return None
-        
-        # Process the data
-        processed_data, metadata = self.data_processor.process_currency_data(
-            currency_data, currency_pair
-        )
-        
-        if processed_data is None:
-            self.processing_stats['validation_failures'] += 1
-            return None
-        
-        # Update statistics
-        self.processing_stats['total_records_processed'] += len(processed_data)
-        self.processing_stats['total_features_created'] += len(processed_data.columns)
-        
-        # Save individual dataset if configured
-        if self.config.experiment.save_individual_datasets:
-            self._save_individual_dataset(processed_data, currency_pair)
-        
-        return processed_data
+        with self.logger.log_operation(f"Processing {currency_pair}"):
+            # Filter data for this currency pair
+            currency_data = df[df['currency_pair'] == currency_pair].copy()
+            
+            # Log initial data shape
+            self.logger.info(f"Initial data shape: {currency_data.shape}")
+            
+            # Process features
+            try:
+                processed_data, processing_metadata = self.data_processor.process_currency_data(
+                    currency_data,
+                    currency_pair
+                )
+                
+                if processed_data is None:
+                    self.logger.warning(f"Feature processing failed for {currency_pair}")
+                    return None
+                
+                # Log final data shape
+                self.logger.info(f"Final data shape: {processed_data.shape}")
+                
+                return processed_data
+                
+            except Exception as e:
+                self.logger.error(
+                    f"Error processing {currency_pair}",
+                    exception=e
+                )
+                return None
     
     @staticmethod
-    def _process_single_currency_worker(raw_data: pd.DataFrame, currency_pair: str) -> Optional[pd.DataFrame]:
+    def _process_currency_pair_worker(raw_data: pd.DataFrame, currency_pair: str) -> Optional[pd.DataFrame]:
         """
         Worker function for parallel processing.
         
@@ -322,9 +345,6 @@ class FeatureEngineeringPipeline:
         
         # Filter and process data
         currency_data = raw_data[raw_data['currency_pair'] == currency_pair].copy()
-        
-        if len(currency_data) < config.data.min_records_per_pair:
-            return None
         
         processed_data, _ = processor.process_currency_data(currency_data, currency_pair)
         return processed_data
