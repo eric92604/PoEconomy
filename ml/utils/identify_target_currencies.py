@@ -86,8 +86,7 @@ def generate_target_currency_list():
             'avg_value': currency['avg_price_chaos'],
             'max_value': currency['max_price_chaos'],
             'volatility': currency['price_volatility'] if currency['price_volatility'] is not None else 0,
-            'records': currency['total_records'],
-            'reason': 'High-average-value currency'
+            'records': currency['total_records']
         })
         median_val = currency['median_price_chaos'] if currency['median_price_chaos'] is not None else 0
         print(f"  {pair[0]} -> {pair[1]} (Min: {currency['min_price_chaos']:.1f}, "

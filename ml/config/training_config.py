@@ -25,15 +25,6 @@ class ModelConfig:
     # Model parameters
     random_state: int = 42
     test_size: float = 0.2
-    min_samples_required: int = 150
-    min_samples_after_cleaning: int = 30
-    
-    # Feature engineering
-    max_features: int = 50
-    feature_selection_k: int = 30
-    rolling_windows: List[int] = field(default_factory=lambda: [1, 3, 7, 14])
-    momentum_periods: List[int] = field(default_factory=lambda: [3, 7])
-    volatility_windows: List[int] = field(default_factory=lambda: [7, 14])
 
 
 @dataclass
@@ -44,14 +35,14 @@ class DataConfig:
     max_league_days: int = 60
     min_league_days: int = 0
     
-    # Data filtering
-    min_records_per_pair: int = 50
-    min_records_after_cleaning: int = 30
-    
     # Target variables
     prediction_horizons: List[int] = field(default_factory=lambda: [1, 3, 7])
     
-    # Feature engineering
+    # Feature engineering windows
+    rolling_windows: List[int] = field(default_factory=lambda: [1, 3, 5, 7])
+    momentum_periods: List[int] = field(default_factory=lambda: [3, 5, 7])
+    
+    # Feature engineering options
     include_league_features: bool = True
     outlier_removal_iqr_multiplier: float = 2.0
     
@@ -69,6 +60,10 @@ class ProcessingConfig:
     feature_selection: bool = True
     outlier_removal: bool = True
     advanced_cv: bool = True
+    
+    # Feature selection parameters
+    max_features: int = 75 
+    feature_selection_k: int = 30
     
     # Transformation thresholds
     log_transform_ratio_threshold: float = 10.0
@@ -170,12 +165,7 @@ class MLConfig:
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""
         from dataclasses import asdict
-        return asdict(self)
-    
-    def save(self, config_path: str) -> None:
-        """Save configuration to JSON file."""
-        import json
-        config_dict = self.to_dict()
+        config_dict = asdict(self)
         
         # Convert Path objects to strings for JSON serialization
         def convert_paths(obj):
@@ -187,7 +177,12 @@ class MLConfig:
                 return str(obj)
             return obj
         
-        config_dict = convert_paths(config_dict)
+        return convert_paths(config_dict)
+    
+    def save(self, config_path: str) -> None:
+        """Save configuration to JSON file."""
+        import json
+        config_dict = self.to_dict()
         
         with open(config_path, 'w') as f:
             json.dump(config_dict, f, indent=2)
@@ -218,7 +213,7 @@ def get_development_config() -> MLConfig:
     config = MLConfig()
     config.model.n_trials = 50  # Faster for development
     config.model.cv_folds = 3
-    config.logging.level = "DEBUG"
+    config.logging.level = "INFO"
     config.experiment.tags = ["development"]
     return config
 
@@ -228,20 +223,18 @@ def get_production_config() -> MLConfig:
     config = MLConfig()
     config.model.n_trials = 200
     config.model.cv_folds = 5
-    config.logging.level = "INFO"
+    config.logging.level = "WARNING"
     config.logging.suppress_lightgbm = True
     config.logging.suppress_optuna = True
     config.experiment.tags = ["production"]
     return config
 
 
-def get_testing_config() -> MLConfig:
+def get_test_config() -> MLConfig:
     """Get configuration optimized for testing."""
     config = MLConfig()
     config.model.n_trials = 10  # Very fast for testing
     config.model.cv_folds = 2
-    config.model.min_samples_required = 50
-    config.data.min_records_per_pair = 20
-    config.logging.level = "WARNING"
-    config.experiment.tags = ["testing"]
+    config.logging.level = "DEBUG"
+    config.experiment.tags = ["test"]
     return config 

@@ -139,10 +139,14 @@ class BaseModel(ABC):
             if X_val is not None:
                 X_val = self.scaler.transform(X_val)
         
-        # Fit model
-        if X_val is not None and y_val is not None:
-            self.model.fit(X, y, eval_set=[(X_val, y_val)], verbose=False)
+        # Fit model - always use validation data if available
+        model_type = type(self.model).__name__
+        
+        if X_val is not None and y_val is not None and model_type in ['LGBMRegressor', 'XGBRegressor']:
+            # Use validation data for models that support eval_set (keeps early stopping)
+            self.model.fit(X, y, eval_set=[(X_val, y_val)])
         else:
+            # For other models or when no validation data available
             self.model.fit(X, y)
         
         self.is_fitted = True
@@ -511,96 +515,74 @@ class ModelTrainer:
         Train a single model for a currency pair.
         
         Args:
-            X: Training features
-            y: Training targets
+            X: Feature matrix
+            y: Target values
             currency_pair: Currency pair identifier
             model_type: Type of model to train
             optimize_hyperparameters: Whether to optimize hyperparameters
             
         Returns:
-            TrainingResult with trained model and metrics
+            Training result
         """
         start_time = time.time()
         
-        with self.logger.log_operation(f"Training {model_type} model for {currency_pair}"):
-            # Split data
-            split_idx = int(len(X) * (1 - self.config.test_size))
-            X_train, X_test = X[:split_idx], X[split_idx:]
-            y_train, y_test = y[:split_idx], y[split_idx:]
-            
-            # Further split training data for validation
-            val_split_idx = int(len(X_train) * 0.8)
-            X_train_fit, X_val = X_train[:val_split_idx], X_train[val_split_idx:]
-            y_train_fit, y_val = y_train[:val_split_idx], y_train[val_split_idx:]
-            
-            if model_type == "ensemble":
-                model = self._train_ensemble_model(
-                    X_train_fit, y_train_fit, X_val, y_val,
-                    currency_pair, optimize_hyperparameters
-                )
-            else:
-                model = self._train_single_base_model(
-                    X_train_fit, y_train_fit, X_val, y_val,
-                    currency_pair, model_type, optimize_hyperparameters
-                )
-            
-            # Evaluate on test set
-            y_pred = model.predict(X_test)
-            metrics = ModelMetrics.from_predictions(y_test, y_pred)
-            
-            # Cross-validation scores
-            cv_scores = self._calculate_cv_scores(model, X_train, y_train)
-            
-            # Feature importance
-            feature_importance = None
-            if hasattr(model, 'get_feature_importance'):
-                feature_importance = model.get_feature_importance()
-            elif hasattr(model, 'models'):  # Ensemble
-                # Average feature importance across models
-                importances = []
-                for base_model in model.models:
-                    imp = base_model.get_feature_importance()
-                    if imp:
-                        importances.append(imp)
-                
-                if importances:
-                    # Average importances
-                    all_features = set()
-                    for imp in importances:
-                        all_features.update(imp.keys())
-                    
-                    feature_importance = {}
-                    for feature in all_features:
-                        values = [imp.get(feature, 0) for imp in importances]
-                        feature_importance[feature] = np.mean(values)
-            
-            training_time = time.time() - start_time
-            
-            # Get hyperparameters
+        # Split data into train/val
+        n_samples = len(X)
+        val_size = int(n_samples * self.config.test_size)
+        train_idx = np.arange(n_samples - val_size)
+        val_idx = np.arange(n_samples - val_size, n_samples)
+        
+        X_train, y_train = X[train_idx], y[train_idx]
+        X_val, y_val = X[val_idx], y[val_idx]
+        
+        # Train model
+        if model_type == "ensemble" and self.config.use_ensemble:
+            model = self._train_ensemble_model(
+                X_train, y_train,
+                X_val, y_val,
+                currency_pair,
+                optimize_hyperparameters
+            )
+        else:
+            model = self._train_single_base_model(
+                X_train, y_train,
+                X_val, y_val,
+                currency_pair,
+                model_type,
+                optimize_hyperparameters
+            )
+        
+        # Calculate metrics
+        y_pred = model.predict(X)
+        metrics = ModelMetrics.from_predictions(y, y_pred)
+        
+        # Calculate cross-validation scores if enough data
+        cv_scores = self._calculate_cv_scores(model, X, y)
+        
+        # Get feature importance
+        feature_importance = model.get_feature_importance() if hasattr(model, 'get_feature_importance') else None
+        
+        # Get hyperparameters
+        if hasattr(model, 'model') and hasattr(model.model, 'get_params'):
+            hyperparameters = model.model.get_params()
+        elif hasattr(model, 'get_params'):
+            hyperparameters = model.get_params()
+        else:
             hyperparameters = {}
-            if hasattr(model, 'model') and hasattr(model.model, 'get_params'):
-                hyperparameters = model.model.get_params()
-            elif hasattr(model, 'models'):  # Ensemble
-                hyperparameters = {
-                    f"{m.get_model_type()}_params": m.model.get_params() if hasattr(m.model, 'get_params') else {}
-                    for m in model.models
-                }
-            
-            self.logger.log_model_training_end(
-                currency_pair, model_type, metrics.to_dict(), training_time
-            )
-            
-            return TrainingResult(
-                model=model,
-                scaler=getattr(model, 'scaler', None),
-                metrics=metrics,
-                training_time=training_time,
-                hyperparameters=hyperparameters,
-                feature_importance=feature_importance,
-                cross_validation_scores=cv_scores,
-                model_type=model_type,
-                currency_pair=currency_pair
-            )
+        
+        training_time = time.time() - start_time
+        
+        return TrainingResult(
+            model=model,
+            scaler=getattr(model, 'scaler', None),
+            metrics=metrics,
+            training_time=training_time,
+            hyperparameters=hyperparameters,
+            feature_importance=feature_importance,
+            cross_validation_scores=cv_scores,
+            model_type=model.get_model_type(),
+            currency_pair=currency_pair
+        )
     
     def _train_ensemble_model(
         self,
@@ -719,8 +701,11 @@ def save_model_artifacts(
     Returns:
         Dictionary of saved file paths
     """
+    # Sanitize currency pair name for file system
+    safe_currency_pair = currency_pair.replace(" -> ", "_to_").replace("'", "").replace(":", "").replace("/", "_").replace("\\", "_").replace("?", "").replace("*", "").replace("|", "").replace("<", "").replace(">", "").replace('"', "")
+    
     # Create currency-specific directory
-    currency_dir = output_dir / currency_pair
+    currency_dir = output_dir / safe_currency_pair
     currency_dir.mkdir(parents=True, exist_ok=True)
     
     saved_files = {}
