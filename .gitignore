@@ -251,6 +251,7 @@ data/
 pg_backup/
 ml/training_data/
 ml/models/
+ml/investment_reports/
 
 # Cursor files
 .cursor/
