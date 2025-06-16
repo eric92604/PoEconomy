@@ -18,16 +18,11 @@ import os
 import json
 import numpy as np
 import pandas as pd
-import altair as alt
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
-
-# Configure Altair for better performance and interactivity
-alt.data_transformers.enable('json')
-alt.renderers.enable('html')
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -46,9 +41,6 @@ class InvestmentReportGenerator:
         self.logger = MLLogger("InvestmentReportGenerator")
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
-        
-        # Configure Altair theme for professional appearance
-        alt.themes.enable('fivethirtyeight')
         
         # Initialize predictor
         self.predictor = None
@@ -282,95 +274,81 @@ class InvestmentReportGenerator:
         else:
             return "🚫 AVOID"
     
-    def create_profit_prediction_chart(self, prediction_df: pd.DataFrame) -> alt.Chart:
-        """Create horizontal bar chart showing predicted profit percentages using Altair."""
-        # Get top 25 currencies by predicted return, including both positive and negative
-        top_currencies = prediction_df.nlargest(15, 'pred_1d')  # Top gainers
-        bottom_currencies = prediction_df.nsmallest(10, 'pred_1d')  # Biggest losers
+    def create_profit_prediction_summary(self, prediction_df: pd.DataFrame) -> str:
+        """Create HTML summary of profit predictions without charts."""
+        # Get top gainers and losers
+        top_gainers = prediction_df.nlargest(10, 'pred_1d')
+        top_losers = prediction_df.nsmallest(10, 'pred_1d')
         
-        # Combine and sort by prediction
-        selected_currencies = pd.concat([top_currencies, bottom_currencies]).sort_values('pred_1d', ascending=True)
+        html = f"""
+        <div style="margin: 20px 0;">
+            <h2 style="color: #2c3e50; text-align: center;">📊 Currency Profit Predictions Summary</h2>
+            
+            <div style="display: flex; justify-content: space-between; margin: 20px 0;">
+                
+                <div style="width: 48%; background: #d5f4e6; padding: 20px; border-radius: 10px;">
+                    <h3 style="color: #27ae60; text-align: center;">🚀 Top 10 Gainers (1-Day)</h3>
+                    <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+                        <thead>
+                            <tr style="background-color: #27ae60; color: white;">
+                                <th style="padding: 8px; text-align: left;">Currency</th>
+                                <th style="padding: 8px; text-align: right;">Return %</th>
+                                <th style="padding: 8px; text-align: right;">Confidence</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+        """
         
-        # Ensure we have clean data for bar scaling
-        selected_currencies = selected_currencies.dropna(subset=['pred_1d'])
-        selected_currencies = selected_currencies.reset_index(drop=True)
+        for _, row in top_gainers.iterrows():
+            html += f"""
+                            <tr style="background-color: white;">
+                                <td style="padding: 6px; border: 1px solid #ddd; font-weight: bold;">{row['currency']}</td>
+                                <td style="padding: 6px; border: 1px solid #ddd; text-align: right; color: #27ae60; font-weight: bold;">{row['pred_1d']:+.1f}%</td>
+                                <td style="padding: 6px; border: 1px solid #ddd; text-align: right;">{row['confidence_score']:.2f}</td>
+                            </tr>
+            """
         
-        # Add color coding column
-        selected_currencies['color'] = selected_currencies['pred_1d'].apply(
-            lambda x: '#27ae60' if x > 0 else '#e74c3c'
-        )
+        html += """
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div style="width: 48%; background: #fdeaea; padding: 20px; border-radius: 10px;">
+                    <h3 style="color: #e74c3c; text-align: center;">🔻 Top 10 Losers (1-Day)</h3>
+                    <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+                        <thead>
+                            <tr style="background-color: #e74c3c; color: white;">
+                                <th style="padding: 8px; text-align: left;">Currency</th>
+                                <th style="padding: 8px; text-align: right;">Return %</th>
+                                <th style="padding: 8px; text-align: right;">Confidence</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+        """
         
-        # Add profit/loss category for better visualization
-        selected_currencies['category'] = selected_currencies['pred_1d'].apply(
-            lambda x: 'Profit' if x > 0 else 'Loss'
-        )
+        for _, row in top_losers.iterrows():
+            html += f"""
+                            <tr style="background-color: white;">
+                                <td style="padding: 6px; border: 1px solid #ddd; font-weight: bold;">{row['currency']}</td>
+                                <td style="padding: 6px; border: 1px solid #ddd; text-align: right; color: #e74c3c; font-weight: bold;">{row['pred_1d']:+.1f}%</td>
+                                <td style="padding: 6px; border: 1px solid #ddd; text-align: right;">{row['confidence_score']:.2f}</td>
+                            </tr>
+            """
         
-        # Create the main bar chart
-        bars = alt.Chart(selected_currencies).mark_bar(
-            opacity=0.8,
-            stroke='white',
-            strokeWidth=1
-        ).encode(
-            x=alt.X(
-                'pred_1d:Q',
-                title='Predicted Profit/Loss (%)',
-                scale=alt.Scale(nice=True),
-                axis=alt.Axis(grid=True, tickCount=10, format='.1f')
-            ),
-            y=alt.Y(
-                'currency:N',
-                title='Currency',
-                sort=alt.SortField(field='pred_1d', order='ascending'),
-                axis=alt.Axis(labelLimit=200)
-            ),
-            color=alt.Color(
-                'category:N',
-                scale=alt.Scale(
-                    domain=['Profit', 'Loss'],
-                    range=['#27ae60', '#e74c3c']
-                ),
-                legend=alt.Legend(title="Category", orient="top-right")
-            ),
-            tooltip=[
-                alt.Tooltip('currency:N', title='Currency'),
-                alt.Tooltip('pred_1d:Q', title='Predicted 1-Day Return (%)', format='.1f'),
-                alt.Tooltip('current_price:Q', title='Current Price (c)', format='.2f'),
-                alt.Tooltip('predicted_price:Q', title='Predicted Price (c)', format='.2f'),
-                alt.Tooltip('confidence_score:Q', title='Confidence', format='.2f'),
-                alt.Tooltip('data_points_used:Q', title='Data Points')
-            ]
-        ).properties(
-            width=800,
-            height=600,
-            title=alt.TitleParams(
-                text="📊 Currency Profit Predictions (1-Day Horizon)",
-                fontSize=18,
-                anchor='start',
-                offset=20
-            )
-        )
+        html += """
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        """
         
-        # Add zero reference line
-        zero_line = alt.Chart(pd.DataFrame({'x': [0]})).mark_rule(
-            color='gray',
-            strokeDash=[5, 5],
-            strokeWidth=2,
-            opacity=0.7
-        ).encode(
-            x='x:Q'
-        )
-        
-        # Combine charts
-        chart = (bars + zero_line).resolve_scale(
-            color='independent'
-        ).interactive()
-        
-        return chart
+        return html
     
-    def create_enhanced_market_trends(self, market_df: pd.DataFrame) -> alt.Chart:
-        """Create enhanced line chart tracking currency values through the league using Altair."""
+    def create_market_trends_summary(self, market_df: pd.DataFrame) -> str:
+        """Create HTML summary of market trends without charts."""
         if market_df.empty:
-            return alt.Chart().mark_text(text="No market data available")
+            return "<p>No market data available for trend analysis.</p>"
         
         # Get currencies with sufficient data points and interesting price movements
         currency_stats = market_df.groupby('currency_name').agg({
@@ -383,86 +361,82 @@ class InvestmentReportGenerator:
             (currency_stats['data_points'] >= 5) &  # At least 5 data points
             (currency_stats['volatility'] > 0) &    # Some price movement
             (currency_stats['avg_price'] >= 1.0)    # Focus on more valuable currencies
-        ].sort_values(['avg_price', 'volatility'], ascending=[False, False]).head(12)
+        ].sort_values(['avg_price', 'volatility'], ascending=[False, False]).head(15)
         
-        # Filter market data to only include interesting currencies
-        filtered_data = market_df[market_df['currency_name'].isin(interesting_currencies.index)].copy()
-        
-        # Calculate price change percentage for each currency
+        # Calculate price changes for each currency
         price_changes = []
         for currency in interesting_currencies.index:
-            currency_data = filtered_data[filtered_data['currency_name'] == currency].sort_values('date')
+            currency_data = market_df[market_df['currency_name'] == currency].sort_values('date')
             if len(currency_data) > 1:
-                price_change = ((currency_data['price'].iloc[-1] - currency_data['price'].iloc[0]) / 
-                               currency_data['price'].iloc[0] * 100)
-                price_changes.append({'currency_name': currency, 'price_change': price_change})
+                first_price = currency_data['price'].iloc[0]
+                last_price = currency_data['price'].iloc[-1]
+                price_change = ((last_price - first_price) / first_price * 100)
+                
+                price_changes.append({
+                    'currency': currency,
+                    'first_price': first_price,
+                    'last_price': last_price,
+                    'price_change': price_change,
+                    'avg_price': interesting_currencies.loc[currency, 'avg_price'],
+                    'volatility': interesting_currencies.loc[currency, 'volatility'],
+                    'data_points': interesting_currencies.loc[currency, 'data_points']
+                })
         
-        price_change_df = pd.DataFrame(price_changes)
-        filtered_data = filtered_data.merge(price_change_df, on='currency_name', how='left')
+        # Sort by price change
+        price_changes.sort(key=lambda x: x['price_change'], reverse=True)
         
-        # Create currency labels with price change
-        filtered_data['currency_label'] = filtered_data.apply(
-            lambda row: f"{row['currency_name']} ({row['price_change']:+.1f}%)", axis=1
-        )
+        html = f"""
+        <div style="margin: 20px 0;">
+            <h2 style="color: #2c3e50; text-align: center;">📈 Market Trends Summary (Last 7 Days)</h2>
+            
+            <div style="background: #f8f9fa; padding: 20px; border-radius: 10px;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+                    <thead>
+                        <tr style="background-color: #34495e; color: white;">
+                            <th style="padding: 10px; text-align: left;">Currency</th>
+                            <th style="padding: 10px; text-align: right;">Start Price</th>
+                            <th style="padding: 10px; text-align: right;">Current Price</th>
+                            <th style="padding: 10px; text-align: right;">7-Day Change</th>
+                            <th style="padding: 10px; text-align: right;">Avg Price</th>
+                            <th style="padding: 10px; text-align: right;">Volatility</th>
+                            <th style="padding: 10px; text-align: center;">Data Points</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        """
         
-        # Create the line chart
-        lines = alt.Chart(filtered_data).mark_line(
-            point=True,
-            strokeWidth=3,
-            opacity=0.8
-        ).encode(
-            x=alt.X(
-                'date:T',
-                title='Date',
-                axis=alt.Axis(format='%m/%d', labelAngle=-45)
-            ),
-            y=alt.Y(
-                'price:Q',
-                title='Price (Chaos Orbs)',
-                scale=alt.Scale(type='log', nice=True),
-                axis=alt.Axis(format='.2f')
-            ),
-            color=alt.Color(
-                'currency_label:N',
-                title='Currency (% Change)',
-                scale=alt.Scale(scheme='category20'),
-                legend=alt.Legend(
-                    orient='right',
-                    titleLimit=200,
-                    labelLimit=200,
-                    columns=1
-                )
-            ),
-            tooltip=[
-                alt.Tooltip('currency_name:N', title='Currency'),
-                alt.Tooltip('date:T', title='Date', format='%Y-%m-%d %H:%M'),
-                alt.Tooltip('price:Q', title='Price (c)', format='.2f'),
-                alt.Tooltip('listing_count:Q', title='Listings'),
-                alt.Tooltip('confidence_level:Q', title='Confidence', format='.2f'),
-                alt.Tooltip('price_change:Q', title='Total Change (%)', format='.1f')
-            ]
-        ).properties(
-            width=900,
-            height=500,
-            title=alt.TitleParams(
-                text="📈 Currency Price Trends Throughout the League",
-                fontSize=18,
-                anchor='start',
-                offset=20
-            )
-        )
+        for i, change_data in enumerate(price_changes):
+            change_color = '#27ae60' if change_data['price_change'] > 0 else '#e74c3c'
+            row_bg = '#f8f9fa' if i % 2 == 0 else 'white'
+            
+            html += f"""
+                        <tr style="background-color: {row_bg};">
+                            <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">{change_data['currency']}</td>
+                            <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">{change_data['first_price']:.2f}c</td>
+                            <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">{change_data['last_price']:.2f}c</td>
+                            <td style="padding: 8px; border: 1px solid #ddd; text-align: right; color: {change_color}; font-weight: bold;">{change_data['price_change']:+.1f}%</td>
+                            <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">{change_data['avg_price']:.2f}c</td>
+                            <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">{change_data['volatility']:.2f}</td>
+                            <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">{change_data['data_points']}</td>
+                        </tr>
+            """
         
-        # Add interactive selection
-        chart = lines.add_selection(
-            alt.selection_multi(fields=['currency_label'])
-        ).transform_filter(
-            alt.datum.price > 0  # Filter out invalid prices
-        ).interactive()
+        html += """
+                    </tbody>
+                </table>
+            </div>
+            
+            <div style="margin-top: 15px; font-size: 12px; color: #7f8c8d; text-align: center;">
+                <p><strong>Note:</strong> Trends based on available market data from the last 7 days. 
+                Higher volatility indicates more price movement and potential trading opportunities.</p>
+            </div>
+        </div>
+        """
         
-        return chart
+        return html
     
-    def create_price_distribution_chart(self, prediction_df: pd.DataFrame) -> alt.Chart:
-        """Create a chart showing current price distribution of currencies using Altair."""
+    def create_price_distribution_summary(self, prediction_df: pd.DataFrame) -> str:
+        """Create HTML summary of price distribution analysis without charts."""
         # Group currencies by price ranges for better visualization
         currencies_data = []
         
@@ -491,111 +465,70 @@ class InvestmentReportGenerator:
         # Define range order for consistent display
         range_order = ["< 1c", "1-5c", "5-20c", "20-100c", "> 100c"]
         
-        # Create count data
-        range_counts = df_viz['range'].value_counts().reset_index()
-        range_counts.columns = ['range', 'count']
-        range_counts['chart_type'] = 'Currency Count'
+        # Create analysis data
+        range_analysis = []
+        for range_label in range_order:
+            range_data = df_viz[df_viz['range'] == range_label]
+            if len(range_data) > 0:
+                range_analysis.append({
+                    'range': range_label,
+                    'count': len(range_data),
+                    'avg_return': range_data['predicted_return'].mean(),
+                    'max_return': range_data['predicted_return'].max(),
+                    'min_return': range_data['predicted_return'].min(),
+                    'profitable_count': len(range_data[range_data['predicted_return'] > 0])
+                })
         
-        # Create average return data
-        avg_returns = df_viz.groupby('range')['predicted_return'].mean().reset_index()
-        avg_returns.columns = ['range', 'avg_return']
-        avg_returns['chart_type'] = 'Average Return'
-        avg_returns['return_category'] = avg_returns['avg_return'].apply(
-            lambda x: 'Profit' if x > 0 else 'Loss'
-        )
+        html = f"""
+        <div style="margin: 20px 0;">
+            <h2 style="color: #2c3e50; text-align: center;">💰 Currency Analysis by Price Range</h2>
+            
+            <div style="background: #f8f9fa; padding: 20px; border-radius: 10px;">
+                <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+                    <thead>
+                        <tr style="background-color: #34495e; color: white;">
+                            <th style="padding: 10px; text-align: left;">Price Range</th>
+                            <th style="padding: 10px; text-align: center;">Currency Count</th>
+                            <th style="padding: 10px; text-align: center;">Profitable Count</th>
+                            <th style="padding: 10px; text-align: right;">Avg Return %</th>
+                            <th style="padding: 10px; text-align: right;">Best Return %</th>
+                            <th style="padding: 10px; text-align: right;">Worst Return %</th>
+                            <th style="padding: 10px; text-align: center;">Success Rate</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        """
         
-        # Currency count chart
-        count_chart = alt.Chart(range_counts).mark_bar(
-            opacity=0.7,
-            color='lightblue'
-        ).encode(
-            x=alt.X(
-                'range:N',
-                title='Price Range',
-                sort=range_order,
-                axis=alt.Axis(labelAngle=-45)
-            ),
-            y=alt.Y(
-                'count:Q',
-                title='Number of Currencies'
-            ),
-            tooltip=[
-                alt.Tooltip('range:N', title='Price Range'),
-                alt.Tooltip('count:Q', title='Currency Count')
-            ]
-        ).properties(
-            width=350,
-            height=300,
-            title=alt.TitleParams(
-                text="Currency Count by Price Range",
-                fontSize=14,
-                anchor='start'
-            )
-        )
+        for i, analysis in enumerate(range_analysis):
+            success_rate = (analysis['profitable_count'] / analysis['count']) * 100
+            avg_return_color = '#27ae60' if analysis['avg_return'] > 0 else '#e74c3c'
+            row_bg = '#f8f9fa' if i % 2 == 0 else 'white'
+            
+            html += f"""
+                        <tr style="background-color: {row_bg};">
+                            <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">{analysis['range']}</td>
+                            <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">{analysis['count']}</td>
+                            <td style="padding: 8px; border: 1px solid #ddd; text-align: center; color: #27ae60;">{analysis['profitable_count']}</td>
+                            <td style="padding: 8px; border: 1px solid #ddd; text-align: right; color: {avg_return_color}; font-weight: bold;">{analysis['avg_return']:+.1f}%</td>
+                            <td style="padding: 8px; border: 1px solid #ddd; text-align: right; color: #27ae60;">{analysis['max_return']:+.1f}%</td>
+                            <td style="padding: 8px; border: 1px solid #ddd; text-align: right; color: #e74c3c;">{analysis['min_return']:+.1f}%</td>
+                            <td style="padding: 8px; border: 1px solid #ddd; text-align: center; color: {'#27ae60' if success_rate >= 50 else '#f39c12' if success_rate >= 30 else '#e74c3c'};">{success_rate:.0f}%</td>
+                        </tr>
+            """
         
-        # Average return chart
-        return_chart = alt.Chart(avg_returns).mark_bar(
-            opacity=0.8
-        ).encode(
-            x=alt.X(
-                'range:N',
-                title='Price Range',
-                sort=range_order,
-                axis=alt.Axis(labelAngle=-45)
-            ),
-            y=alt.Y(
-                'avg_return:Q',
-                title='Average Predicted Return (%)',
-                axis=alt.Axis(format='.1f')
-            ),
-            color=alt.Color(
-                'return_category:N',
-                scale=alt.Scale(
-                    domain=['Profit', 'Loss'],
-                    range=['#27ae60', '#e74c3c']
-                ),
-                legend=None
-            ),
-            tooltip=[
-                alt.Tooltip('range:N', title='Price Range'),
-                alt.Tooltip('avg_return:Q', title='Average Return (%)', format='.1f')
-            ]
-        ).properties(
-            width=350,
-            height=300,
-            title=alt.TitleParams(
-                text="Average Return by Price Range",
-                fontSize=14,
-                anchor='start'
-            )
-        )
+        html += """
+                    </tbody>
+                </table>
+            </div>
+            
+            <div style="margin-top: 15px; font-size: 12px; color: #7f8c8d; text-align: center;">
+                <p><strong>Analysis:</strong> Success rate = percentage of currencies with positive predicted returns. 
+                Higher-priced currencies often show more stable but lower percentage returns.</p>
+            </div>
+        </div>
+        """
         
-        # Add zero reference line to return chart
-        zero_line = alt.Chart(pd.DataFrame({'y': [0]})).mark_rule(
-            color='gray',
-            strokeDash=[3, 3],
-            strokeWidth=1
-        ).encode(y='y:Q')
-        
-        return_chart_with_line = return_chart + zero_line
-        
-        # Combine charts horizontally
-        combined_chart = alt.hconcat(
-            count_chart,
-            return_chart_with_line,
-            spacing=50
-        ).resolve_scale(
-            color='independent'
-        ).properties(
-            title=alt.TitleParams(
-                text="💰 Currency Analysis by Price Range",
-                fontSize=16,
-                anchor='start',
-                offset=20
-            )
-        )
-        
-        return combined_chart
+        return html
     
     def create_investment_recommendations_table(self, prediction_df: pd.DataFrame) -> str:
         """Create HTML table with investment recommendations including prediction intervals."""
@@ -787,17 +720,17 @@ class InvestmentReportGenerator:
         # Calculate prediction metrics
         prediction_df = self.calculate_prediction_metrics(self.predictions_data)
         
-        # Create visualizations
-        self.logger.info("📊 Creating visualizations...")
+        # Create analysis summaries
+        self.logger.info("📊 Creating analysis summaries...")
         
-        # Profit Prediction Chart
-        profit_prediction_fig = self.create_profit_prediction_chart(prediction_df)
+        # Profit Prediction Summary
+        profit_prediction_summary = self.create_profit_prediction_summary(prediction_df)
         
-        # Enhanced Market Trends
-        trend_fig = self.create_enhanced_market_trends(self.market_data)
+        # Market Trends Summary
+        market_trends_summary = self.create_market_trends_summary(self.market_data)
         
-        # Price Distribution Chart
-        price_distribution_fig = self.create_price_distribution_chart(prediction_df)
+        # Price Distribution Summary
+        price_distribution_summary = self.create_price_distribution_summary(prediction_df)
         
         # Generate timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -813,15 +746,11 @@ class InvestmentReportGenerator:
                 body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background: #f8f9fa; }}
                 .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px; margin-bottom: 30px; }}
                 .section {{ background: white; padding: 20px; margin: 20px 0; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
-                .chart-container {{ margin: 20px 0; text-align: center; }}
                 .summary-stats {{ display: flex; justify-content: space-around; margin: 20px 0; }}
                 .stat-box {{ background: #3498db; color: white; padding: 20px; border-radius: 10px; text-align: center; min-width: 150px; }}
                 .stat-value {{ font-size: 2em; font-weight: bold; }}
                 .stat-label {{ font-size: 0.9em; opacity: 0.9; }}
             </style>
-            <script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
-            <script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
-            <script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
         </head>
         <body>
             <div class="header">
@@ -867,33 +796,19 @@ class InvestmentReportGenerator:
             </div>
         """
         
-        # Add charts
+        # Add analysis summaries
         html_content += f"""
             <div class="section">
-                <div class="chart-container" id="profit-prediction-chart"></div>
+                {profit_prediction_summary}
             </div>
             
             <div class="section">
-                <div class="chart-container" id="trend-chart"></div>
+                {market_trends_summary}
             </div>
             
             <div class="section">
-                <div class="chart-container" id="price-distribution-chart"></div>
+                {price_distribution_summary}
             </div>
-            
-            <script>
-                // Profit Prediction Chart
-                var profitPredictionSpec = {profit_prediction_fig.to_json()};
-                vegaEmbed('#profit-prediction-chart', profitPredictionSpec, {{"actions": false}});
-                
-                // Trend Chart
-                var trendSpec = {trend_fig.to_json()};
-                vegaEmbed('#trend-chart', trendSpec, {{"actions": false}});
-                
-                // Price Distribution Chart
-                var priceDistributionSpec = {price_distribution_fig.to_json()};
-                vegaEmbed('#price-distribution-chart', priceDistributionSpec, {{"actions": false}});
-            </script>
             
             <div class="section">
                 <h2>⚠️ Disclaimer</h2>
