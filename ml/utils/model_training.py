@@ -94,7 +94,7 @@ class TrainingResult:
     feature_importance: Optional[Dict[str, float]]
     cross_validation_scores: Optional[List[float]]
     model_type: str
-    currency_pair: str
+    currency: str
 
 
 class BaseModel(ABC):
@@ -413,7 +413,7 @@ class HyperparameterOptimizer:
         model_class: type,
         X: np.ndarray,
         y: np.ndarray,
-        currency_pair: str,
+        currency: str,
         cv_folds: int = 5
     ) -> Tuple[BaseModel, Dict[str, Any]]:
         """
@@ -423,7 +423,7 @@ class HyperparameterOptimizer:
             model_class: Model class to optimize
             X: Training features
             y: Training targets
-            currency_pair: Currency pair identifier
+            currency: Currency identifier
             cv_folds: Number of cross-validation folds
             
         Returns:
@@ -453,7 +453,7 @@ class HyperparameterOptimizer:
             return np.mean(scores)
         
         # Create study
-        study_name = f"optimize_{currency_pair}_{model_class.__name__}"
+        study_name = f"optimize_{currency}_{model_class.__name__}"
         study = optuna.create_study(
             direction='minimize',
             sampler=TPESampler(seed=self.config.random_state),
@@ -462,7 +462,7 @@ class HyperparameterOptimizer:
         )
         
         # Optimize
-        with self.logger.log_operation(f"Hyperparameter optimization for {currency_pair}"):
+        with self.logger.log_operation(f"Hyperparameter optimization for {currency}"):
             study.optimize(objective, n_trials=self.config.n_trials, show_progress_bar=False)
         
         # Create best model
@@ -478,7 +478,7 @@ class HyperparameterOptimizer:
                 setattr(best_model.model, clean_param_name, param_value)
         
         self.logger.info(
-            f"Optimization completed for {currency_pair}",
+            f"Optimization completed for {currency}",
             extra={
                 "best_score": study.best_value,
                 "n_trials": len(study.trials),

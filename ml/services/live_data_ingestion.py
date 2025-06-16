@@ -3,7 +3,7 @@
 Live Data Ingestion Service
 
 This service continuously fetches live currency data from poe.ninja API
-and integrates it with the PoEconomy prediction system for real-time analysis.
+and stores it to the database for analysis.
 """
 
 import sys
@@ -19,54 +19,40 @@ import argparse
 sys.path.append(str(Path(__file__).parent.parent))
 
 from utils.poe_ninja_client import PoENinjaClient, CurrencyData
-from utils.model_inference import ModelPredictor
 from utils.logging_utils import MLLogger
-from config.training_config import MLConfig
 
 
 class LiveDataIngestionService:
     """
-    Service for continuous live data ingestion and real-time predictions.
+    Service for continuous live data ingestion.
     
-    This service fetches data from poe.ninja, stores it to the database,
-    and optionally generates real-time predictions.
+    This service fetches data from poe.ninja and stores it to the database.
     """
     
     def __init__(
         self,
-        config: Optional[MLConfig] = None,
         logger: Optional[MLLogger] = None,
         fetch_interval: int = 300,  # 5 minutes
-        prediction_interval: int = 1800,  # 30 minutes
-        enable_predictions: bool = True
     ):
         """
         Initialize the live data ingestion service.
         
         Args:
-            config: ML configuration
             logger: Logger instance
             fetch_interval: Data fetch interval in seconds
-            prediction_interval: Prediction generation interval in seconds
-            enable_predictions: Whether to generate predictions
         """
-        self.config = config or MLConfig()
         self.logger = logger or MLLogger("LiveDataIngestion")
         self.fetch_interval = fetch_interval
-        self.prediction_interval = prediction_interval
-        self.enable_predictions = enable_predictions
         
         # Service state
         self.running = False
         self.last_fetch_time = None
-        self.last_prediction_time = None
         
         # Components
         self.ninja_client = None
-        self.predictor = None
         
         # Leagues to monitor
-        self.monitored_leagues = ['Standard', 'Hardcore']
+        self.monitored_leagues = ['Mercenaries']
         
         # Price change alerts
         self.alert_thresholds = {
@@ -81,8 +67,6 @@ class LiveDataIngestionService:
         self.stats = {
             'total_fetches': 0,
             'successful_fetches': 0,
-            'total_predictions': 0,
-            'successful_predictions': 0,
             'currencies_tracked': 0,
             'alerts_generated': 0,
             'start_time': None,
@@ -100,29 +84,6 @@ class LiveDataIngestionService:
                 rate_limit_delay=1.0,
                 timeout=30
             )
-            
-            # Initialize predictor if predictions are enabled
-            if self.enable_predictions:
-                try:
-                    # Find latest model directory
-                    models_base = Path("models")
-                    if models_base.exists():
-                        currency_dirs = [d for d in models_base.iterdir() 
-                                       if d.is_dir() and d.name.startswith('currency_')]
-                        if currency_dirs:
-                            latest_dir = max(currency_dirs, key=lambda d: d.stat().st_mtime)
-                            self.predictor = ModelPredictor(latest_dir, self.config, self.logger)
-                            available_models = self.predictor.load_available_models()
-                            self.logger.info(f"Loaded {len(available_models)} prediction models")
-                        else:
-                            self.logger.warning("No trained models found - predictions disabled")
-                            self.enable_predictions = False
-                    else:
-                        self.logger.warning("Models directory not found - predictions disabled")
-                        self.enable_predictions = False
-                except Exception as e:
-                    self.logger.error(f"Failed to initialize predictor: {str(e)}")
-                    self.enable_predictions = False
             
             self.stats['start_time'] = datetime.now()
             self.logger.info("Service initialization completed")
@@ -286,119 +247,6 @@ class LiveDataIngestionService:
         except Exception as e:
             self.logger.error(f"Failed to store alert to database: {str(e)}")
     
-    async def generate_predictions(self) -> bool:
-        """
-        Generate predictions using current data.
-        
-        Returns:
-            True if successful, False otherwise
-        """
-        if not self.enable_predictions or not self.predictor:
-            return False
-        
-        try:
-            self.stats['total_predictions'] += 1
-            self.logger.info("Generating real-time predictions...")
-            
-            # Get top predictions
-            predictions = self.predictor.get_top_predictions(
-                top_n=20,
-                sort_by='price_change_percent',
-                ascending=False
-            )
-            
-            if predictions:
-                self.logger.info(f"Generated {len(predictions)} predictions")
-                
-                # Log top 5 predictions
-                self.logger.info("Top 5 predictions:")
-                for i, pred in enumerate(predictions[:5], 1):
-                    self.logger.info(
-                        f"  {i}. {pred.currency_pair}: "
-                        f"{pred.current_price:.2f} -> {pred.predicted_price:.2f} "
-                        f"({pred.price_change_percent:+.1f}%)"
-                    )
-                
-                # Store predictions to database
-                await self.store_predictions(predictions)
-                
-                self.stats['successful_predictions'] += 1
-                self.last_prediction_time = datetime.now()
-                return True
-            else:
-                self.logger.warning("No predictions generated")
-                return False
-                
-        except Exception as e:
-            self.logger.error(f"Error generating predictions: {str(e)}")
-            self.stats['last_error'] = str(e)
-            return False
-    
-    async def store_predictions(self, predictions):
-        """
-        Store predictions to database.
-        
-        Args:
-            predictions: List of prediction results
-        """
-        try:
-            from utils.database import get_db_connection
-            
-            conn = get_db_connection()
-            
-            # Create predictions table if it doesn't exist
-            create_predictions_table = """
-            CREATE TABLE IF NOT EXISTS live_predictions (
-                id SERIAL PRIMARY KEY,
-                currency_pair VARCHAR(100) NOT NULL,
-                current_price DECIMAL(20, 8) NOT NULL,
-                predicted_price DECIMAL(20, 8) NOT NULL,
-                price_change_percent DECIMAL(10, 4),
-                confidence_score DECIMAL(5, 4),
-                prediction_horizon_days INTEGER,
-                model_type VARCHAR(50),
-                features_used INTEGER,
-                data_points_used INTEGER,
-                prediction_time TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_live_predictions_currency_time 
-            ON live_predictions(currency_pair, prediction_time);
-            """
-            
-            with conn.cursor() as cursor:
-                cursor.execute(create_predictions_table)
-                
-                # Insert predictions
-                for pred in predictions:
-                    insert_prediction = """
-                    INSERT INTO live_predictions 
-                    (currency_pair, current_price, predicted_price, price_change_percent,
-                     confidence_score, prediction_horizon_days, model_type, 
-                     features_used, data_points_used)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """
-                    
-                    cursor.execute(insert_prediction, (
-                        pred.currency_pair,
-                        pred.current_price,
-                        pred.predicted_price,
-                        pred.price_change_percent,
-                        pred.confidence_score,
-                        pred.prediction_horizon_days,
-                        pred.model_type,
-                        pred.features_used,
-                        pred.data_points_used
-                    ))
-                
-                conn.commit()
-            
-            conn.close()
-            self.logger.info(f"Stored {len(predictions)} predictions to database")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to store predictions: {str(e)}")
-    
     def get_service_status(self) -> Dict:
         """Get current service status and statistics."""
         uptime = None
@@ -409,10 +257,7 @@ class LiveDataIngestionService:
             'running': self.running,
             'uptime_seconds': uptime.total_seconds() if uptime else 0,
             'last_fetch_time': self.last_fetch_time.isoformat() if self.last_fetch_time else None,
-            'last_prediction_time': self.last_prediction_time.isoformat() if self.last_prediction_time else None,
             'fetch_interval': self.fetch_interval,
-            'prediction_interval': self.prediction_interval,
-            'predictions_enabled': self.enable_predictions,
             'monitored_leagues': self.monitored_leagues,
             'statistics': self.stats.copy()
         }
@@ -433,21 +278,15 @@ class LiveDataIngestionService:
                 )
                 
                 if should_fetch:
-                    await self.fetch_and_store_data()
-                
-                # Check if it's time to generate predictions
-                should_predict = (
-                    self.enable_predictions and
-                    (self.last_prediction_time is None or
-                     (datetime.now() - self.last_prediction_time).total_seconds() >= self.prediction_interval)
-                )
-                
-                if should_predict:
-                    await self.generate_predictions()
+                    data_updated = await self.fetch_and_store_data()
+                    
+                    # If data was successfully updated, trigger investment report generation
+                    if data_updated:
+                        await self.trigger_investment_report()
                 
                 # Calculate sleep time to maintain interval
                 loop_duration = (datetime.now() - loop_start).total_seconds()
-                sleep_time = max(0, min(self.fetch_interval, self.prediction_interval) - loop_duration)
+                sleep_time = max(0, self.fetch_interval - loop_duration)
                 
                 if sleep_time > 0:
                     await asyncio.sleep(sleep_time)
@@ -460,6 +299,27 @@ class LiveDataIngestionService:
         finally:
             self.running = False
             self.logger.info("Service loop stopped")
+    
+    async def trigger_investment_report(self):
+        """Trigger investment report generation when data is updated."""
+        try:
+            self.logger.info("Data updated - triggering investment report generation...")
+            
+            # Import and run the investment report generator
+            sys.path.append(str(Path(__file__).parent.parent / "scripts"))
+            from generate_investment_report import InvestmentReportGenerator
+            
+            # Run investment report generation in a separate task to avoid blocking
+            generator = InvestmentReportGenerator()
+            report_path = generator.generate_comprehensive_report()
+            
+            if report_path:
+                self.logger.info(f"Investment report generated: {report_path}")
+            else:
+                self.logger.warning("Failed to generate investment report")
+                
+        except Exception as e:
+            self.logger.error(f"Error triggering investment report: {str(e)}")
     
     async def start(self):
         """Start the service."""
@@ -491,23 +351,10 @@ def parse_arguments():
     )
     
     parser.add_argument(
-        '--prediction-interval',
-        type=int,
-        default=1800,
-        help='Prediction generation interval in seconds (default: 1800)'
-    )
-    
-    parser.add_argument(
-        '--disable-predictions',
-        action='store_true',
-        help='Disable prediction generation'
-    )
-    
-    parser.add_argument(
         '--leagues',
         nargs='*',
-        default=['Standard', 'Hardcore'],
-        help='Leagues to monitor (default: Standard Hardcore)'
+        default=['Mercenaries'],
+        help='Leagues to monitor (default: Mercenaries)'
     )
     
     parser.add_argument(
@@ -530,9 +377,7 @@ async def main():
     # Create service
     service = LiveDataIngestionService(
         logger=logger,
-        fetch_interval=args.fetch_interval,
-        prediction_interval=args.prediction_interval,
-        enable_predictions=not args.disable_predictions
+        fetch_interval=args.fetch_interval
     )
     
     service.monitored_leagues = args.leagues
@@ -549,8 +394,6 @@ async def main():
     try:
         logger.info("Starting Live Data Ingestion Service")
         logger.info(f"Fetch interval: {args.fetch_interval}s")
-        logger.info(f"Prediction interval: {args.prediction_interval}s")
-        logger.info(f"Predictions enabled: {not args.disable_predictions}")
         logger.info(f"Monitored leagues: {args.leagues}")
         
         await service.start()

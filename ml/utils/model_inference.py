@@ -842,21 +842,21 @@ class ModelPredictor:
             except Exception as e:
                 self.logger.warning(f"Failed to calculate prediction intervals for {currency}: {e}")
                 # Fallback to simple confidence calculation
-            training_metrics = metadata.get('metrics', {})
-            r2_score = training_metrics.get('r2', 0)
-            confidence_score = max(0, min(1, (r2_score + 1) / 2))  # Convert R² to 0-1 scale
-            
-            # Simple interval based on prediction magnitude
-            margin = abs(predicted_price) * 0.2
-            lower_bound = predicted_price - margin
-            upper_bound = predicted_price + margin
-            interval_width = upper_bound - lower_bound
-            method = "fallback_r2"
-            uncertainty_components = {
-                'r2_score': r2_score,
-                'fallback_margin': 0.2,
-                'error': str(e)
-            }
+                training_metrics = metadata.get('metrics', {})
+                r2_score = training_metrics.get('r2', 0)
+                confidence_score = max(0, min(1, (r2_score + 1) / 2))  # Convert R² to 0-1 scale
+                
+                # Simple interval based on prediction magnitude
+                margin = abs(predicted_price) * 0.2
+                lower_bound = predicted_price - margin
+                upper_bound = predicted_price + margin
+                interval_width = upper_bound - lower_bound
+                method = "fallback_r2"
+                uncertainty_components = {
+                    'r2_score': r2_score,
+                    'fallback_margin': 0.2,
+                    'error': str(e)
+                }
             
             result = PredictionResult(
                 currency=currency,
@@ -982,21 +982,21 @@ class ModelPredictor:
                 except Exception as e:
                     self.logger.warning(f"Failed to calculate prediction intervals for {currency}: {e}")
                     # Fallback to simple confidence calculation
-                training_metrics = metadata.get('metrics', {})
-                r2_score = training_metrics.get('r2', 0)
-                confidence_score = max(0, min(1, (r2_score + 1) / 2))  # Convert R² to 0-1 scale
-                    
-                # Simple interval based on prediction magnitude
-                margin = abs(predicted_price) * 0.2
-                lower_bound = predicted_price - margin
-                upper_bound = predicted_price + margin
-                interval_width = upper_bound - lower_bound
-                method = "fallback_r2"
-                uncertainty_components = {
-                    'r2_score': r2_score,
-                    'fallback_margin': 0.2,
-                    'error': str(e)
-                }
+                    training_metrics = metadata.get('metrics', {})
+                    r2_score = training_metrics.get('r2', 0)
+                    confidence_score = max(0, min(1, (r2_score + 1) / 2))  # Convert R² to 0-1 scale
+                        
+                    # Simple interval based on prediction magnitude
+                    margin = abs(predicted_price) * 0.2
+                    lower_bound = predicted_price - margin
+                    upper_bound = predicted_price + margin
+                    interval_width = upper_bound - lower_bound
+                    method = "fallback_r2"
+                    uncertainty_components = {
+                        'r2_score': r2_score,
+                        'fallback_margin': 0.2,
+                        'error': str(e)
+                    }
                 
                 result = PredictionResult(
                     currency=currency,

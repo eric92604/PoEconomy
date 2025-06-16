@@ -599,32 +599,33 @@ class InvestmentReportGenerator:
     
     def create_investment_recommendations_table(self, prediction_df: pd.DataFrame) -> str:
         """Create HTML table with investment recommendations including prediction intervals."""
-        # Sort by predicted return (best returns first)
-        top_investments = prediction_df.sort_values('pred_1d', ascending=False).head(20)
+        # Sort by predicted return (best returns first) - include ALL opportunities
+        all_investments = prediction_df.sort_values('pred_1d', ascending=False)
         
-        html = """
+        html = f"""
         <div style="margin: 20px 0;">
-            <h2 style="color: #2c3e50; text-align: center;">🏆 Top Investment Opportunities with Prediction Intervals</h2>
-            <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-family: Arial, sans-serif; font-size: 12px;">
-                <thead>
-                    <tr style="background-color: #34495e; color: white;">
-                        <th style="padding: 8px; text-align: left; border: 1px solid #ddd;">Rank</th>
-                        <th style="padding: 8px; text-align: left; border: 1px solid #ddd;">Currency</th>
-                        <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Current Price</th>
-                        <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Predicted Price</th>
-                        <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Prediction Range</th>
-                        <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">1d Return %</th>
-                        <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Absolute Profit</th>
-                        <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Confidence</th>
-                        <th style="padding: 8px; text-align: center; border: 1px solid #ddd;">Data Points</th>
-                        <th style="padding: 8px; text-align: center; border: 1px solid #ddd;">Quality Score</th>
-                        <th style="padding: 8px; text-align: center; border: 1px solid #ddd;">Recommendation</th>
-                    </tr>
-                </thead>
-                <tbody>
+            <h2 style="color: #2c3e50; text-align: center;">🏆 All Investment Opportunities with Prediction Intervals ({len(all_investments)} currencies)</h2>
+            <div style="max-height: 600px; overflow-y: auto; border: 1px solid #ddd; border-radius: 5px;">
+                <table style="width: 100%; border-collapse: collapse; font-family: Arial, sans-serif; font-size: 11px;">
+                    <thead style="position: sticky; top: 0; z-index: 10;">
+                        <tr style="background-color: #34495e; color: white;">
+                            <th style="padding: 10px 8px; text-align: left; border: 1px solid #ddd; min-width: 50px;">Rank</th>
+                            <th style="padding: 10px 8px; text-align: left; border: 1px solid #ddd; min-width: 180px;">Currency</th>
+                            <th style="padding: 10px 8px; text-align: right; border: 1px solid #ddd; min-width: 80px;">Current Price</th>
+                            <th style="padding: 10px 8px; text-align: right; border: 1px solid #ddd; min-width: 80px;">Predicted Price</th>
+                            <th style="padding: 10px 8px; text-align: right; border: 1px solid #ddd; min-width: 100px;">Prediction Range</th>
+                            <th style="padding: 10px 8px; text-align: right; border: 1px solid #ddd; min-width: 80px;">1d Return %</th>
+                            <th style="padding: 10px 8px; text-align: right; border: 1px solid #ddd; min-width: 80px;">Absolute Profit</th>
+                            <th style="padding: 10px 8px; text-align: right; border: 1px solid #ddd; min-width: 70px;">Confidence</th>
+                            <th style="padding: 10px 8px; text-align: center; border: 1px solid #ddd; min-width: 70px;">Data Points</th>
+                            <th style="padding: 10px 8px; text-align: center; border: 1px solid #ddd; min-width: 70px;">Quality Score</th>
+                            <th style="padding: 10px 8px; text-align: center; border: 1px solid #ddd; min-width: 120px;">Recommendation</th>
+                        </tr>
+                    </thead>
+                    <tbody>
         """
         
-        for i, (_, row) in enumerate(top_investments.iterrows(), 1):
+        for i, (_, row) in enumerate(all_investments.iterrows(), 1):
             # Get recommendation and color
             recommendation = row['investment_recommendation']
             
@@ -650,24 +651,32 @@ class InvestmentReportGenerator:
             profit_color = '#27ae60' if absolute_profit > 0 else '#e74c3c'
             
             html += f"""
-                <tr style="background-color: {'#f8f9fa' if i % 2 == 0 else 'white'};">
-                    <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">{i}</td>
-                    <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">{row['currency']}</td>
+                <tr style="background-color: {'#f8f9fa' if i % 2 == 0 else 'white'}; {'border-left: 4px solid #27ae60;' if row['pred_1d'] > 50 else 'border-left: 4px solid #e74c3c;' if row['pred_1d'] < -20 else ''}">
+                    <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold; text-align: center;">{i}</td>
+                    <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold; max-width: 180px; word-wrap: break-word;">{row['currency']}</td>
                     <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">{row['current_price']:.2f}c</td>
                     <td style="padding: 8px; border: 1px solid #ddd; text-align: right; color: {'#27ae60' if row['pred_1d'] > 0 else '#e74c3c'}; font-weight: bold;">{row['predicted_price']:.2f}c</td>
-                    <td style="padding: 8px; border: 1px solid #ddd; text-align: right; font-size: 11px;">{pred_range}</td>
+                    <td style="padding: 8px; border: 1px solid #ddd; text-align: right; font-size: 10px;">{pred_range}</td>
                     <td style="padding: 8px; border: 1px solid #ddd; text-align: right; color: {'#27ae60' if row['pred_1d'] > 0 else '#e74c3c'}; font-weight: bold;">{row['pred_1d']:+.1f}%</td>
                     <td style="padding: 8px; border: 1px solid #ddd; text-align: right; color: {profit_color}; font-weight: bold;">{absolute_profit:+.2f}c</td>
                     <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">{row['confidence_score']:.2f}</td>
                     <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">{row['data_points_used']}</td>
                     <td style="padding: 8px; border: 1px solid #ddd; text-align: center; color: {'#27ae60' if row['quality_score'] > 70 else '#f39c12' if row['quality_score'] > 40 else '#e74c3c'};">{row['quality_score']:.0f}</td>
-                    <td style="padding: 8px; border: 1px solid #ddd; text-align: center; color: {rec_color}; font-weight: bold; font-size: 11px;">{recommendation}</td>
+                    <td style="padding: 8px; border: 1px solid #ddd; text-align: center; color: {rec_color}; font-weight: bold; font-size: 10px;">{recommendation}</td>
                 </tr>
             """
         
         html += """
-                </tbody>
-            </table>
+                    </tbody>
+                </table>
+            </div>
+            <div style="margin-top: 10px; font-size: 12px; color: #7f8c8d; text-align: center;">
+                <p><strong>Legend:</strong> 
+                Green left border = High profit potential (>50%) | 
+                Red left border = High loss potential (<-20%) | 
+                Scroll to view all currencies
+                </p>
+            </div>
         </div>
         """
         
