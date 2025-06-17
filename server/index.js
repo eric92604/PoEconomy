@@ -24,6 +24,14 @@ app.use('/api/', limiter);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// Serve static files from public directory
+app.use(express.static('public'));
+
+// Route to serve the dashboard
+app.get('/dashboard', (req, res) => {
+  res.sendFile('index.html', { root: 'public' });
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
@@ -56,6 +64,7 @@ app.use('/api/currency', require('./routes/currency'));
 app.use('/api/item', require('./routes/item'));
 app.use('/api/prediction', require('./routes/prediction'));
 app.use('/api/data', require('./routes/data'));
+app.use('/api/dashboard', require('./routes/dashboard'));
 
 // Error handling middleware
 app.use((err, req, res, next) => {
