@@ -86,7 +86,7 @@ class TrainingResult:
     feature_importance: Optional[Dict[str, float]]
     cross_validation_scores: Optional[List[float]]
     model_type: str
-    currency_pair: str
+    currency: str
 
 
 class BaseModel(ABC):
@@ -405,7 +405,7 @@ class HyperparameterOptimizer:
         model_class: type,
         X: np.ndarray,
         y: np.ndarray,
-        currency_pair: str,
+        currency: str,
         cv_folds: int = 5
     ) -> Tuple[BaseModel, Dict[str, Any]]:
         """
@@ -415,7 +415,7 @@ class HyperparameterOptimizer:
             model_class: Model class to optimize
             X: Training features
             y: Training targets
-            currency_pair: Currency pair identifier
+            currency: Currency identifier
             cv_folds: Number of cross-validation folds
             
         Returns:
@@ -445,7 +445,7 @@ class HyperparameterOptimizer:
             return np.mean(scores)
         
         # Create study
-        study_name = f"optimize_{currency_pair}_{model_class.__name__}"
+        study_name = f"optimize_{currency}_{model_class.__name__}"
         study = optuna.create_study(
             direction='minimize',
             sampler=TPESampler(seed=self.config.random_state),
@@ -454,7 +454,7 @@ class HyperparameterOptimizer:
         )
         
         # Optimize
-        with self.logger.log_operation(f"Hyperparameter optimization for {currency_pair}"):
+        with self.logger.log_operation(f"Hyperparameter optimization for {currency}"):
             study.optimize(objective, n_trials=self.config.n_trials, show_progress_bar=False)
         
         # Create best model
@@ -470,7 +470,7 @@ class HyperparameterOptimizer:
                 setattr(best_model.model, clean_param_name, param_value)
         
         self.logger.info(
-            f"Optimization completed for {currency_pair}",
+            f"Optimization completed for {currency}",
             extra={
                 "best_score": study.best_value,
                 "n_trials": len(study.trials),
@@ -640,6 +640,24 @@ class ModelTrainer:
             'random_forest': RandomForestModel
         }
         
+        # Add Prophet models for different horizons
+        if model_type.startswith('prophet_'):
+            from utils.prophet_models import ProphetModel
+            
+            # Extract horizon from model type (e.g., 'prophet_1d', 'prophet_3d', 'prophet_7d')
+            horizon_str = model_type.split('_')[1]  # e.g., '1d', '3d', '7d'
+            horizon_days = int(horizon_str.replace('d', ''))  # e.g., 1, 3, 7
+            
+            model = ProphetModel(self.config, horizon_days, self.logger)
+            model.model = model._create_model()
+            
+            # Prophet requires special handling for training data
+            # We need to pass the original dataframe with date column
+            # This is a limitation - we need to modify the training pipeline
+            # For now, we'll use the standard fit method
+            model.fit(X_train, y_train, X_val, y_val)
+            return model
+        
         if model_type not in model_classes:
             raise ValueError(f"Unknown model type: {model_type}")
         
@@ -738,35 +756,4 @@ def save_model_artifacts(
         json.dump(metadata, f, indent=2, default=str)
     saved_files['metadata'] = str(metadata_path)
     
-    return saved_files
-
-
-def load_model_artifacts(model_dir: Path) -> Tuple[Any, Optional[Any], Dict[str, Any]]:
-    """
-    Load model artifacts from disk.
-    
-    Args:
-        model_dir: Directory containing model artifacts
-        
-    Returns:
-        Tuple of (model, scaler, metadata)
-    """
-    # Load model
-    model_path = model_dir / "ensemble_model.pkl"
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model file not found: {model_path}")
-    
-    model = joblib.load(model_path)
-    
-    # Load scaler if exists
-    scaler_path = model_dir / "scaler.pkl"
-    scaler = joblib.load(scaler_path) if scaler_path.exists() else None
-    
-    # Load metadata
-    metadata_path = model_dir / "model_metadata.json"
-    metadata = {}
-    if metadata_path.exists():
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
-    
-    return model, scaler, metadata 
+    return saved_files 

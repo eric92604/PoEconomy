@@ -113,11 +113,22 @@ class ModelTrainingPipeline:
             
             self.logger.info(f"Loaded training data: {df.shape}", extra=load_metadata)
             
-            # Get target currencies
-            target_currencies = generate_target_currency_list()
+            # Get target currencies with availability filtering
+            target_currencies = generate_target_currency_list(
+                filter_by_availability=self.config.data.filter_by_availability,
+                only_available_currencies=self.config.data.only_train_available_currencies,
+                availability_check_days=self.config.data.availability_check_days
+            )
             self.processing_stats['total_currencies'] = len(target_currencies)
             
-            self.logger.info(f"Training models for {len(target_currencies)} currency pairs")
+            # Log availability filtering status
+            if self.config.data.filter_by_availability:
+                available_count = sum(1 for pair in target_currencies if pair.get('is_available', True))
+                self.logger.info(f"Availability filtering enabled: {available_count}/{len(target_currencies)} currency pairs available")
+            else:
+                self.logger.info("Availability filtering disabled - training all currency pairs")
+            
+            self.logger.info(f"Training models for {len(target_currencies)} currencies")
             
             # Initialize progress tracking
             progress = ProgressLogger(
@@ -125,20 +136,20 @@ class ModelTrainingPipeline:
             )
             
             # Process each currency
-            for currency_pair in target_currencies:
+            for currency in target_currencies:
                 try:
-                    result = self._train_currency_model(df, currency_pair)
+                    result = self._train_currency_model(df, currency)
                     if result:
                         self.results.append(result)
                         self.processing_stats['successful_training'] += 1
                     
                 except Exception as e:
                     self.logger.error(
-                        f"Failed to train model for {currency_pair}",
+                        f"Failed to train model for {currency}",
                         exception=e
                     )
                     self.failed_currencies.append({
-                        'currency_pair': currency_pair,
+                        'currency': currency,
                         'error': str(e),
                         'timestamp': datetime.now().isoformat()
                     })
@@ -168,23 +179,23 @@ class ModelTrainingPipeline:
             self.logger.error("Training pipeline failed", exception=e)
             raise
     
-    def _train_currency_model(self, df: pd.DataFrame, currency_pair: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _train_currency_model(self, df: pd.DataFrame, currency: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Train model for a single currency pair.
+        Train model for a single currency.
         
         Args:
             df: Complete training dataframe (already feature-engineered)
-            currency_pair: Currency pair dictionary with get_currency and pay_currency
+            currency: Currency dictionary with get_currency and pay_currency
             
         Returns:
             Training result dictionary or None if failed
         """
-        currency_pair_name = f"{currency_pair['get_currency']} -> {currency_pair['pay_currency']}"
-        with self.logger.log_operation(f"Training model for {currency_pair_name}"):
+        currency_name = currency['get_currency']  # Payment currency is always Chaos Orb
+        with self.logger.log_operation(f"Training model for {currency_name}"):
             # Get currency IDs from database
-            currency_ids = self._get_currency_ids(currency_pair['get_currency'], currency_pair['pay_currency'])
+            currency_ids = self._get_currency_ids(currency['get_currency'], currency['pay_currency'])
             if not currency_ids:
-                self.logger.warning(f"Could not find currency IDs for {currency_pair_name}")
+                self.logger.warning(f"Could not find currency IDs for {currency_name}")
                 return None
             
             get_currency_id, pay_currency_id = currency_ids
@@ -195,11 +206,26 @@ class ModelTrainingPipeline:
                 (df['payCurrencyId'] == pay_currency_id)
             ].copy()
             
+            # Log league distribution for this currency
+            if 'league_name' in currency_data.columns:
+                league_dist = currency_data['league_name'].value_counts()
+                self.logger.info(f"League distribution for {currency_name}:")
+                for league, count in league_dist.items():
+                    self.logger.info(f"  {league}: {count:,} records")
+                
+                # Check for Settlers data
+                settlers_data = currency_data[currency_data['league_name'].str.contains('Settlers', case=False, na=False)]
+                if not settlers_data.empty:
+                    self.logger.info(f"Settlers data available for training: {len(settlers_data):,} records")
+                else:
+                    self.logger.warning(f"No Settlers data found for {currency_name}")
+            
             # Data is already processed by feature engineering - use directly
             processed_data = currency_data
             processing_metadata = {
                 'original_samples': len(currency_data),
-                'source': 'feature_engineering_pipeline'
+                'source': 'feature_engineering_pipeline',
+                'leagues_included': list(currency_data['league_name'].unique()) if 'league_name' in currency_data.columns else []
             }
             
             # Prepare features and targets
@@ -207,7 +233,7 @@ class ModelTrainingPipeline:
             target_column = self._get_target_column(processed_data)
             
             if not feature_columns or target_column not in processed_data.columns:
-                self.logger.warning(f"Invalid features/targets for {currency_pair_name}")
+                self.logger.warning(f"Invalid features/targets for {currency_name}")
                 self.processing_stats['validation_failures'] += 1
                 return None
             
@@ -220,9 +246,12 @@ class ModelTrainingPipeline:
             target_valid_mask = ~pd.isna(y)
             X = X[target_valid_mask]
             y = y[target_valid_mask]
+            
+            # Also filter the processed_data to maintain league information
+            processed_data = processed_data[target_valid_mask].reset_index(drop=True)
 
             if len(X) == 0:
-                self.logger.warning(f"No valid target values for {currency_pair_name}")
+                self.logger.warning(f"No valid target values for {currency_name}")
                 return None
 
             self.logger.info(
@@ -239,6 +268,9 @@ class ModelTrainingPipeline:
             valid_rows = row_nan_ratio <= 0.7
             X = X[valid_rows]
             y = y[valid_rows]
+            
+            # Also filter processed_data
+            processed_data = processed_data[valid_rows].reset_index(drop=True)
 
             self.logger.info(
                 f"Row NaN filtering results:",
@@ -246,70 +278,58 @@ class ModelTrainingPipeline:
                     'samples_before': len(row_nan_ratio),
                     'samples_after': len(X),
                     'removed_samples': len(row_nan_ratio) - len(X),
-                    'max_nan_ratio': float(row_nan_ratio.max()),
-                    'mean_nan_ratio': float(row_nan_ratio.mean())
+                    'max_nan_ratio': float(row_nan_ratio.max()) if len(row_nan_ratio) > 0 else 0,
+                    'mean_nan_ratio': float(row_nan_ratio.mean()) if len(row_nan_ratio) > 0 else 0
                 }
             )
 
-            if len(X) < 10:  # Need at least 10 samples for training
-                self.logger.warning(f"Insufficient samples after cleaning: {len(X)} for {currency_pair_name}")
+            # 3. Impute remaining NaN values with median (column-wise)
+            if np.isnan(X).any():
+                imputer = SimpleImputer(strategy='median')
+                X = imputer.fit_transform(X)
+                self.logger.info(f"Applied median imputation for remaining NaN values")
+
+            if len(X) < 50:
+                self.logger.warning(f"Insufficient data for {currency_name}: {len(X)} samples")
+                self.processing_stats['insufficient_data'] += 1
                 return None
 
-            self.logger.info(f"Training on {len(X)} samples for {currency_pair_name}")
-
-            # 3. Handle remaining NaN values in features using simple imputation
-            imputer = SimpleImputer(strategy='median')
-            X = imputer.fit_transform(X)
-
-            self.logger.info(
-                f"Imputation results:",
-                extra={
-                    'final_shape': X.shape,
-                    'final_nan_count': np.isnan(X).sum(),
-                    'imputation_strategy': 'median'
-                }
-            )
-            
-            # 4. Final validation - should be no NaN values after imputation
-            if np.any(pd.isna(X)) or np.any(pd.isna(y)):
-                self.logger.warning(f"NaN values remain after imputation for {currency_pair_name}")
-                return None
-            
             # Train model
             training_result = self.model_trainer.train_single_model(
-                X, y, currency_pair_name,
-                model_type="ensemble",
-                optimize_hyperparameters=True
+                X, y, currency_name
+            )
+            
+            if training_result is None:
+                self.logger.error(f"Model training failed for {currency_name}")
+                return None
+
+            # Enhanced evaluation with league-specific metrics
+            evaluation_results = self._evaluate_model_comprehensive(
+                processed_data, training_result, currency_name, feature_columns, target_column
             )
             
             # Save model artifacts
-            if self.config.experiment.save_model_artifacts:
-                saved_files = save_model_artifacts(
-                    training_result,
-                    self.config.paths.models_dir,
-                    currency_pair_name
-                )
-                self.logger.info(f"Saved model artifacts for {currency_pair_name}", extra=saved_files)
-            
-            # Evaluate on Settlers league if available
-            settlers_metrics = self._evaluate_on_settlers(
-                processed_data, training_result, currency_pair_name
+            model_info = save_model_artifacts(
+                training_result,
+                self.config.paths.models_dir,
+                currency_name
             )
-            
-            # Compile result
+
+            # Compile final results
             result = {
-                'currency_pair': currency_pair_name,
-                'model_type': training_result.model_type,
-                'data_points': len(X),
-                'training_metrics': training_result.metrics.to_dict(),
-                'training_time': training_result.training_time,
-                'hyperparameters': training_result.hyperparameters,
-                'feature_importance': training_result.feature_importance,
-                'cross_validation_scores': training_result.cross_validation_scores,
+                'currency': currency_name,
+                'get_currency': currency['get_currency'],
+                'pay_currency': currency['pay_currency'],
+                'training_samples': len(X),
+                'training_metrics': training_result.metrics,
+                'evaluation_results': evaluation_results,
+                'model_info': model_info,
                 'processing_metadata': processing_metadata,
-                'settlers_evaluation': settlers_metrics,
-                'training_timestamp': datetime.now().isoformat()
+                'feature_count': len(feature_columns),
+                'leagues_in_training': processing_metadata.get('leagues_included', [])
             }
+            
+            self.logger.info(f"Successfully trained model for {currency_name}")
             
             return result
     
@@ -384,87 +404,149 @@ class ModelTrainingPipeline:
             self.logger.error(f"Failed to get currency IDs for {get_currency} -> {pay_currency}", exception=e)
             return None
     
-    def _evaluate_on_settlers(
-        self,
-        df: pd.DataFrame,
-        training_result: Any,
-        currency_pair: str
-    ) -> Optional[Dict[str, Any]]:
-        """Evaluate model on Settlers league data if available."""
-        if 'league_name' not in df.columns:
-            return None
+    def _evaluate_model_comprehensive(
+        self, 
+        df: pd.DataFrame, 
+        training_result: Any, 
+        currency: str,
+        feature_columns: List[str],
+        target_column: str
+    ) -> Dict[str, Any]:
+        """
+        Comprehensive model evaluation including league-specific metrics.
         
-        settlers_data = df[df['league_name'] == 'Settlers'].copy()
+        Args:
+            df: Complete dataframe with league information
+            training_result: Trained model result
+            currency: Currency name
+            feature_columns: List of feature column names
+            target_column: Target column name
+            
+        Returns:
+            Dictionary containing comprehensive evaluation metrics
+        """
+        evaluation_results = {
+            'overall_metrics': None,
+            'league_specific_metrics': {},
+            'settlers_detailed_metrics': None,
+            'data_quality_metrics': {}
+        }
         
         try:
-            # Prepare features and targets
-            feature_columns = self._get_feature_columns(settlers_data)
-            target_column = self._get_target_column(settlers_data)
+            # Overall evaluation
+            X = df[feature_columns].values
+            y = df[target_column].values
             
-            X = settlers_data[feature_columns].values
-            y = settlers_data[target_column].values
-            
-            # Remove any NaN values
+            # Remove NaN values
             valid_mask = ~(pd.isna(X).any(axis=1) | pd.isna(y))
-            X = X[valid_mask]
-            y = y[valid_mask]
+            X_valid = X[valid_mask]
+            y_valid = y[valid_mask]
+            df_valid = df[valid_mask].reset_index(drop=True)
             
-            # Make predictions
-            y_pred = training_result.model.predict(X)
-            
-            # Calculate metrics
-            metrics = {
-                'mae': mean_absolute_error(y, y_pred),
-                'rmse': np.sqrt(mean_squared_error(y, y_pred)),
-                'r2': r2_score(y, y_pred),
-                'samples': len(y)
-            }
-            
-            return metrics
+            if len(X_valid) > 0:
+                # Impute any remaining NaN values
+                if np.isnan(X_valid).any():
+                    imputer = SimpleImputer(strategy='median')
+                    X_valid = imputer.fit_transform(X_valid)
+                
+                # Overall predictions
+                y_pred = training_result.model.predict(X_valid)
+                
+                evaluation_results['overall_metrics'] = {
+                    'mae': float(mean_absolute_error(y_valid, y_pred)),
+                    'rmse': float(np.sqrt(mean_squared_error(y_valid, y_pred))),
+                    'r2': float(r2_score(y_valid, y_pred)),
+                    'samples': len(y_valid),
+                    'mape': float(np.mean(np.abs((y_valid - y_pred) / y_valid)) * 100) if np.all(y_valid != 0) else None
+                }
+                
+                # League-specific evaluation
+                if 'league_name' in df.columns:
+                    league_names = df_valid['league_name'].unique()
+                    
+                    for league in league_names:
+                        league_mask = df_valid['league_name'] == league
+                        if league_mask.sum() > 5:  # At least 5 samples for evaluation
+                            X_league = X_valid[league_mask]
+                            y_league = y_valid[league_mask]
+                            
+                            y_pred_league = training_result.model.predict(X_league)
+                            
+                            league_metrics = {
+                                'mae': float(mean_absolute_error(y_league, y_pred_league)),
+                                'rmse': float(np.sqrt(mean_squared_error(y_league, y_pred_league))),
+                                'r2': float(r2_score(y_league, y_pred_league)),
+                                'samples': len(y_league),
+                                'mape': float(np.mean(np.abs((y_league - y_pred_league) / y_league)) * 100) if np.all(y_league != 0) else None
+                            }
+                            
+                            evaluation_results['league_specific_metrics'][league] = league_metrics
+                            
+                            # Detailed Settlers evaluation
+                            if 'Settlers' in league:
+                                evaluation_results['settlers_detailed_metrics'] = {
+                                    **league_metrics,
+                                    'prediction_bias': float(np.mean(y_pred_league - y_league)),
+                                    'prediction_std': float(np.std(y_pred_league - y_league)),
+                                    'price_range': {
+                                        'min': float(y_league.min()),
+                                        'max': float(y_league.max()),
+                                        'median': float(np.median(y_league))
+                                    },
+                                    'temporal_coverage': {
+                                        'start_date': df_valid[league_mask]['date'].min().isoformat() if 'date' in df_valid.columns else None,
+                                        'end_date': df_valid[league_mask]['date'].max().isoformat() if 'date' in df_valid.columns else None,
+                                        'days_covered': (df_valid[league_mask]['date'].max() - df_valid[league_mask]['date'].min()).days if 'date' in df_valid.columns else None
+                                    }
+                                }
+                
+                # Data quality metrics
+                evaluation_results['data_quality_metrics'] = {
+                    'total_samples': len(df),
+                    'valid_samples': len(X_valid),
+                    'missing_data_ratio': 1 - (len(X_valid) / len(df)) if len(df) > 0 else 0,
+                    'feature_completeness': {
+                        col: 1 - (df[col].isna().sum() / len(df)) 
+                        for col in feature_columns[:5]  # Sample of first 5 features
+                    },
+                    'leagues_represented': list(df['league_name'].unique()) if 'league_name' in df.columns else []
+                }
+                
+            self.logger.info(f"Comprehensive evaluation completed for {currency}")
             
         except Exception as e:
-            self.logger.warning(
-                f"Failed to evaluate on Settlers league for {currency_pair}: {str(e)}"
-            )
-            return None
+            self.logger.error(f"Comprehensive evaluation failed for {currency}: {str(e)}")
+            evaluation_results['error'] = str(e)
+        
+        return evaluation_results
     
     def _generate_training_report(self) -> None:
         """Generate comprehensive training report."""
-        # Calculate success rate
-        success_rate = (
-            self.processing_stats['successful_training'] / 
-            self.processing_stats['total_currencies']
-            if self.processing_stats['total_currencies'] > 0 else 0
-        )
-        
-        # Print summary to console
-        print(f"\n{'='*80}")
-        print(f"MODEL TRAINING SUMMARY - {self.config.experiment.experiment_id}")
-        print(f"{'='*80}")
-        print(f"Models Trained: {self.processing_stats['successful_training']}/{self.processing_stats['total_currencies']}")
-        print(f"Success Rate: {success_rate:.1%}")
-        print(f"Failed Training: {self.processing_stats['failed_training']}")
-        print(f"Insufficient Data: {self.processing_stats['insufficient_data']}")
-        print(f"Validation Failures: {self.processing_stats['validation_failures']}")
-        print(f"Models Directory: {self.config.paths.models_dir}")
-        print(f"{'='*80}\n")
-        
-        # Save detailed report
         report = {
             'experiment_id': self.config.experiment.experiment_id,
             'timestamp': datetime.now().isoformat(),
-            'processing_stats': self.processing_stats,
-            'success_rate': success_rate,
-            'failed_currencies': self.failed_currencies,
-            'models_directory': str(self.config.paths.models_dir),
-            'training_results': self.results
+            'total_currencies': self.processing_stats['total_currencies'],
+            'successful_training': self.processing_stats['successful_training'],
+            'failed_training': self.processing_stats['failed_training'],
+            'processing_stats': self.processing_stats
         }
         
-        report_file = self.config.paths.models_dir / f"training_report_{self.config.experiment.experiment_id}.json"
-        with open(report_file, 'w') as f:
-            json.dump(report, f, indent=2, default=str)
+        # Save report
+        report_path = self.config.paths.logs_dir / f"training_report_{self.config.experiment.experiment_id}.json"
+        with open(report_path, 'w') as f:
+            json.dump(report, f, indent=2)
         
-        self.logger.info(f"Training report saved to: {report_file}")
+        self.logger.info(f"Training report saved to {report_path}")
+        
+        # Log summary
+        self.logger.info("=== TRAINING SUMMARY ===")
+        self.logger.info(f"Total currencies: {self.processing_stats['total_currencies']}")
+        self.logger.info(f"Successful training: {self.processing_stats['successful_training']}")
+        self.logger.info(f"Failed training: {self.processing_stats['failed_training']}")
+        
+        success_rate = (self.processing_stats['successful_training'] / 
+                       max(1, self.processing_stats['total_currencies'])) * 100
+        self.logger.info(f"Success rate: {success_rate:.1f}%")
 
 
 def parse_arguments():

@@ -35,6 +35,19 @@ class DataConfig:
     max_league_days: int = 60
     min_league_days: int = 0
     
+    # League inclusion settings
+    include_settlers_league: bool = True
+    included_leagues: List[str] = field(default_factory=lambda: [
+        'Settlers', 'Necro Settlers', 'Necropolis', 'Affliction', 
+        'Ancestor', 'Crucible', 'Sanctum', 'Kalandra', 'Sentinel'
+    ])
+    excluded_leagues: List[str] = field(default_factory=list)
+    
+    # Currency availability filtering
+    filter_by_availability: bool = True
+    only_train_available_currencies: bool = True
+    availability_check_days: int = 30  # How recent the availability check should be
+    
     # Target variables
     prediction_horizons: List[int] = field(default_factory=lambda: [1, 3, 7])
     

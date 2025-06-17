@@ -143,8 +143,41 @@ class FeatureEngineeringPipeline:
             try:
                 conn = get_db_connection()
                 
+                # Build league filtering conditions
+                league_conditions = []
+                params = []
+                
+                # Add included leagues filter
+                if self.config.data.included_leagues:
+                    placeholders = ','.join(['%s'] * len(self.config.data.included_leagues))
+                    league_conditions.append(f"l.name IN ({placeholders})")
+                    params.extend(self.config.data.included_leagues)
+                
+                # Add excluded leagues filter
+                if self.config.data.excluded_leagues:
+                    placeholders = ','.join(['%s'] * len(self.config.data.excluded_leagues))
+                    league_conditions.append(f"l.name NOT IN ({placeholders})")
+                    params.extend(self.config.data.excluded_leagues)
+                
+                # Ensure Settlers is included if the flag is set
+                if self.config.data.include_settlers_league and 'Settlers' not in self.config.data.included_leagues:
+                    if not self.config.data.included_leagues:
+                        # If no included leagues specified, just ensure Settlers is not excluded
+                        if 'Settlers' not in self.config.data.excluded_leagues:
+                            self.config.data.excluded_leagues.append('Settlers')
+                            self.config.data.excluded_leagues.remove('Settlers')  # Remove to not exclude it
+                    else:
+                        # Add Settlers to included leagues
+                        league_conditions[0] = f"l.name IN ({','.join(['%s'] * (len(self.config.data.included_leagues) + 1))})"
+                        params = self.config.data.included_leagues + ['Settlers'] + params[len(self.config.data.included_leagues):]
+                
+                # Build the WHERE clause
+                where_clause = "WHERE cp.value > 0"
+                if league_conditions:
+                    where_clause += " AND " + " AND ".join(league_conditions)
+                
                 # Query to get currency price data with league information
-                query = """
+                query = f"""
                 SELECT 
                     cp.id,
                     cp."leagueId",
@@ -166,7 +199,7 @@ class FeatureEngineeringPipeline:
                 JOIN leagues l ON cp."leagueId" = l.id
                 JOIN currency gc ON cp."getCurrencyId" = gc.id
                 JOIN currency pc ON cp."payCurrencyId" = pc.id
-                WHERE cp.value > 0
+                {where_clause}
                     -- Only include data from the first X days of each league
                     AND EXTRACT(DAY FROM (cp.date AT TIME ZONE 'UTC' - l."startDate" AT TIME ZONE 'UTC')) <= %s
                     AND EXTRACT(DAY FROM (cp.date AT TIME ZONE 'UTC' - l."startDate" AT TIME ZONE 'UTC')) >= 0
@@ -176,20 +209,32 @@ class FeatureEngineeringPipeline:
                 ORDER BY l."startDate" DESC, cp.date ASC
                 """
                 
+                # Add the day filtering parameters
+                params.extend([
+                    self.config.data.max_league_days,
+                    self.config.data.min_league_days
+                ])
+                
                 # Pass the required parameters
-                df = pd.read_sql_query(
-                    query, 
-                    conn, 
-                    params=[
-                        self.config.data.max_league_days,
-                        self.config.data.min_league_days
-                    ]
-                )
+                df = pd.read_sql_query(query, conn, params=params)
                 conn.close()
                 
                 if df.empty:
                     self.logger.warning("No data returned from database query")
                     return None
+                
+                # Log league distribution
+                league_counts = df['league_name'].value_counts()
+                self.logger.info(f"League data distribution:")
+                for league, count in league_counts.items():
+                    self.logger.info(f"  {league}: {count:,} records")
+                
+                # Verify Settlers data is included
+                settlers_count = df[df['league_name'].str.contains('Settlers', case=False, na=False)]['league_name'].value_counts().sum()
+                if self.config.data.include_settlers_league and settlers_count == 0:
+                    self.logger.warning("Settlers league data requested but not found in loaded data")
+                elif settlers_count > 0:
+                    self.logger.info(f"Settlers league data included: {settlers_count:,} records")
                 
                 # Basic preprocessing
                 df['date'] = pd.to_datetime(df['date'])
