@@ -36,9 +36,14 @@ from utils.model_inference import ModelPredictor
 class PoeWatchInvestmentReportGenerator:
     """Generate comprehensive investment reports using POE Watch data."""
     
-    def __init__(self, output_dir: str = "C:/Workspace/PoEconomy/ml/investment_reports"):
+    def __init__(
+        self, 
+        output_dir: str = "C:/Workspace/PoEconomy/ml/investment_reports",
+        logger: Optional[MLLogger] = None,
+        log_level: str = "INFO"
+    ):
         """Initialize the report generator."""
-        self.logger = MLLogger("PoeWatchInvestmentReportGenerator")
+        self.logger = logger or MLLogger("PoeWatchInvestmentReportGenerator", level=log_level)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         

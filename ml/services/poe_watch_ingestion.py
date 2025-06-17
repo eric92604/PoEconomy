@@ -273,10 +273,12 @@ class PoeWatchIngestionService:
         self,
         logger: Optional[MLLogger] = None,
         fetch_interval: int = 300,  # 5 minutes
+        log_level: str = "INFO"
     ):
         """Initialize the POE Watch data ingestion service."""
-        self.logger = logger or MLLogger("PoeWatchIngestion")
+        self.logger = logger or MLLogger("PoeWatchIngestion", level=log_level)
         self.fetch_interval = fetch_interval
+        self.log_level = log_level
         
         # Service state
         self.running = False
@@ -628,8 +630,11 @@ class PoeWatchIngestionService:
             sys.path.append(str(Path(__file__).parent.parent / "scripts"))
             from generate_poe_watch_investment_report import PoeWatchInvestmentReportGenerator
             
-            # Run POE Watch investment report generation
-            generator = PoeWatchInvestmentReportGenerator("C:/Workspace/PoEconomy/ml/investment_reports")
+            # Run POE Watch investment report generation with same log level
+            generator = PoeWatchInvestmentReportGenerator(
+                output_dir="C:/Workspace/PoEconomy/ml/investment_reports",
+                log_level=self.log_level
+            )
             report_path = generator.generate_comprehensive_report()
             
             if report_path:
@@ -729,7 +734,8 @@ async def main():
     # Create service
     service = PoeWatchIngestionService(
         logger=logger,
-        fetch_interval=args.fetch_interval
+        fetch_interval=args.fetch_interval,
+        log_level=args.log_level
     )
     
     service.monitored_leagues = args.leagues
