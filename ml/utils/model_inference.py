@@ -2,7 +2,7 @@
 Model inference utilities for price prediction in current leagues.
 
 This module provides functionality to load trained models and make predictions
-on current league data, handling feature engineering and LSTM sequence requirements.
+on current league data, handling feature engineering and preprocessing requirements.
 """
 
 import sys
@@ -26,10 +26,6 @@ from utils.logging_utils import MLLogger
 from utils.data_processing import DataProcessor
 from utils.feature_engineering import FeatureEngineer
 from utils.database import get_db_connection
-from utils.model_training import TORCH_AVAILABLE
-
-if TORCH_AVAILABLE:
-    import torch
 
 warnings.filterwarnings('ignore')
 
@@ -77,10 +73,10 @@ class PredictionResult:
 
 class ModelPredictor:
     """
-    Production model inference system for currency price prediction.
+    Model predictor for currency price forecasting.
     
-    This class handles loading trained models, processing current league data,
-    and making predictions while handling LSTM sequence requirements.
+    This class handles loading trained models, preprocessing current league data,
+    and making predictions while handling preprocessing requirements.
     """
     
     def __init__(
@@ -797,14 +793,6 @@ class ModelPredictor:
             metadata = self.model_metadata.get(currency, {})
             model_type = metadata.get('model_type', 'unknown')
             
-            # Handle LSTM sequence requirements
-            if 'lstm' in model_type.lower() and hasattr(model, 'models'):
-                # For ensemble with LSTM, we need enough data for sequences
-                lstm_seq_length = 14  # Default sequence length
-                if len(X) < lstm_seq_length:
-                    self.logger.warning(f"Insufficient data for LSTM prediction: {len(X)} < {lstm_seq_length}")
-                    # Use only the available data
-                
             # Make prediction
             if len(X) > 0:
                 # Use the most recent data point(s) for prediction

@@ -520,105 +520,33 @@ class ModelTrainingPipeline:
         
         return evaluation_results
     
-    def _evaluate_on_settlers(
-        self,
-        df: pd.DataFrame,
-        training_result: Any,
-        currency: str
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Evaluate model on Settlers league data if available.
-        
-        DEPRECATED: Use _evaluate_model_comprehensive instead.
-        This method is kept for backward compatibility.
-        """
-        self.logger.warning("Using deprecated _evaluate_on_settlers method. Use _evaluate_model_comprehensive instead.")
-        
-        if 'league_name' not in df.columns:
-            return None
-        
-        settlers_data = df[df['league_name'].str.contains('Settlers', case=False, na=False)].copy()
-        
-        if settlers_data.empty:
-            return None
-        
-        try:
-            # Prepare features and targets
-            feature_columns = self._get_feature_columns(settlers_data)
-            target_column = self._get_target_column(settlers_data)
-            
-            X = settlers_data[feature_columns].values
-            y = settlers_data[target_column].values
-            
-            # Remove any NaN values
-            valid_mask = ~(pd.isna(X).any(axis=1) | pd.isna(y))
-            X = X[valid_mask]
-            y = y[valid_mask]
-            
-            if len(X) == 0:
-                return None
-            
-            # Impute remaining NaNs
-            if np.isnan(X).any():
-                imputer = SimpleImputer(strategy='median')
-                X = imputer.fit_transform(X)
-            
-            # Make predictions
-            y_pred = training_result.model.predict(X)
-            
-            # Calculate metrics
-            metrics = {
-                'mae': float(mean_absolute_error(y, y_pred)),
-                'rmse': float(np.sqrt(mean_squared_error(y, y_pred))),
-                'r2': float(r2_score(y, y_pred)),
-                'samples': len(y)
-            }
-            
-            return metrics
-            
-        except Exception as e:
-            self.logger.warning(
-                f"Failed to evaluate on Settlers league for {currency}: {str(e)}"
-            )
-            return None
-    
     def _generate_training_report(self) -> None:
         """Generate comprehensive training report."""
-        # Calculate success rate
-        success_rate = (
-            self.processing_stats['successful_training'] / 
-            self.processing_stats['total_currencies']
-            if self.processing_stats['total_currencies'] > 0 else 0
-        )
-        
-        # Print summary to console
-        print(f"\n{'='*80}")
-        print(f"MODEL TRAINING SUMMARY - {self.config.experiment.experiment_id}")
-        print(f"{'='*80}")
-        print(f"Models Trained: {self.processing_stats['successful_training']}/{self.processing_stats['total_currencies']}")
-        print(f"Success Rate: {success_rate:.1%}")
-        print(f"Failed Training: {self.processing_stats['failed_training']}")
-        print(f"Insufficient Data: {self.processing_stats['insufficient_data']}")
-        print(f"Validation Failures: {self.processing_stats['validation_failures']}")
-        print(f"Models Directory: {self.config.paths.models_dir}")
-        print(f"{'='*80}\n")
-        
-        # Save detailed report
         report = {
             'experiment_id': self.config.experiment.experiment_id,
             'timestamp': datetime.now().isoformat(),
-            'processing_stats': self.processing_stats,
-            'success_rate': success_rate,
-            'failed_currencies': self.failed_currencies,
-            'models_directory': str(self.config.paths.models_dir),
-            'training_results': self.results
+            'total_currencies': self.processing_stats['total_currencies'],
+            'successful_training': self.processing_stats['successful_training'],
+            'failed_training': self.processing_stats['failed_training'],
+            'processing_stats': self.processing_stats
         }
         
-        report_file = self.config.paths.models_dir / f"training_report_{self.config.experiment.experiment_id}.json"
-        with open(report_file, 'w') as f:
-            json.dump(report, f, indent=2, default=str)
+        # Save report
+        report_path = self.config.paths.logs_dir / f"training_report_{self.config.experiment.experiment_id}.json"
+        with open(report_path, 'w') as f:
+            json.dump(report, f, indent=2)
         
-        self.logger.info(f"Training report saved to: {report_file}")
+        self.logger.info(f"Training report saved to {report_path}")
+        
+        # Log summary
+        self.logger.info("=== TRAINING SUMMARY ===")
+        self.logger.info(f"Total currencies: {self.processing_stats['total_currencies']}")
+        self.logger.info(f"Successful training: {self.processing_stats['successful_training']}")
+        self.logger.info(f"Failed training: {self.processing_stats['failed_training']}")
+        
+        success_rate = (self.processing_stats['successful_training'] / 
+                       max(1, self.processing_stats['total_currencies'])) * 100
+        self.logger.info(f"Success rate: {success_rate:.1f}%")
 
 
 def parse_arguments():

@@ -182,7 +182,7 @@ def print_predictions(predictions, title="PRICE PREDICTIONS"):
         conf_str = f"{pred.confidence_score:.2f}"
         model_type = pred.model_type[:12] + "..." if len(pred.model_type) > 15 else pred.model_type
         
-        print(f"{i:<3} {pred.currency_pair:<35} {pred.current_price:<8.2f} "
+        print(f"{i:<3} {pred.currency:<35} {pred.current_price:<8.2f} "
               f"{pred.predicted_price:<8.2f} {change_str:<8} {conf_str:<6} {model_type}")
 
 

@@ -272,44 +272,6 @@ def setup_ml_logging(
     return ml_logger
 
 
-def log_function_call(logger: MLLogger):
-    """Decorator to log function calls with timing."""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            func_name = func.__name__
-            start_time = time.time()
-            
-            # Log function start
-            logger.debug(f"Calling function: {func_name}")
-            
-            try:
-                result = func(*args, **kwargs)
-                elapsed_time = time.time() - start_time
-                
-                # Log successful completion
-                logger.debug(
-                    f"Function completed: {func_name}",
-                    extra={"elapsed_time_seconds": elapsed_time}
-                )
-                
-                return result
-                
-            except Exception as e:
-                elapsed_time = time.time() - start_time
-                
-                # Log error
-                logger.error(
-                    f"Function failed: {func_name}",
-                    exception=e,
-                    extra={"elapsed_time_seconds": elapsed_time}
-                )
-                raise
-        
-        return wrapper
-    return decorator
-
-
 class ProgressLogger:
     """Logger for tracking progress of long-running operations."""
     
@@ -374,10 +336,4 @@ class ProgressLogger:
             "total_time_seconds": round(total_time, 1),
             "items_per_second": round(self.total_items / total_time, 2) if total_time > 0 else 0
         }
-        self.logger.info(f"Completed: {self.operation_name}", extra=extra_data)
-
-
-# Convenience function for quick logger setup
-def get_logger(name: str, level: str = "INFO") -> MLLogger:
-    """Get a simple ML logger instance."""
-    return MLLogger(name=name, level=level) 
+        self.logger.info(f"Completed: {self.operation_name}", extra=extra_data) 
