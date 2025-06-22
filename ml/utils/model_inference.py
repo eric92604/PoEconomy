@@ -260,11 +260,11 @@ class ModelPredictor:
                 currency_name,
                 league,
                 mean_price as price,
-                divine_price as chaos_equivalent,
+                mean_price as chaos_equivalent,
                 fetch_time as date,
                 CASE WHEN low_confidence THEN 0.5 ELSE 0.8 END as confidence_level,
                 price_change_percent as total_change,
-                current_listings as listing_count,
+                daily_volume as listing_count,
                 currency_name as currency
             FROM live_poe_watch 
             WHERE fetch_time >= %s

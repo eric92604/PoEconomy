@@ -507,17 +507,17 @@ class ModelTrainer:
         self,
         X: np.ndarray,
         y: np.ndarray,
-        currency_pair: str,
+        currency: str,
         model_type: str = "ensemble",
         optimize_hyperparameters: bool = True
     ) -> TrainingResult:
         """
-        Train a single model for a currency pair.
+        Train a single model for a currency.
         
         Args:
             X: Feature matrix
             y: Target values
-            currency_pair: Currency pair identifier
+            currency: Currency identifier
             model_type: Type of model to train
             optimize_hyperparameters: Whether to optimize hyperparameters
             
@@ -540,14 +540,14 @@ class ModelTrainer:
             model = self._train_ensemble_model(
                 X_train, y_train,
                 X_val, y_val,
-                currency_pair,
+                currency,
                 optimize_hyperparameters
             )
         else:
             model = self._train_single_base_model(
                 X_train, y_train,
                 X_val, y_val,
-                currency_pair,
+                currency,
                 model_type,
                 optimize_hyperparameters
             )
@@ -581,7 +581,7 @@ class ModelTrainer:
             feature_importance=feature_importance,
             cross_validation_scores=cv_scores,
             model_type=model.get_model_type(),
-            currency_pair=currency_pair
+            currency=currency
         )
     
     def _train_ensemble_model(
@@ -590,7 +590,7 @@ class ModelTrainer:
         y_train: np.ndarray,
         X_val: np.ndarray,
         y_val: np.ndarray,
-        currency_pair: str,
+        currency: str,
         optimize_hyperparameters: bool
     ) -> EnsembleModel:
         """Train ensemble model."""
@@ -600,7 +600,7 @@ class ModelTrainer:
         if self.config.use_lightgbm:
             if optimize_hyperparameters:
                 lgb_model, _ = self.optimizer.optimize(
-                    LightGBMModel, X_train, y_train, currency_pair
+                    LightGBMModel, X_train, y_train, currency
                 )
             else:
                 lgb_model = LightGBMModel(self.config, self.logger)
@@ -610,7 +610,7 @@ class ModelTrainer:
         if self.config.use_xgboost:
             if optimize_hyperparameters:
                 xgb_model, _ = self.optimizer.optimize(
-                    XGBoostModel, X_train, y_train, currency_pair
+                    XGBoostModel, X_train, y_train, currency
                 )
             else:
                 xgb_model = XGBoostModel(self.config, self.logger)
@@ -629,7 +629,7 @@ class ModelTrainer:
         y_train: np.ndarray,
         X_val: np.ndarray,
         y_val: np.ndarray,
-        currency_pair: str,
+        currency: str,
         model_type: str,
         optimize_hyperparameters: bool
     ) -> BaseModel:
@@ -665,7 +665,7 @@ class ModelTrainer:
         
         if optimize_hyperparameters:
             model, _ = self.optimizer.optimize(
-                model_class, X_train, y_train, currency_pair
+                model_class, X_train, y_train, currency
             )
         else:
             model = model_class(self.config, self.logger)
@@ -706,7 +706,7 @@ class ModelTrainer:
 def save_model_artifacts(
     result: TrainingResult,
     output_dir: Path,
-    currency_pair: str
+    currency: str
 ) -> Dict[str, str]:
     """
     Save model artifacts to disk.
@@ -714,16 +714,16 @@ def save_model_artifacts(
     Args:
         result: Training result
         output_dir: Output directory
-        currency_pair: Currency pair identifier
+        currency: Currency identifier
         
     Returns:
         Dictionary of saved file paths
     """
-    # Sanitize currency pair name for file system
-    safe_currency_pair = currency_pair.replace(" -> ", "_to_").replace("'", "").replace(":", "").replace("/", "_").replace("\\", "_").replace("?", "").replace("*", "").replace("|", "").replace("<", "").replace(">", "").replace('"', "")
+    # Sanitize currency name for file system
+    safe_currency = currency.replace(" -> ", "_to_").replace("'", "").replace(":", "").replace("/", "_").replace("\\", "_").replace("?", "").replace("*", "").replace("|", "").replace("<", "").replace(">", "").replace('"', "")
     
     # Create currency-specific directory
-    currency_dir = output_dir / safe_currency_pair
+    currency_dir = output_dir / safe_currency
     currency_dir.mkdir(parents=True, exist_ok=True)
     
     saved_files = {}
@@ -741,7 +741,7 @@ def save_model_artifacts(
     
     # Save metadata
     metadata = {
-        'currency_pair': result.currency_pair,
+        'currency': result.currency,
         'model_type': result.model_type,
         'metrics': result.metrics.to_dict(),
         'training_time': result.training_time,

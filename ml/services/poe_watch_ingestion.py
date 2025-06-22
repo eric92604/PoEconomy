@@ -24,6 +24,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from utils.logging_utils import MLLogger
 from utils.database import get_db_connection
+from utils.currency_standardizer import CurrencyStandardizer
 
 
 @dataclass
@@ -286,6 +287,7 @@ class PoeWatchIngestionService:
         
         # Components
         self.client = PoeWatchAPIClient(logger=self.logger)
+        self.currency_standardizer = CurrencyStandardizer(logger=self.logger)
         
         # Leagues to monitor
         self.monitored_leagues = ['Mercenaries']
@@ -403,12 +405,7 @@ class PoeWatchIngestionService:
                 # Fetch data for all monitored leagues and categories
                 for league in self.monitored_leagues:
                     for category in self.monitored_categories:
-                                                # Double-check category is allowed
-                        if not self.is_category_allowed(category):
-                            self.logger.warning(f"⚠️ Skipping disallowed category: {category}")
-                            continue
-                        
-                        currency_data = await self.client.get_currency_data(league, category, self.allowed_categories)
+                        currency_data = await self.client.get_currency_data(league, category)
                         
                         if currency_data:
                             all_currencies.extend(currency_data)
@@ -475,10 +472,21 @@ class PoeWatchIngestionService:
                             if not currency.is_valid():
                                 self.logger.debug(f"Skipping invalid currency data: {currency.name}")
                                 continue
+                            
+                            # Standardize currency name using database as source of truth
+                            standardized_name = self.currency_standardizer.standardize_currency_name(currency.name)
+                            
+                            if not standardized_name:
+                                self.logger.warning(f"Currency '{currency.name}' not found in database - skipping")
+                                continue
+                            
+                            # Log if name was changed
+                            if standardized_name != currency.name:
+                                self.logger.info(f"Standardized currency name: '{currency.name}' → '{standardized_name}'")
                                 
                             cursor.execute(insert_sql, (
                                 currency.id,
-                                currency.name[:100],  # Truncate to prevent overflow
+                                standardized_name[:100],  # Use standardized name
                                 currency.category[:50],
                                 currency.group[:50],
                                 currency.mean,

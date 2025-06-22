@@ -12,6 +12,7 @@ warnings.filterwarnings('ignore', message='pandas only supports SQLAlchemy conne
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.database import get_db_connection
+from utils.currency_standardizer import CurrencyStandardizer
 
 def check_availability_columns_exist() -> bool:
     """
@@ -119,6 +120,117 @@ def identify_high_value_currencies(min_avg_value=50, filter_by_availability=True
         print(f"\nAvailability Summary: {available_count}/{total_count} currencies are available in current league")
     
     return high_value_currencies
+
+def generate_all_currencies_list(
+    min_avg_value: float = 1.0,
+    min_records: int = 100,
+    filter_by_availability: bool = True,
+    only_available_currencies: bool = True,
+    availability_check_days: int = 30
+) -> List[Dict[str, Any]]:
+    """
+    Generate a comprehensive list of ALL currency pairs that meet minimum criteria.
+    
+    Args:
+        min_avg_value: Minimum average value (in Chaos Orbs) for inclusion
+        min_records: Minimum number of historical records required
+        filter_by_availability: Whether to apply availability filtering
+        only_available_currencies: If True, only include available currencies
+        availability_check_days: Maximum days since last availability check
+    
+    Returns:
+        List of currency pair dictionaries for all qualifying currencies
+    """
+    print(f"\nGenerating ALL Currency Pairs for ML Training...")
+    print(f"Minimum average value: {min_avg_value} Chaos Orbs")
+    print(f"Minimum records: {min_records}")
+    print("=" * 60)
+    
+    # Check if we should filter by availability
+    apply_availability_filter = filter_by_availability and check_availability_columns_exist()
+    
+    if not apply_availability_filter and filter_by_availability:
+        print("⚠️  Availability filtering requested but database columns not found")
+        print("    Run 'python ml/scripts/add_currency_availability_column.py' first")
+        print("    Proceeding without availability filtering...\n")
+    
+    # Get ALL currencies that meet minimum criteria
+    all_qualifying = identify_high_value_currencies(
+        min_avg_value=min_avg_value,
+        filter_by_availability=apply_availability_filter,
+        availability_check_days=availability_check_days
+    )
+    
+    # Filter by minimum records
+    all_qualifying = all_qualifying[all_qualifying['total_records'] >= min_records]
+    
+    # Create target pairs list
+    target_pairs = []
+    
+    print(f"\nALL Qualifying Currency Pairs (>={min_avg_value} Chaos Average, >={min_records} records):")
+    for _, currency in all_qualifying.iterrows():
+        # Check availability if filtering is enabled
+        if only_available_currencies and apply_availability_filter:
+            if not currency.get('is_available', True):
+                print(f"  SKIPPED: {currency['currency_name']} -> Chaos Orb (not available in current league)")
+                continue
+        
+        pair = {
+            'get_currency': currency['currency_name'],
+            'pay_currency': 'Chaos Orb',
+            'priority': 1,
+            'min_value': currency['min_price_chaos'],
+            'median_value': currency['median_price_chaos'] if currency['median_price_chaos'] is not None else 0,
+            'avg_value': currency['avg_price_chaos'],
+            'max_value': currency['max_price_chaos'],
+            'volatility': currency['price_volatility'] if currency['price_volatility'] is not None else 0,
+            'records': currency['total_records'],
+            'is_available': currency.get('is_available', True),
+            'availability_source': currency.get('availability_source', 'unknown'),
+            'last_availability_check': currency.get('last_availability_check')
+        }
+        
+        target_pairs.append(pair)
+        
+        median_val = currency['median_price_chaos'] if currency['median_price_chaos'] is not None else 0
+        availability_indicator = "✓" if pair['is_available'] else "✗"
+        print(f"  {availability_indicator} {pair['get_currency']} -> {pair['pay_currency']} "
+              f"(Min: {currency['min_price_chaos']:.1f}, Med: {median_val:.1f}, "
+              f"Avg: {currency['avg_price_chaos']:.1f}, Max: {currency['max_price_chaos']:.1f}, "
+              f"Records: {currency['total_records']})")
+    
+    # Remove duplicates and sort by record count (descending), then by average value
+    unique_pairs = []
+    seen_pairs = set()
+    
+    for pair in target_pairs:
+        pair_tuple = (pair['get_currency'], pair['pay_currency'])
+        if pair_tuple not in seen_pairs:
+            unique_pairs.append(pair)
+            seen_pairs.add(pair_tuple)
+    
+    # Sort by record count (descending), then by average value (descending)
+    unique_pairs.sort(key=lambda x: (-x['records'], -x['avg_value']))
+    
+    print(f"\nFinal ALL Currency Pairs: {len(unique_pairs)} pairs")
+    if apply_availability_filter:
+        available_pairs = sum(1 for p in unique_pairs if p['is_available'])
+        print(f"Available pairs: {available_pairs}/{len(unique_pairs)}")
+    
+    print("=" * 140)
+    print(f"{'#':>2} {'✓':>1} {'Currency Pair':<35} {'Min':>6} {'Med':>6} {'Avg':>6} {'Max':>7} {'Vol':>5} {'Records':>7} {'Source':>12}")
+    print("-" * 140)
+    
+    for i, pair in enumerate(unique_pairs, 1):
+        pair_name = f"{pair['get_currency']} -> {pair['pay_currency']}"
+        availability_indicator = "✓" if pair['is_available'] else "✗"
+        source = pair['availability_source'][:12] if pair['availability_source'] else 'unknown'
+        
+        print(f"{i:2d}. {availability_indicator} {pair_name:<35} {pair['min_value']:>6.1f} {pair['median_value']:>6.1f} "
+              f"{pair['avg_value']:>6.1f} {pair['max_value']:>7.1f} {pair['volatility']:>5.1f} {pair['records']:>7} {source:>12}")
+    
+    return unique_pairs
+
 
 def generate_target_currency_list(
     filter_by_availability: bool = True,
