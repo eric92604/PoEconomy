@@ -43,10 +43,15 @@ class DataConfig:
     ])
     excluded_leagues: List[str] = field(default_factory=list)
     
+    # Currency selection strategy
+    train_all_currencies: bool = True  # If True, train models for all currencies with sufficient data
+    min_avg_value_threshold: float = 1.0  # Minimum average value (in Chaos Orbs) for currency selection
+    min_records_threshold: int = 50  # Minimum number of records required for training
+    
     # Currency availability filtering
     filter_by_availability: bool = True
     only_train_available_currencies: bool = True
-    availability_check_days: int = 30  # How recent the availability check should be
+    availability_check_days: int = 60  # How recent the availability check should be
     
     # Target variables
     prediction_horizons: List[int] = field(default_factory=lambda: [1, 3, 7])
@@ -91,10 +96,10 @@ class PathConfig:
     """Configuration for file paths and directories."""
     
     # Base directories
-    ml_root: Path = field(default_factory=lambda: Path(__file__).parent.parent)
-    data_dir: Path = field(default_factory=lambda: Path(__file__).parent.parent / "training_data")
-    models_dir: Path = field(default_factory=lambda: Path(__file__).parent.parent / "models" / "currency")
-    logs_dir: Path = field(default_factory=lambda: Path(__file__).parent.parent / "logs")
+    ml_root: Path = field(default_factory=lambda: Path(__file__).parent.parent.resolve())
+    data_dir: Path = field(default_factory=lambda: Path(__file__).parent.parent.resolve() / "training_data")
+    models_dir: Path = field(default_factory=lambda: Path(__file__).parent.parent.resolve() / "models" / "currency")
+    logs_dir: Path = field(default_factory=lambda: Path(__file__).parent.parent.resolve() / "logs")
     
     # File patterns
     combined_data_pattern: str = "combined_currency_features_{experiment_id}.parquet"
@@ -220,6 +225,22 @@ def get_config(config_path: Optional[str] = None) -> MLConfig:
     return DEFAULT_CONFIG
 
 
+def get_config_by_mode(mode: str = "production") -> MLConfig:
+    """Get configuration based on mode."""
+    if mode == "production":
+        return get_production_config()
+    elif mode == "development":
+        return get_development_config()
+    elif mode == "test":
+        return get_test_config()
+    elif mode == "all_currencies":
+        return get_all_currencies_config()
+    elif mode == "high_value":
+        return get_high_value_config()
+    else:
+        raise ValueError(f"Unknown mode: {mode}. Use 'production', 'development', 'test', 'all_currencies', or 'high_value'")
+
+
 # Environment-specific configurations
 def get_development_config() -> MLConfig:
     """Get configuration optimized for development."""
@@ -246,8 +267,52 @@ def get_production_config() -> MLConfig:
 def get_test_config() -> MLConfig:
     """Get configuration optimized for testing."""
     config = MLConfig()
-    config.model.n_trials = 10  # Very fast for testing
-    config.model.cv_folds = 2
+    config.model.n_trials = 3  # Very fast for testing
+    config.model.cv_folds = 1
     config.logging.level = "DEBUG"
     config.experiment.tags = ["test"]
+    return config
+
+
+def get_all_currencies_config() -> MLConfig:
+    """Get configuration optimized for training all available currencies."""
+    config = get_production_config()
+    
+    # Enable all currencies mode
+    config.data.train_all_currencies = True
+    config.data.min_avg_value_threshold = 1.0  # Include low-value currencies
+    config.data.min_records_threshold = 50     # Lower threshold for more currencies
+    config.data.filter_by_availability = False  # Disable availability filtering to include high-value items
+    config.data.only_train_available_currencies = False
+    
+    # Adjust processing for larger scale
+    config.processing.max_features = 50        # Slightly reduced for performance
+    config.processing.feature_selection_k = 25 # Proportionally reduced
+    
+    # Experiment settings
+    import pandas as pd
+    config.experiment.experiment_id = f"all_currencies_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"
+    config.experiment.description = "Training models for all currencies with sufficient historical data (no availability filtering)"
+    config.experiment.tags = ["production", "all_currencies", "comprehensive", "no_availability_filter"]
+    
+    return config
+
+
+def get_high_value_config() -> MLConfig:
+    """Get configuration optimized for training only high-value currencies (including Mirror items)."""
+    config = get_production_config()
+    
+    # Enable all currencies mode with high value threshold
+    config.data.train_all_currencies = True
+    config.data.min_avg_value_threshold = 1000.0  # Only very valuable items
+    config.data.min_records_threshold = 50        # Lower threshold for rare items
+    config.data.filter_by_availability = False    # Disable availability filtering for high-value items
+    config.data.only_train_available_currencies = False
+    
+    # Experiment settings
+    import pandas as pd
+    config.experiment.experiment_id = f"high_value_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"
+    config.experiment.description = "Training models for high-value currencies including Mirror items"
+    config.experiment.tags = ["production", "high_value", "comprehensive", "no_availability_filter"]
+    
     return config 

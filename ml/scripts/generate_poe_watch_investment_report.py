@@ -22,15 +22,18 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 import warnings
+import argparse
 warnings.filterwarnings('ignore')
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 sys.path.append(str(Path(__file__).parent))
 
-from utils.logging_utils import MLLogger
+from config.training_config import MLConfig, get_production_config, get_development_config, get_test_config
+from utils.logging_utils import MLLogger, setup_ml_logging
 from utils.database import get_db_connection
 from utils.model_inference import ModelPredictor
+from utils.currency_standardizer import CurrencyStandardizer
 
 
 class PoeWatchInvestmentReportGenerator:
@@ -38,13 +41,27 @@ class PoeWatchInvestmentReportGenerator:
     
     def __init__(
         self, 
-        output_dir: str = "C:/Workspace/PoEconomy/ml/investment_reports",
-        logger: Optional[MLLogger] = None,
-        log_level: str = "INFO"
+        config: Optional[MLConfig] = None,
+        logger: Optional[MLLogger] = None
     ):
         """Initialize the report generator."""
-        self.logger = logger or MLLogger("PoeWatchInvestmentReportGenerator", level=log_level)
-        self.output_dir = Path(output_dir)
+        self.config = config or get_production_config()
+        
+        # Setup logging using config
+        if logger is None:
+            self.logger = setup_ml_logging(
+                name="PoeWatchInvestmentReportGenerator",
+                level=self.config.logging.level,
+                log_dir=str(self.config.paths.logs_dir),
+                experiment_id=self.config.experiment.experiment_id,
+                console_output=self.config.logging.console_logging,
+                suppress_external=self.config.logging.suppress_lightgbm
+            )
+        else:
+            self.logger = logger
+            
+        # Use config for output directory
+        self.output_dir = self.config.paths.ml_root / "investment_reports"
         self.output_dir.mkdir(exist_ok=True)
         
         # Data holders
@@ -52,37 +69,24 @@ class PoeWatchInvestmentReportGenerator:
         self.analysis_data = None
         self.predictions_data = None
         
-        # Initialize predictor
+        # Initialize predictor and currency standardizer
         self.predictor = None
+        self.currency_standardizer = CurrencyStandardizer(logger=self.logger)
         
     def load_prediction_models(self) -> bool:
         """Load prediction models for currency price forecasting."""
         try:
-            # Get the script directory and find models directory relative to project root
-            script_dir = Path(__file__).parent
-            project_root = script_dir.parent.parent  # Go up from ml/scripts to project root
-            models_dir = project_root / "ml" / "models" / "currency_production"
+            # Use config to determine models directory
+            models_dir = self.config.paths.models_dir
             
-            # Alternative paths to try if the above doesn't work
-            alternative_paths = [
-                Path("../models/currency_production"),  # Original relative path
-                Path("./models/currency_production"),   # From ml directory
-                Path("models/currency_production"),     # Direct path
-                script_dir.parent / "models" / "currency_production"  # From ml/scripts to ml/models
-            ]
-            
-            # Try the main path first
-            if not models_dir.exists():
-                self.logger.warning(f"Primary models directory not found: {models_dir}")
-                # Try alternative paths
-                for alt_path in alternative_paths:
-                    if alt_path.exists():
-                        models_dir = alt_path
-                        self.logger.info(f"Using alternative models directory: {models_dir}")
-                        break
-                else:
-                    self.logger.error(f"Models directory not found in any of the expected locations")
-                    return False
+            # Check if production models exist
+            production_models_dir = models_dir.parent / "currency_production"
+            if production_models_dir.exists():
+                models_dir = production_models_dir
+                self.logger.info(f"Using production models directory: {models_dir}")
+            elif not models_dir.exists():
+                self.logger.error(f"Models directory not found: {models_dir}")
+                return False
             
             self.predictor = ModelPredictor(models_dir, logger=self.logger)
             available_models = self.predictor.load_available_models()
@@ -142,13 +146,11 @@ class PoeWatchInvestmentReportGenerator:
             conn = get_db_connection()
             
             query = """
-            SELECT 
+            SELECT
                 currency_name,
                 mean_price as current_price,
                 min_price,
                 max_price,
-                exalted_price,
-                divine_price,
                 daily_volume,
                 price_change_percent,
                 low_confidence,
@@ -156,12 +158,7 @@ class PoeWatchInvestmentReportGenerator:
                 fetch_time as date,
                 poe_watch_id,
                 category,
-                group_name,
-                frame,
-                mode_price,
-                total_listings,
-                current_listings,
-                accepted_listings
+                group_name
             FROM live_poe_watch 
             WHERE league = 'Mercenaries'
             AND fetch_time >= NOW() - INTERVAL '7 days'
@@ -193,25 +190,6 @@ class PoeWatchInvestmentReportGenerator:
         poe_watch_currencies = set(market_df['currency_name'].unique())
         ml_currencies = set(predictions_df['currency'].unique()) if not predictions_df.empty else set()
         
-        def find_best_currency_match(poe_watch_name: str, ml_currency_names: set) -> str:
-            """Find the best matching ML currency name for a POE Watch currency name."""
-            # Exact match first
-            if poe_watch_name in ml_currency_names:
-                return poe_watch_name
-            
-            # Normalize names for comparison (remove apostrophes, spaces, case insensitive)
-            def normalize_name(name: str) -> str:
-                return name.lower().replace("'", "").replace(" ", "").replace("-", "")
-            
-            poe_normalized = normalize_name(poe_watch_name)
-            
-            # Look for normalized matches
-            for ml_name in ml_currency_names:
-                if normalize_name(ml_name) == poe_normalized:
-                    return ml_name
-            
-            return None
-        
         self.logger.info(f"Found {len(ml_currencies)} ML model currencies, {len(poe_watch_currencies)} POE Watch currencies")
         
         # Track matching statistics
@@ -242,17 +220,27 @@ class PoeWatchInvestmentReportGenerator:
             latest_volume = latest['daily_volume']
             volume_trend = 'increasing' if latest_volume > avg_volume else 'decreasing'
             
-            # Liquidity score based on listings
-            liquidity_score = min(100, (latest['current_listings'] or 0) / 10 * 100)
+            liquidity_score = min(100, (latest['daily_volume'] or 0) / 100 * 100)
             
             # Confidence score (inverse of low_confidence flag)
             poe_watch_confidence = 0.3 if latest['low_confidence'] else 0.8
             
-            # Find matching ML currency name
-            matched_ml_currency = find_best_currency_match(currency, ml_currencies)
-            
-            if not matched_ml_currency:
-                self.logger.debug(f"Skipping {currency} - no ML model available")
+            try:
+                standardized_currency = self.currency_standardizer.standardize_currency_name(currency)
+                if not standardized_currency:
+                    self.logger.debug(f"Skipping {currency} - currency not found in database")
+                    skipped_currencies += 1
+                    continue
+                
+                # Check if we have an ML model for this standardized currency
+                if standardized_currency not in ml_currencies:
+                    self.logger.debug(f"Skipping {currency} (standardized: {standardized_currency}) - no ML model available")
+                    skipped_currencies += 1
+                    continue
+                
+                matched_ml_currency = standardized_currency
+            except Exception as e:
+                self.logger.warning(f"Error standardizing currency {currency}: {e}")
                 skipped_currencies += 1
                 continue
             
@@ -324,15 +312,15 @@ class PoeWatchInvestmentReportGenerator:
                 'period_change_percent': period_change_percent,  # historical trend
                 'min_price': latest['min_price'],
                 'max_price': latest['max_price'],
-                'exalted_price': latest['exalted_price'] or 0,
-                'divine_price': latest['divine_price'] or 0,
+                'exalted_price': 0,  # Not available in live_poe_watch table
+                'divine_price': 0,   # Not available in live_poe_watch table
                 'price_volatility': price_volatility,
                 'price_range': price_range,
                 'daily_volume': latest_volume,
                 'avg_volume': avg_volume,
                 'volume_trend': volume_trend,
-                'current_listings': latest['current_listings'] or 0,
-                'accepted_listings': latest['accepted_listings'] or 0,
+                'current_listings': 0,  # Not available in live_poe_watch table
+                'accepted_listings': 0, # Not available in live_poe_watch table
                 'liquidity_score': liquidity_score,
                 'ml_confidence': ml_confidence,
                 'poe_watch_confidence': poe_watch_confidence,
@@ -344,7 +332,7 @@ class PoeWatchInvestmentReportGenerator:
                 'investment_recommendation': investment_recommendation,
                 'category': latest['category'],
                 'group_name': latest['group_name'],
-                'frame': latest['frame']
+                'frame': latest.get('frame', 'normal')  # Default value since not in table
             })
         
         result_df = pd.DataFrame(analysis_results)
@@ -858,13 +846,97 @@ class PoeWatchInvestmentReportGenerator:
         return str(report_path)
 
 
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="POE Watch Investment Report Generator",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Production report with full analysis
+  python generate_poe_watch_investment_report.py --mode production
+  
+  # Development report with faster settings
+  python generate_poe_watch_investment_report.py --mode development
+  
+  # Testing with minimal settings
+  python generate_poe_watch_investment_report.py --mode test
+  
+  # Custom configuration
+  python generate_poe_watch_investment_report.py --config /path/to/config.json
+        """
+    )
+    
+    parser.add_argument(
+        '--mode',
+        choices=['production', 'development', 'test'],
+        default='production',
+        help='Report generation mode (default: production)'
+    )
+    
+    parser.add_argument(
+        '--config',
+        type=str,
+        help='Path to configuration file'
+    )
+    
+    parser.add_argument(
+        '--experiment-id',
+        type=str,
+        help='Custom experiment ID'
+    )
+    
+    parser.add_argument(
+        '--description',
+        type=str,
+        default='',
+        help='Experiment description'
+    )
+    
+    parser.add_argument(
+        '--tags',
+        nargs='*',
+        default=[],
+        help='Experiment tags'
+    )
+    
+    return parser.parse_args()
+
+
 def main():
     """Main function to generate POE Watch investment report."""
+    args = parse_arguments()
+    
     print("⚡ POE Watch Investment Report Generator")
     print("=" * 60)
     
     try:
-        generator = PoeWatchInvestmentReportGenerator()
+        # Get configuration based on mode
+        if args.config:
+            config = MLConfig.from_file(args.config)
+        elif args.mode == 'production':
+            config = get_production_config()
+        elif args.mode == 'development':
+            config = get_development_config()
+        else:  # test
+            config = get_test_config()
+        
+        # Override configuration with command line arguments
+        if args.experiment_id:
+            config.experiment.experiment_id = args.experiment_id
+        if args.description:
+            config.experiment.description = args.description
+        if args.tags:
+            config.experiment.tags.extend(args.tags)
+        
+        # Add mode and report generation tags
+        config.experiment.tags.append(args.mode)
+        config.experiment.tags.append('investment_report')
+        
+        print(f"Running in {args.mode} mode...")
+        print(f"Experiment ID: {config.experiment.experiment_id}")
+        
+        generator = PoeWatchInvestmentReportGenerator(config=config)
         report_path = generator.generate_comprehensive_report()
         
         if report_path:
@@ -874,8 +946,12 @@ def main():
         else:
             print("\n❌ Failed to generate POE Watch investment report")
             
+    except KeyboardInterrupt:
+        print("\nReport generation interrupted by user")
+        sys.exit(1)
     except Exception as e:
         print(f"\n❌ Error generating report: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

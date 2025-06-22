@@ -29,7 +29,7 @@ def example_1_basic_prediction():
     
     try:
         # Initialize predictor with models directory
-        models_dir = Path("models/currency_production")  # Updated path
+        models_dir = Path(__file__).parent.parent / "models" / "currency_production"
         predictor = ModelPredictor(models_dir)
         
         # Load available models
@@ -65,7 +65,7 @@ def example_2_batch_predictions():
     print("\n=== Example 2: Batch Predictions ===")
     
     try:
-        models_dir = Path("models/currency_production")
+        models_dir = Path(__file__).parent.parent / "models" / "currency_production"
         predictor = ModelPredictor(models_dir)
         
         # Load models
@@ -95,7 +95,7 @@ def example_3_specific_currencies():
     print("\n=== Example 3: Specific Currency Predictions ===")
     
     try:
-        models_dir = Path("models/currency_production")
+        models_dir = Path(__file__).parent.parent / "models" / "currency_production"
         predictor = ModelPredictor(models_dir)
         
         # Load models
@@ -134,7 +134,7 @@ def example_4_multi_horizon_prediction():
     print("\n=== Example 4: Multi-Horizon Predictions ===")
     
     try:
-        models_dir = Path("models/currency_production")
+        models_dir = Path(__file__).parent.parent / "models" / "currency_production"
         predictor = ModelPredictor(models_dir)
         
         available_models = predictor.load_available_models()
@@ -163,7 +163,7 @@ def example_5_export_predictions():
     print("\n=== Example 5: Export Predictions ===")
     
     try:
-        models_dir = Path("models/currency_production")
+        models_dir = Path(__file__).parent.parent / "models" / "currency_production"
         predictor = ModelPredictor(models_dir)
         
         # Generate predictions
@@ -223,7 +223,7 @@ def example_7_model_comparison():
     print("\n=== Example 7: Model Performance Comparison ===")
     
     try:
-        models_dir = Path("models/currency_production")
+        models_dir = Path(__file__).parent.parent / "models" / "currency_production"
         predictor = ModelPredictor(models_dir)
         
         available_models = predictor.load_available_models()

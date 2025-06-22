@@ -29,7 +29,8 @@ from config.training_config import MLConfig, get_production_config, get_developm
 from utils.logging_utils import setup_ml_logging, MLLogger, ProgressLogger
 from utils.data_processing import DataProcessor, load_and_validate_data
 from utils.model_training import ModelTrainer, save_model_artifacts
-from utils.identify_target_currencies import generate_target_currency_list
+from utils.identify_target_currencies import generate_target_currency_list, generate_all_currencies_list
+from utils.currency_standardizer import CurrencyStandardizer
 
 
 class ModelTrainingPipeline:
@@ -67,6 +68,7 @@ class ModelTrainingPipeline:
         self.model_trainer = ModelTrainer(
             config.model, config.processing, self.logger
         )
+        self.currency_standardizer = CurrencyStandardizer(logger=self.logger)
         
         # Modify models directory to include experiment_id
         experiment_models_dir = config.paths.models_dir.parent / f"currency_{config.experiment.experiment_id}"
@@ -113,20 +115,32 @@ class ModelTrainingPipeline:
             
             self.logger.info(f"Loaded training data: {df.shape}", extra=load_metadata)
             
-            # Get target currencies with availability filtering
-            target_currencies = generate_target_currency_list(
-                filter_by_availability=self.config.data.filter_by_availability,
-                only_available_currencies=self.config.data.only_train_available_currencies,
-                availability_check_days=self.config.data.availability_check_days
-            )
+            # Get target currencies based on configuration
+            if self.config.data.train_all_currencies:
+                target_currencies = generate_all_currencies_list(
+                    min_avg_value=self.config.data.min_avg_value_threshold,
+                    min_records=self.config.data.min_records_threshold,
+                    filter_by_availability=self.config.data.filter_by_availability,
+                    only_available_currencies=self.config.data.only_train_available_currencies,
+                    availability_check_days=self.config.data.availability_check_days
+                )
+                self.logger.info(f"Training ALL currencies mode: {len(target_currencies)} currencies selected")
+            else:
+                target_currencies = generate_target_currency_list(
+                    filter_by_availability=self.config.data.filter_by_availability,
+                    only_available_currencies=self.config.data.only_train_available_currencies,
+                    availability_check_days=self.config.data.availability_check_days
+                )
+                self.logger.info(f"Training high-value currencies mode: {len(target_currencies)} currencies selected")
+                
             self.processing_stats['total_currencies'] = len(target_currencies)
             
             # Log availability filtering status
             if self.config.data.filter_by_availability:
                 available_count = sum(1 for pair in target_currencies if pair.get('is_available', True))
-                self.logger.info(f"Availability filtering enabled: {available_count}/{len(target_currencies)} currency pairs available")
+                self.logger.info(f"Availability filtering enabled: {available_count}/{len(target_currencies)} currencies available")
             else:
-                self.logger.info("Availability filtering disabled - training all currency pairs")
+                self.logger.info("Availability filtering disabled - training all currencies")
             
             self.logger.info(f"Training models for {len(target_currencies)} currencies")
             
@@ -200,7 +214,7 @@ class ModelTrainingPipeline:
             
             get_currency_id, pay_currency_id = currency_ids
             
-            # Filter data for this currency pair using IDs
+            # Filter data for this currency using IDs
             currency_data = df[
                 (df['getCurrencyId'] == get_currency_id) & 
                 (df['payCurrencyId'] == pay_currency_id)
@@ -351,7 +365,7 @@ class ModelTrainingPipeline:
     def _get_feature_columns(self, df: pd.DataFrame) -> List[str]:
         """Get feature columns from dataframe."""
         exclude_patterns = [
-            'target_', 'date', 'league_name', 'currency_pair', 'id', 'league_start', 'league_end',
+            'target_', 'date', 'league_name', 'currency', 'id', 'league_start', 'league_end',
             'league_active', 'get_currency', 'pay_currency', 'getCurrencyId', 'payCurrencyId'
         ]
         feature_cols = [col for col in df.columns 
@@ -372,30 +386,26 @@ class ModelTrainingPipeline:
         return min(target_cols, key=lambda x: int(''.join(filter(str.isdigit, x))))
     
     def _get_currency_ids(self, get_currency: str, pay_currency: str) -> Optional[tuple]:
-        """Get currency IDs from database."""
+        """Get currency IDs from database using standardizer."""
         try:
-            from utils.database import get_db_connection
-            import pandas as pd
+            # Standardize currency names to ensure they match database
+            std_get_currency = self.currency_standardizer.standardize_currency_name(get_currency)
+            std_pay_currency = self.currency_standardizer.standardize_currency_name(pay_currency)
             
-            conn = get_db_connection()
-            query = """
-            SELECT id, name FROM currency 
-            WHERE name IN (%s, %s)
-            """
-            
-            df = pd.read_sql(query, conn, params=[get_currency, pay_currency])
-            conn.close()
-            
-            if len(df) != 2:
+            if not std_get_currency:
+                self.logger.warning(f"Currency '{get_currency}' not found in database")
+                return None
+                
+            if not std_pay_currency:
+                self.logger.warning(f"Currency '{pay_currency}' not found in database")
                 return None
             
-            # Create mapping
-            currency_map = dict(zip(df['name'], df['id']))
-            
-            get_currency_id = currency_map.get(get_currency)
-            pay_currency_id = currency_map.get(pay_currency)
+            # Get IDs using the standardizer
+            get_currency_id = self.currency_standardizer.get_currency_id(std_get_currency)
+            pay_currency_id = self.currency_standardizer.get_currency_id(std_pay_currency)
             
             if get_currency_id is None or pay_currency_id is None:
+                self.logger.warning(f"Failed to get IDs for {std_get_currency} -> {std_pay_currency}")
                 return None
             
             return (get_currency_id, pay_currency_id)
@@ -565,6 +575,12 @@ Examples:
   # Testing with minimal settings
   python train_models.py --mode test
   
+  # Train ALL currencies with sufficient data
+  python train_models.py --train-all-currencies
+  
+  # Train ALL currencies with custom thresholds
+  python train_models.py --train-all-currencies --min-avg-value 2.0 --min-records 75
+  
   # Custom data file
   python train_models.py --data-path /path/to/data.parquet
   
@@ -612,6 +628,24 @@ Examples:
         help='Experiment tags'
     )
     
+    parser.add_argument(
+        '--train-all-currencies',
+        action='store_true',
+        help='Train models for all currencies with sufficient data (not just high-value ones)'
+    )
+    
+    parser.add_argument(
+        '--min-avg-value',
+        type=float,
+        help='Minimum average value (in Chaos Orbs) for currency inclusion when using --train-all-currencies'
+    )
+    
+    parser.add_argument(
+        '--min-records',
+        type=int,
+        help='Minimum number of historical records required when using --train-all-currencies'
+    )
+    
     return parser.parse_args()
 
 
@@ -637,6 +671,12 @@ def main():
             config.experiment.description = args.description
         if args.tags:
             config.experiment.tags.extend(args.tags)
+        if args.train_all_currencies:
+            config.data.train_all_currencies = True
+        if args.min_avg_value:
+            config.data.min_avg_value_threshold = args.min_avg_value
+        if args.min_records:
+            config.data.min_records_threshold = args.min_records
         
         # Add mode tag
         config.experiment.tags.append(args.mode)

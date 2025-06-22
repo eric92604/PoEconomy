@@ -24,12 +24,12 @@ sys.path.append(str(Path(__file__).parent.parent))
 warnings.filterwarnings('ignore')
 
 # Import utilities
-from config.training_config import MLConfig, DataConfig, ProcessingConfig, get_production_config
+from config.training_config import MLConfig, DataConfig, ProcessingConfig, get_production_config, get_development_config, get_test_config
 from utils.logging_utils import setup_ml_logging, MLLogger, ProgressLogger
 from utils.data_processing import DataProcessor, DataValidator
 from utils.feature_engineering import FeatureEngineer
 from utils.database import get_db_connection
-from utils.identify_target_currencies import generate_target_currency_list
+from utils.identify_target_currencies import generate_target_currency_list, generate_all_currencies_list
 
 
 class FeatureEngineeringPipeline:
@@ -66,7 +66,7 @@ class FeatureEngineeringPipeline:
         
         # Processing statistics
         self.processing_stats = {
-            'total_currency_pairs': 0,
+            'total_currencies': 0,
             'successful_processing': 0,
             'failed_processing': 0,
             'insufficient_data': 0,
@@ -99,14 +99,26 @@ class FeatureEngineeringPipeline:
             
             self.logger.info(f"Loaded raw data: {raw_data.shape}")
             
-            # Get target currency pairs
-            target_currency_data = generate_target_currency_list()
+            # Get target currencies based on configuration
+            if self.config.data.train_all_currencies:
+                target_currency_data = generate_all_currencies_list(
+                    min_avg_value=self.config.data.min_avg_value_threshold,
+                    min_records=self.config.data.min_records_threshold,
+                    filter_by_availability=self.config.data.filter_by_availability,
+                    only_available_currencies=self.config.data.only_train_available_currencies,
+                    availability_check_days=self.config.data.availability_check_days
+                )
+                self.logger.info(f"Feature engineering for ALL currencies mode: {len(target_currency_data)} currencies selected")
+            else:
+                target_currency_data = generate_target_currency_list()
+                self.logger.info(f"Feature engineering for high-value currencies mode: {len(target_currency_data)} currencies selected")
+                
             target_currencies = [f"{pair['get_currency']} -> {pair['pay_currency']}" for pair in target_currency_data]
-            self.processing_stats['total_currency_pairs'] = len(target_currencies)
+            self.processing_stats['total_currencies'] = len(target_currencies)
             
-            self.logger.info(f"Processing {len(target_currencies)} currency pairs")
+            self.logger.info(f"Processing {len(target_currencies)} currencies")
             
-            # Process currency pairs
+            # Process currencies
             if hasattr(self.config.processing, 'use_parallel_processing') and self.config.processing.use_parallel_processing:
                 self._process_currencies_parallel(raw_data, target_currencies)
             else:
@@ -191,8 +203,8 @@ class FeatureEngineeringPipeline:
                     l."isActive" as league_active,
                     gc.name as get_currency,
                     pc.name as pay_currency,
-                    -- Create currency_pair column
-                    CONCAT(gc.name, ' -> ', pc.name) as currency_pair,
+                    -- Create currency column
+                    CONCAT(gc.name, ' -> ', pc.name) as currency,
                     -- Calculate days into league
                     EXTRACT(DAY FROM (cp.date AT TIME ZONE 'UTC' - l."startDate" AT TIME ZONE 'UTC')) as league_day
                 FROM currency_prices cp
@@ -245,7 +257,7 @@ class FeatureEngineeringPipeline:
                 if 'league_day' not in df.columns:
                     df['league_day'] = (df['date'] - df['league_start']).dt.days
                 
-                self.logger.info(f"Loaded {len(df)} records for {df['currency_pair'].nunique()} currency pairs")
+                self.logger.info(f"Loaded {len(df)} records for {df['currency'].nunique()} currencies")
                 
                 return df
                 
@@ -255,27 +267,27 @@ class FeatureEngineeringPipeline:
     
     def _process_currencies_sequential(self, raw_data: pd.DataFrame, target_currencies: List[str]) -> None:
         """
-        Process currency pairs sequentially.
+        Process currencies sequentially.
         
         Args:
             raw_data: Raw dataframe
-            target_currencies: List of currency pairs to process
+            target_currencies: List of currencies to process
         """
         progress = ProgressLogger(
             self.logger, len(target_currencies), "Sequential Currency Processing"
         )
         
-        for currency_pair in target_currencies:
+        for currency in target_currencies:
             try:
-                result = self._process_currency_pair(raw_data, currency_pair)
+                result = self._process_currency(raw_data, currency)
                 if result is not None:
                     self.processed_datasets.append(result)
                     self.processing_stats['successful_processing'] += 1
                 
             except Exception as e:
-                self.logger.error(f"Failed to process {currency_pair}", exception=e)
+                self.logger.error(f"Failed to process {currency}", exception=e)
                 self.failed_currencies.append({
-                    'currency_pair': currency_pair,
+                    'currency': currency,
                     'error': str(e),
                     'timestamp': datetime.now().isoformat()
                 })
@@ -288,11 +300,11 @@ class FeatureEngineeringPipeline:
     
     def _process_currencies_parallel(self, raw_data: pd.DataFrame, target_currencies: List[str]) -> None:
         """
-        Process currency pairs in parallel.
+        Process currencies in parallel.
         
         Args:
             raw_data: Raw dataframe
-            target_currencies: List of currency pairs to process
+            target_currencies: List of currencies to process
         """
         # Determine number of workers
         max_workers = min(mp.cpu_count(), len(target_currencies), 8)  # Cap at 8 workers
@@ -306,13 +318,13 @@ class FeatureEngineeringPipeline:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_currency = {
-                executor.submit(self._process_currency_pair_worker, raw_data, currency_pair): currency_pair
-                for currency_pair in target_currencies
+                executor.submit(self._process_currency_worker, raw_data, currency): currency
+                for currency in target_currencies
             }
             
             # Collect results
             for future in as_completed(future_to_currency):
-                currency_pair = future_to_currency[future]
+                currency = future_to_currency[future]
                 
                 try:
                     result = future.result()
@@ -321,9 +333,9 @@ class FeatureEngineeringPipeline:
                         self.processing_stats['successful_processing'] += 1
                     
                 except Exception as e:
-                    self.logger.error(f"Failed to process {currency_pair}", exception=e)
+                    self.logger.error(f"Failed to process {currency}", exception=e)
                     self.failed_currencies.append({
-                        'currency_pair': currency_pair,
+                        'currency': currency,
                         'error': str(e),
                         'timestamp': datetime.now().isoformat()
                     })
@@ -334,20 +346,20 @@ class FeatureEngineeringPipeline:
         
         progress.complete()
     
-    def _process_currency_pair(self, df: pd.DataFrame, currency_pair: str) -> Optional[pd.DataFrame]:
+    def _process_currency(self, df: pd.DataFrame, currency: str) -> Optional[pd.DataFrame]:
         """
-        Process a single currency pair.
+        Process a single currency.
         
         Args:
             df: Complete dataframe
-            currency_pair: Currency pair to process
+            currency: Currency to process
             
         Returns:
-            Processed dataframe for this currency pair or None if failed
+            Processed dataframe for this currency or None if failed
         """
-        with self.logger.log_operation(f"Processing {currency_pair}"):
-            # Filter data for this currency pair
-            currency_data = df[df['currency_pair'] == currency_pair].copy()
+        with self.logger.log_operation(f"Processing {currency}"):
+            # Filter data for this currency
+            currency_data = df[df['currency'] == currency].copy()
             
             # Log initial data shape
             self.logger.info(f"Initial data shape: {currency_data.shape}")
@@ -356,11 +368,11 @@ class FeatureEngineeringPipeline:
             try:
                 processed_data, processing_metadata = self.data_processor.process_currency_data(
                     currency_data,
-                    currency_pair
+                    currency
                 )
                 
                 if processed_data is None:
-                    self.logger.warning(f"Feature processing failed for {currency_pair}")
+                    self.logger.warning(f"Feature processing failed for {currency}")
                     return None
                 
                 # Log final data shape
@@ -370,13 +382,13 @@ class FeatureEngineeringPipeline:
                 
             except Exception as e:
                 self.logger.error(
-                    f"Error processing {currency_pair}",
+                    f"Error processing {currency}",
                     exception=e
                 )
                 return None
     
     @staticmethod
-    def _process_currency_pair_worker(raw_data: pd.DataFrame, currency_pair: str) -> Optional[pd.DataFrame]:
+    def _process_currency_worker(raw_data: pd.DataFrame, currency: str) -> Optional[pd.DataFrame]:
         """
         Worker function for parallel processing.
         
@@ -389,26 +401,26 @@ class FeatureEngineeringPipeline:
         processor = DataProcessor(config.data, config.processing)
         
         # Filter and process data
-        currency_data = raw_data[raw_data['currency_pair'] == currency_pair].copy()
+        currency_data = raw_data[raw_data['currency'] == currency].copy()
         
-        processed_data, _ = processor.process_currency_data(currency_data, currency_pair)
+        processed_data, _ = processor.process_currency_data(currency_data, currency)
         return processed_data
     
-    def _save_individual_dataset(self, data: pd.DataFrame, currency_pair: str) -> None:
+    def _save_individual_dataset(self, data: pd.DataFrame, currency: str) -> None:
         """
         Save individual currency dataset.
         
         Args:
             data: Processed dataframe
-            currency_pair: Currency pair identifier
+            currency: Currency identifier
         """
         try:
             # Create currency-specific directory
-            currency_dir = self.config.paths.data_dir / "individual" / currency_pair
+            currency_dir = self.config.paths.data_dir / "individual" / currency
             currency_dir.mkdir(parents=True, exist_ok=True)
             
             # Save dataset
-            filename = f"{currency_pair}_{self.config.experiment.experiment_id}.parquet"
+            filename = f"{currency}_{self.config.experiment.experiment_id}.parquet"
             filepath = currency_dir / filename
             
             data.to_parquet(filepath, index=False)
@@ -416,11 +428,11 @@ class FeatureEngineeringPipeline:
             self.logger.debug(f"Saved individual dataset: {filepath}")
             
         except Exception as e:
-            self.logger.warning(f"Failed to save individual dataset for {currency_pair}: {str(e)}")
+            self.logger.warning(f"Failed to save individual dataset for {currency}: {str(e)}")
     
     def _create_combined_dataset(self) -> Optional[pd.DataFrame]:
         """
-        Create combined dataset from all processed currency pairs.
+        Create combined dataset from all processed currencies.
         
         Returns:
             Combined dataframe or None if failed
@@ -444,7 +456,7 @@ class FeatureEngineeringPipeline:
                     f"Created combined dataset: {filepath}",
                     extra={
                         'shape': combined_df.shape,
-                        'currency_pairs': combined_df['currency_pair'].nunique(),
+                        'currencies': combined_df['currency'].nunique(),
                         'leagues': combined_df['league_name'].nunique() if 'league_name' in combined_df.columns else 0
                     }
                 )
@@ -475,8 +487,8 @@ class FeatureEngineeringPipeline:
         # Calculate success rate
         success_rate = (
             self.processing_stats['successful_processing'] / 
-            self.processing_stats['total_currency_pairs']
-            if self.processing_stats['total_currency_pairs'] > 0 else 0
+            self.processing_stats['total_currencies']
+            if self.processing_stats['total_currencies'] > 0 else 0
         )
         
         # Compile results
@@ -506,7 +518,7 @@ class FeatureEngineeringPipeline:
         print(f"\n{'='*80}")
         print(f"FEATURE ENGINEERING SUMMARY - {self.config.experiment.experiment_id}")
         print(f"{'='*80}")
-        print(f"Currency Pairs Processed: {self.processing_stats['successful_processing']}/{self.processing_stats['total_currency_pairs']}")
+        print(f"Currencies Processed: {self.processing_stats['successful_processing']}/{self.processing_stats['total_currencies']}")
         print(f"Success Rate: {success_rate:.1%}")
         print(f"Total Records Processed: {self.processing_stats['total_records_processed']:,}")
         print(f"Average Features per Dataset: {self.processing_stats['total_features_created'] // max(1, self.processing_stats['successful_processing'])}")
@@ -528,8 +540,20 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Standard feature engineering
-  python feature_engineering.py
+  # Production feature engineering
+  python feature_engineering.py --mode production
+  
+  # Development feature engineering with faster settings
+  python feature_engineering.py --mode development
+  
+  # Testing with minimal settings
+  python feature_engineering.py --mode test
+  
+  # Train ALL currencies with sufficient data
+  python feature_engineering.py --train-all-currencies
+  
+  # Train ALL currencies with custom thresholds
+  python feature_engineering.py --train-all-currencies --min-avg-value 2.0 --min-records 75
   
   # With parallel processing
   python feature_engineering.py --parallel
@@ -543,6 +567,13 @@ Examples:
   # Custom configuration
   python feature_engineering.py --config /path/to/config.json
         """
+    )
+    
+    parser.add_argument(
+        '--mode',
+        choices=['production', 'development', 'test'],
+        default='production',
+        help='Training mode (default: production)'
     )
     
     parser.add_argument(
@@ -589,6 +620,24 @@ Examples:
         help='Maximum days into each league to consider'
     )
     
+    parser.add_argument(
+        '--train-all-currencies',
+        action='store_true',
+        help='Train models for all currencies with sufficient data (not just high-value ones)'
+    )
+    
+    parser.add_argument(
+        '--min-avg-value',
+        type=float,
+        help='Minimum average value (in Chaos Orbs) for currency inclusion when using --train-all-currencies'
+    )
+    
+    parser.add_argument(
+        '--min-records',
+        type=int,
+        help='Minimum number of historical records required when using --train-all-currencies'
+    )
+    
     return parser.parse_args()
 
 
@@ -597,11 +646,15 @@ def main():
     args = parse_arguments()
     
     try:
-        # Get configuration
+        # Get configuration based on mode
         if args.config:
             config = MLConfig.from_file(args.config)
-        else:
+        elif args.mode == 'production':
             config = get_production_config()
+        elif args.mode == 'development':
+            config = get_development_config()
+        else:  # test
+            config = get_test_config()
         
         # Override configuration with command line arguments
         if args.experiment_id:
@@ -617,14 +670,21 @@ def main():
             config.experiment.save_individual_datasets = True
         if args.max_league_days:
             config.data.max_league_days = args.max_league_days
+        if args.train_all_currencies:
+            config.data.train_all_currencies = True
+        if args.min_avg_value:
+            config.data.min_avg_value_threshold = args.min_avg_value
+        if args.min_records:
+            config.data.min_records_threshold = args.min_records
         
-        # Add feature engineering tag
+        # Add mode and feature engineering tags
+        config.experiment.tags.append(args.mode)
         config.experiment.tags.append('feature_engineering')
         
         # Initialize feature engineer
         engineer = FeatureEngineeringPipeline(config)
         
-        print(f"Starting feature engineering...")
+        print(f"Starting feature engineering in {args.mode} mode...")
         print(f"Experiment ID: {config.experiment.experiment_id}")
         print(f"Parallel Processing: {getattr(config.processing, 'use_parallel_processing', False)}")
         
@@ -632,9 +692,9 @@ def main():
         results = engineer.run_feature_engineering_experiment()
         
         if results['processing_stats']['successful_processing'] > 0:
-            print(f"\nSuccessfully processed {results['processing_stats']['successful_processing']} currency pairs!")
+            print(f"\nSuccessfully processed {results['processing_stats']['successful_processing']} currencies!")
         else:
-            print(f"\nNo currency pairs were processed successfully")
+            print(f"\nNo currencies were processed successfully")
             sys.exit(1)
             
     except KeyboardInterrupt:

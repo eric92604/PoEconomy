@@ -5,8 +5,7 @@ Currency availability checker script.
 This script determines which currencies are available in the current league
 by checking multiple data sources:
 1. Recent price data in the database
-2. PoE.ninja API (if available)
-3. Manual overrides
+2. Manual overrides
 
 Updates the currency table with availability status.
 """
@@ -23,7 +22,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from utils.database import get_db_connection
 from utils.logging_utils import MLLogger
-from utils.poe_ninja_client import PoENinjaClient
+from utils.currency_standardizer import CurrencyStandardizer
 import pandas as pd
 
 
@@ -37,6 +36,7 @@ class CurrencyAvailabilityChecker:
         self.logger = logger or MLLogger("CurrencyAvailabilityChecker")
         self.current_league = None
         self.availability_results = {}
+        self.standardizer = CurrencyStandardizer()
         
     def get_current_league(self) -> Optional[str]:
         """Get the current active league from database."""
@@ -122,45 +122,61 @@ class CurrencyAvailabilityChecker:
             self.logger.error(f"Failed to check availability from price data: {str(e)}")
             return set()
     
-    async def check_availability_from_poe_ninja(self, league_name: str) -> Set[str]:
+    def check_availability_from_poe_watch(self, days_back: int = 7) -> Set[str]:
         """
-        Check currency availability using PoE.ninja API.
+        Check currency availability based on recent POE Watch data.
+        Uses currency standardization to match POE Watch names to database names.
         
         Args:
-            league_name: Name of the league to check
+            days_back: Number of days to look back for recent data
             
         Returns:
-            Set of available currency names
+            Set of available currency names (standardized to database names)
         """
         try:
-            async with PoENinjaClient(self.logger) as client:
-                # Try to fetch currency data for the league
-                currency_data = await client.fetch_currency_overview(league_name, "Currency")
-                fragment_data = await client.fetch_currency_overview(league_name, "Fragment")
-                
-                available_currencies = set()
-                
-                # Process currency data
-                if currency_data and 'lines' in currency_data:
-                    for line in currency_data['lines']:
-                        currency_name = line.get('currencyTypeName')
-                        if currency_name:
-                            available_currencies.add(currency_name)
-                
-                # Process fragment data
-                if fragment_data and 'lines' in fragment_data:
-                    for line in fragment_data['lines']:
-                        currency_name = line.get('currencyTypeName')
-                        if currency_name:
-                            available_currencies.add(currency_name)
-                
-                self.logger.info(f"Found {len(available_currencies)} currencies available via PoE.ninja for {league_name}")
-                
-                return available_currencies
-                
+            conn = get_db_connection()
+            
+            # Check for recent POE Watch data
+            cutoff_date = datetime.now() - timedelta(days=days_back)
+            
+            query = """
+            SELECT DISTINCT currency_name
+            FROM live_poe_watch
+            WHERE fetch_time >= %s
+              AND mean_price > 0
+              AND daily_volume > 0
+            """
+            
+            df = pd.read_sql(query, conn, params=[cutoff_date])
+            conn.close()
+            
+            poe_watch_currencies = set(df['currency_name'].tolist())
+            self.logger.info(f"Found {len(poe_watch_currencies)} currencies with recent POE Watch data")
+            
+            # Standardize POE Watch currency names to match database names
+            standardized_currencies = set()
+            successful_matches = 0
+            
+            for poe_watch_name in poe_watch_currencies:
+                # Try direct match first
+                standardized_name = self.standardizer.standardize_currency_name(poe_watch_name)
+                if standardized_name:
+                    standardized_currencies.add(standardized_name)
+                    successful_matches += 1
+                elif poe_watch_name in self.standardizer.get_all_currency_names():
+                    # Direct match without standardization needed
+                    standardized_currencies.add(poe_watch_name)
+                    successful_matches += 1
+            
+            self.logger.info(f"Successfully standardized {successful_matches}/{len(poe_watch_currencies)} POE Watch currencies to database names")
+            
+            return standardized_currencies
+            
         except Exception as e:
-            self.logger.warning(f"Failed to check availability from PoE.ninja: {str(e)}")
+            self.logger.error(f"Failed to check availability from POE Watch: {str(e)}")
             return set()
+    
+
     
     def get_manual_overrides(self) -> Tuple[Set[str], Set[str]]:
         """
@@ -183,7 +199,6 @@ class CurrencyAvailabilityChecker:
         # Currencies to disable (e.g., legacy items, test currencies)
         force_disabled = {
             'Eternal Orb',  # Legacy currency
-            'Mirror of Kalandra',  # Extremely rare, unreliable price data
         }
         
         self.logger.info(f"Manual overrides: {len(force_enabled)} force enabled, {len(force_disabled)} force disabled")
@@ -207,7 +222,7 @@ class CurrencyAvailabilityChecker:
         
         # Check availability from multiple sources
         price_data_currencies = self.check_availability_from_price_data(self.current_league, days_back=14)
-        poe_ninja_currencies = await self.check_availability_from_poe_ninja(self.current_league)
+        poe_watch_currencies = self.check_availability_from_poe_watch(days_back=7)
         
         # Get manual overrides
         force_enabled, force_disabled = self.get_manual_overrides()
@@ -235,20 +250,20 @@ class CurrencyAvailabilityChecker:
                 availability_results[currency_name] = True
                 continue
             
-            # Check if currency appears in any data source
+            # Check if currency appears in data sources
             has_price_data = currency_name in price_data_currencies
-            has_poe_ninja_data = currency_name in poe_ninja_currencies
+            has_poe_watch_data = currency_name in poe_watch_currencies
             
-            # Currency is available if it appears in either source
-            is_available = has_price_data or has_poe_ninja_data
+            # Currency is available if it appears in ANY data source
+            is_available = has_price_data or has_poe_watch_data
             availability_results[currency_name] = is_available
             
             # Log decision reasoning
             sources = []
             if has_price_data:
                 sources.append("price_data")
-            if has_poe_ninja_data:
-                sources.append("poe_ninja")
+            if has_poe_watch_data:
+                sources.append("poe_watch")
             
             source_str = ", ".join(sources) if sources else "none"
             self.logger.debug(f"{currency_name}: {'available' if is_available else 'unavailable'} (sources: {source_str})")
@@ -257,9 +272,20 @@ class CurrencyAvailabilityChecker:
         available_count = sum(availability_results.values())
         total_count = len(availability_results)
         
+        # Debug: Show breakdown of availability sources
+        poe_watch_enabled = sum(1 for name, avail in availability_results.items() 
+                               if avail and name in poe_watch_currencies and name not in force_enabled)
+        price_data_enabled = sum(1 for name, avail in availability_results.items() 
+                                if avail and name in price_data_currencies and name not in force_enabled and name not in poe_watch_currencies)
+        manual_enabled = sum(1 for name, avail in availability_results.items() 
+                           if avail and name in force_enabled)
+        
         self.logger.info(f"Availability check complete: {available_count}/{total_count} currencies available")
+        self.logger.info(f"  - Manual enabled: {manual_enabled}")
+        self.logger.info(f"  - POE Watch enabled: {poe_watch_enabled}")
+        self.logger.info(f"  - Price data only enabled: {price_data_enabled}")
         self.logger.info(f"Price data sources: {len(price_data_currencies)} currencies")
-        self.logger.info(f"PoE.ninja sources: {len(poe_ninja_currencies)} currencies")
+        self.logger.info(f"POE Watch sources: {len(poe_watch_currencies)} currencies")
         self.logger.info(f"Manual overrides: {len(force_enabled)} enabled, {len(force_disabled)} disabled")
         
         self.availability_results = availability_results
@@ -279,6 +305,9 @@ class CurrencyAvailabilityChecker:
             conn = get_db_connection()
             cursor = conn.cursor()
             
+            # Get manual overrides for source determination
+            force_enabled, force_disabled = self.get_manual_overrides()
+            
             # Prepare batch update
             update_query = """
             UPDATE currency 
@@ -294,9 +323,9 @@ class CurrencyAvailabilityChecker:
             for currency_name, is_available in availability_results.items():
                 # Determine source
                 source = "combined_check"
-                if currency_name in self.get_manual_overrides()[0]:
+                if currency_name in force_enabled:
                     source = "manual_enabled"
-                elif currency_name in self.get_manual_overrides()[1]:
+                elif currency_name in force_disabled:
                     source = "manual_disabled"
                 
                 update_data.append((is_available, current_time, source, currency_name))
