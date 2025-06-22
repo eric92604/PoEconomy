@@ -101,11 +101,15 @@ class PoeWatchCurrency:
     
     def is_valid(self) -> bool:
         """Check if currency data is valid for storage."""
+        # Define allowed categories
+        allowed_categories = {'currency', 'fragment', 'catalyst'}
+        
         return (
             self.id > 0 and
             self.name and
             self.mean >= 0 and
-            self.league
+            self.league and
+            self.category.lower() in allowed_categories
         )
 
 
@@ -223,7 +227,12 @@ class PoeWatchAPIClient:
             return []
     
     async def get_currency_data(self, league: str, category: str = 'currency') -> List[PoeWatchCurrency]:
-        """Fetch currency/fragment data for a specific league and category."""
+        """
+        Fetch currency/fragment data for a specific league and category.
+        
+        Note: The API may return items from multiple categories even when filtering by one.
+        Client-side filtering is applied to ensure only allowed categories are processed.
+        """
         try:
             params = {
                 'category': category,
@@ -239,9 +248,17 @@ class PoeWatchAPIClient:
             # Convert API response to data objects
             currency_data = []
             skipped_items = 0
+            filtered_items = 0
             
             for item in data:
                 try:
+                    # Pre-filter by category to avoid processing unwanted items
+                    item_category = item.get('category', '').lower()
+                    if item_category not in self.allowed_categories:
+                        filtered_items += 1
+                        self.logger.debug(f"Filtered out unwanted category '{item_category}' for item: {item.get('name', 'Unknown')}")
+                        continue
+                    
                     currency_obj = PoeWatchCurrency.from_api_response(item, league)
                     # Validate the currency data before adding
                     if currency_obj.is_valid():
@@ -254,10 +271,17 @@ class PoeWatchAPIClient:
                     self.logger.warning(f"Error parsing {category} item: {str(e)} - Item data: {item}")
                     continue
             
+            # Log fetching results with filtering information
+            log_parts = [f"Fetched {len(currency_data)} valid {category} items for {league}"]
+            if filtered_items > 0:
+                log_parts.append(f"filtered out {filtered_items} unwanted categories")
             if skipped_items > 0:
-                self.logger.info(f"Fetched {len(currency_data)} valid {category} items for {league} (skipped {skipped_items} invalid items)")
+                log_parts.append(f"skipped {skipped_items} invalid items")
+            
+            if filtered_items > 0 or skipped_items > 0:
+                self.logger.info(" (".join(log_parts) + ")" if len(log_parts) > 1 else log_parts[0])
             else:
-                self.logger.info(f"Fetched {len(currency_data)} {category} items for {league}")
+                self.logger.info(log_parts[0])
             
             return currency_data
             
@@ -273,12 +297,14 @@ class PoeWatchIngestionService:
         self,
         logger: Optional[MLLogger] = None,
         fetch_interval: int = 300,  # 5 minutes
-        log_level: str = "INFO"
+        log_level: str = "INFO",
+        enable_investment_reports: bool = False
     ):
         """Initialize the POE Watch data ingestion service."""
         self.logger = logger or MLLogger("PoeWatchIngestion", level=log_level)
         self.fetch_interval = fetch_interval
         self.log_level = log_level
+        self.enable_investment_reports = enable_investment_reports
         
         # Service state
         self.running = False
@@ -290,12 +316,15 @@ class PoeWatchIngestionService:
         # Leagues to monitor
         self.monitored_leagues = ['Mercenaries']
         
-        # Categories to monitor
-        self.monitored_categories = ['currency', 'fragment']
+        # Categories to monitor - only collect currency, catalysts, and fragments
+        self.monitored_categories = ['currency', 'fragment', 'catalyst']
         
         # Price change alert thresholds (DISABLED)
         self.alert_thresholds = {}
         self.alerts_enabled = False
+        
+        # Define allowed categories for filtering
+        self.allowed_categories = {'currency', 'fragment', 'catalyst'}
         
         # Statistics
         self.stats = {
@@ -313,6 +342,10 @@ class PoeWatchIngestionService:
         self.price_cache = {}
         self.cache_cleanup_interval = 3600  # Clean cache every hour
         self.last_cache_cleanup = datetime.now()
+    
+    def is_category_allowed(self, category: str) -> bool:
+        """Check if a category is allowed for data collection."""
+        return category.lower() in self.allowed_categories
     
     async def initialize(self):
         """Initialize service components."""
@@ -411,6 +444,11 @@ class PoeWatchIngestionService:
                 # Fetch data for all monitored leagues and categories
                 for league in self.monitored_leagues:
                     for category in self.monitored_categories:
+                        # Double-check category is allowed
+                        if not self.is_category_allowed(category):
+                            self.logger.warning(f"⚠️ Skipping disallowed category: {category}")
+                            continue
+                            
                         currency_data = await self.client.get_currency_data(league, category)
                         
                         if currency_data:
@@ -575,6 +613,7 @@ class PoeWatchIngestionService:
             'fetch_interval': self.fetch_interval,
             'monitored_leagues': self.monitored_leagues,
             'monitored_categories': self.monitored_categories,
+            'allowed_categories': list(self.allowed_categories),
             'alerts_enabled': self.alerts_enabled,
             'price_cache_size': len(self.price_cache),
             'statistics': self.stats.copy()
@@ -602,7 +641,7 @@ class PoeWatchIngestionService:
                     await self.cleanup_price_cache()
                     
                     # If data was successfully updated, trigger investment report generation
-                    if data_updated:
+                    if data_updated and self.enable_investment_reports:
                         await self.trigger_investment_report()
                 
                 # Calculate sleep time to maintain interval
@@ -721,6 +760,12 @@ Examples:
         help='Run in test mode (single fetch then exit)'
     )
     
+    parser.add_argument(
+        '--enable-investment-reports',
+        action='store_true',
+        help='Enable automatic investment report generation after data updates'
+    )
+    
     return parser.parse_args()
 
 
@@ -735,7 +780,8 @@ async def main():
     service = PoeWatchIngestionService(
         logger=logger,
         fetch_interval=args.fetch_interval,
-        log_level=args.log_level
+        log_level=args.log_level,
+        enable_investment_reports=args.enable_investment_reports or args.test_mode
     )
     
     service.monitored_leagues = args.leagues
@@ -762,8 +808,6 @@ async def main():
             await service.initialize()
             success = await service.fetch_and_store_data()
             if success:
-                # Trigger investment report generation in test mode too
-                await service.trigger_investment_report()
                 logger.info("✅ Test completed successfully")
                 return 0
             else:
