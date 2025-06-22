@@ -33,25 +33,15 @@ class PoeWatchCurrency:
     name: str
     category: str
     group: str
-    frame: int
-    icon: str
     mean: float
     min: float
     max: float
-    exalted: float
     daily: int
     change: float
     history: List[float]
     low_confidence: bool
     league: str
     fetch_time: datetime = field(default_factory=datetime.now)
-    
-    # Optional fields
-    mode: Optional[float] = None
-    total: Optional[int] = None
-    current: Optional[int] = None
-    accepted: Optional[int] = None
-    divine: Optional[float] = None
     
     @classmethod
     def from_api_response(cls, data: Dict[str, Any], league: str) -> 'PoeWatchCurrency':
@@ -79,22 +69,14 @@ class PoeWatchCurrency:
                 name=str(data.get('name', '')),
                 category=str(data.get('category', '')),
                 group=str(data.get('group', '')),
-                frame=safe_int(data.get('frame'), 0),
-                icon=str(data.get('icon', '')),
                 mean=safe_float(data.get('mean')),
                 min=safe_float(data.get('min')),
                 max=safe_float(data.get('max')),
-                exalted=safe_float(data.get('exalted')),
                 daily=safe_int(data.get('daily')),
                 change=safe_float(data.get('change')),
                 history=data.get('history', []) if isinstance(data.get('history'), list) else [],
                 low_confidence=bool(data.get('lowConfidence', False)),
-                league=str(league),
-                mode=safe_float(data.get('mode')),
-                total=safe_int(data.get('total')),
-                current=safe_int(data.get('current')),
-                accepted=safe_int(data.get('accepted')),
-                divine=safe_float(data.get('divine'))
+                league=str(league)
             )
         except Exception as e:
             raise ValueError(f"Failed to parse API response data: {e}")
@@ -226,9 +208,14 @@ class PoeWatchAPIClient:
             self.logger.error(f"Error fetching categories: {str(e)}")
             return []
     
-    async def get_currency_data(self, league: str, category: str = 'currency') -> List[PoeWatchCurrency]:
+    async def get_currency_data(self, league: str, category: str = 'currency', allowed_categories: Optional[set] = None) -> List[PoeWatchCurrency]:
         """
         Fetch currency/fragment data for a specific league and category.
+        
+        Args:
+            league: League name
+            category: Category to fetch
+            allowed_categories: Optional set of allowed categories for filtering
         
         Note: The API may return items from multiple categories even when filtering by one.
         Client-side filtering is applied to ensure only allowed categories are processed.
@@ -252,12 +239,13 @@ class PoeWatchAPIClient:
             
             for item in data:
                 try:
-                    # Pre-filter by category to avoid processing unwanted items
-                    item_category = item.get('category', '').lower()
-                    if item_category not in self.allowed_categories:
-                        filtered_items += 1
-                        self.logger.debug(f"Filtered out unwanted category '{item_category}' for item: {item.get('name', 'Unknown')}")
-                        continue
+                    # Pre-filter by category if allowed_categories is provided
+                    if allowed_categories:
+                        item_category = item.get('category', '').lower()
+                        if item_category not in allowed_categories:
+                            filtered_items += 1
+                            self.logger.debug(f"Filtered out unwanted category '{item_category}' for item: {item.get('name', 'Unknown')}")
+                            continue
                     
                     currency_obj = PoeWatchCurrency.from_api_response(item, league)
                     # Validate the currency data before adding
@@ -390,22 +378,14 @@ class PoeWatchIngestionService:
                 currency_name VARCHAR(100) NOT NULL,
                 category VARCHAR(50),
                 group_name VARCHAR(50),
-                frame INTEGER,
-                icon_url TEXT,
                 mean_price DECIMAL(20, 8),
                 min_price DECIMAL(20, 8),
                 max_price DECIMAL(20, 8),
-                exalted_price DECIMAL(20, 8),
-                divine_price DECIMAL(20, 8),
                 daily_volume INTEGER,
                 price_change_percent DECIMAL(10, 4),
                 price_history JSONB,
                 low_confidence BOOLEAN,
                 league VARCHAR(50) NOT NULL,
-                mode_price DECIMAL(20, 8),
-                total_listings INTEGER,
-                current_listings INTEGER,
-                accepted_listings INTEGER,
                 fetch_time TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );
             """
@@ -444,12 +424,12 @@ class PoeWatchIngestionService:
                 # Fetch data for all monitored leagues and categories
                 for league in self.monitored_leagues:
                     for category in self.monitored_categories:
-                        # Double-check category is allowed
+                                                # Double-check category is allowed
                         if not self.is_category_allowed(category):
                             self.logger.warning(f"⚠️ Skipping disallowed category: {category}")
                             continue
-                            
-                        currency_data = await self.client.get_currency_data(league, category)
+                        
+                        currency_data = await self.client.get_currency_data(league, category, self.allowed_categories)
                         
                         if currency_data:
                             all_currencies.extend(currency_data)
@@ -493,13 +473,12 @@ class PoeWatchIngestionService:
             
             insert_sql = """
             INSERT INTO live_poe_watch (
-                poe_watch_id, currency_name, category, group_name, frame, icon_url,
-                mean_price, min_price, max_price, exalted_price, divine_price,
+                poe_watch_id, currency_name, category, group_name,
+                mean_price, min_price, max_price,
                 daily_volume, price_change_percent, price_history, low_confidence,
-                league, mode_price, total_listings, current_listings, accepted_listings,
-                fetch_time
+                league, fetch_time
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """
             
@@ -523,22 +502,14 @@ class PoeWatchIngestionService:
                                 currency.name[:100],  # Truncate to prevent overflow
                                 currency.category[:50],
                                 currency.group[:50],
-                                currency.frame,
-                                currency.icon,
                                 currency.mean,
                                 currency.min,
                                 currency.max,
-                                currency.exalted,
-                                currency.divine,
                                 currency.daily,
                                 currency.change,
                                 json.dumps(currency.history) if currency.history else '[]',
                                 currency.low_confidence,
                                 currency.league[:50],
-                                currency.mode,
-                                currency.total,
-                                currency.current,
-                                currency.accepted,
                                 currency.fetch_time
                             ))
                             batch_records += 1
