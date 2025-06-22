@@ -31,6 +31,7 @@ sys.path.append(str(Path(__file__).parent))
 from utils.logging_utils import MLLogger
 from utils.database import get_db_connection
 from utils.model_inference import ModelPredictor
+from utils.currency_name_mapper import find_best_currency_match
 
 
 class PoeWatchInvestmentReportGenerator:
@@ -192,25 +193,6 @@ class PoeWatchInvestmentReportGenerator:
         # Create currency name mapping for fuzzy matching
         poe_watch_currencies = set(market_df['currency_name'].unique())
         ml_currencies = set(predictions_df['currency'].unique()) if not predictions_df.empty else set()
-        
-        def find_best_currency_match(poe_watch_name: str, ml_currency_names: set) -> str:
-            """Find the best matching ML currency name for a POE Watch currency name."""
-            # Exact match first
-            if poe_watch_name in ml_currency_names:
-                return poe_watch_name
-            
-            # Normalize names for comparison (remove apostrophes, spaces, case insensitive)
-            def normalize_name(name: str) -> str:
-                return name.lower().replace("'", "").replace(" ", "").replace("-", "")
-            
-            poe_normalized = normalize_name(poe_watch_name)
-            
-            # Look for normalized matches
-            for ml_name in ml_currency_names:
-                if normalize_name(ml_name) == poe_normalized:
-                    return ml_name
-            
-            return None
         
         self.logger.info(f"Found {len(ml_currencies)} ML model currencies, {len(poe_watch_currencies)} POE Watch currencies")
         

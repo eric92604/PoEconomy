@@ -5,8 +5,7 @@ Currency availability checker script.
 This script determines which currencies are available in the current league
 by checking multiple data sources:
 1. Recent price data in the database
-2. PoE.ninja API (if available)
-3. Manual overrides
+2. Manual overrides
 
 Updates the currency table with availability status.
 """
@@ -23,7 +22,6 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from utils.database import get_db_connection
 from utils.logging_utils import MLLogger
-from utils.poe_ninja_client import PoENinjaClient
 import pandas as pd
 
 
@@ -122,45 +120,7 @@ class CurrencyAvailabilityChecker:
             self.logger.error(f"Failed to check availability from price data: {str(e)}")
             return set()
     
-    async def check_availability_from_poe_ninja(self, league_name: str) -> Set[str]:
-        """
-        Check currency availability using PoE.ninja API.
-        
-        Args:
-            league_name: Name of the league to check
-            
-        Returns:
-            Set of available currency names
-        """
-        try:
-            async with PoENinjaClient(self.logger) as client:
-                # Try to fetch currency data for the league
-                currency_data = await client.fetch_currency_overview(league_name, "Currency")
-                fragment_data = await client.fetch_currency_overview(league_name, "Fragment")
-                
-                available_currencies = set()
-                
-                # Process currency data
-                if currency_data and 'lines' in currency_data:
-                    for line in currency_data['lines']:
-                        currency_name = line.get('currencyTypeName')
-                        if currency_name:
-                            available_currencies.add(currency_name)
-                
-                # Process fragment data
-                if fragment_data and 'lines' in fragment_data:
-                    for line in fragment_data['lines']:
-                        currency_name = line.get('currencyTypeName')
-                        if currency_name:
-                            available_currencies.add(currency_name)
-                
-                self.logger.info(f"Found {len(available_currencies)} currencies available via PoE.ninja for {league_name}")
-                
-                return available_currencies
-                
-        except Exception as e:
-            self.logger.warning(f"Failed to check availability from PoE.ninja: {str(e)}")
-            return set()
+
     
     def get_manual_overrides(self) -> Tuple[Set[str], Set[str]]:
         """
@@ -207,7 +167,6 @@ class CurrencyAvailabilityChecker:
         
         # Check availability from multiple sources
         price_data_currencies = self.check_availability_from_price_data(self.current_league, days_back=14)
-        poe_ninja_currencies = await self.check_availability_from_poe_ninja(self.current_league)
         
         # Get manual overrides
         force_enabled, force_disabled = self.get_manual_overrides()
@@ -235,20 +194,17 @@ class CurrencyAvailabilityChecker:
                 availability_results[currency_name] = True
                 continue
             
-            # Check if currency appears in any data source
+            # Check if currency appears in data sources
             has_price_data = currency_name in price_data_currencies
-            has_poe_ninja_data = currency_name in poe_ninja_currencies
             
-            # Currency is available if it appears in either source
-            is_available = has_price_data or has_poe_ninja_data
+            # Currency is available if it appears in price data
+            is_available = has_price_data
             availability_results[currency_name] = is_available
             
             # Log decision reasoning
             sources = []
             if has_price_data:
                 sources.append("price_data")
-            if has_poe_ninja_data:
-                sources.append("poe_ninja")
             
             source_str = ", ".join(sources) if sources else "none"
             self.logger.debug(f"{currency_name}: {'available' if is_available else 'unavailable'} (sources: {source_str})")
@@ -259,7 +215,6 @@ class CurrencyAvailabilityChecker:
         
         self.logger.info(f"Availability check complete: {available_count}/{total_count} currencies available")
         self.logger.info(f"Price data sources: {len(price_data_currencies)} currencies")
-        self.logger.info(f"PoE.ninja sources: {len(poe_ninja_currencies)} currencies")
         self.logger.info(f"Manual overrides: {len(force_enabled)} enabled, {len(force_disabled)} disabled")
         
         self.availability_results = availability_results

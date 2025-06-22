@@ -129,7 +129,7 @@ class ModelPredictor:
         # Find all currency directories
         for currency_dir in self.models_dir.iterdir():
             if currency_dir.is_dir():
-                currency = currency_dir.name.replace('_', ' ')
+                currency = currency_dir.name
                 
                 # Check for model files
                 model_file = currency_dir / "ensemble_model.pkl"
@@ -186,7 +186,7 @@ class ModelPredictor:
         Args:
             currencies: Specific currencies to get data for
             days_back: Number of days of historical data to include
-            use_live_data: Whether to prioritize live poe.ninja data
+            use_live_data: Whether to prioritize live POE Watch data
             
         Returns:
             DataFrame with current league data or None if failed
@@ -209,9 +209,9 @@ class ModelPredictor:
             
             # Try to get live data first if enabled
             if use_live_data:
-                live_data = self._get_live_ninja_data(conn, currencies, days_back)
+                live_data = self._get_live_poe_watch_data(conn, currencies, days_back)
                 if live_data is not None and not live_data.empty:
-                    self.logger.info("Using live poe.ninja data for predictions")
+                    self.logger.info("Using live POE Watch data for predictions")
                     self._current_league_data = live_data
                     self._last_data_update = datetime.now()
                     conn.close()
@@ -234,14 +234,14 @@ class ModelPredictor:
             self.logger.error(f"Failed to get current league data: {str(e)}")
             return None
     
-    def _get_live_ninja_data(
+    def _get_live_poe_watch_data(
         self,
         conn,
         currencies: Optional[List[str]] = None,
         days_back: int = 30
     ) -> Optional[pd.DataFrame]:
         """
-        Get live data from poe.ninja ingestion table.
+        Get live data from POE Watch ingestion table.
         
         Args:
             conn: Database connection
@@ -254,25 +254,23 @@ class ModelPredictor:
         try:
             cutoff_date = datetime.now() - timedelta(days=days_back)
             
-            # Query live currency prices table
+            # Query live POE Watch data table
             live_query = """
             SELECT 
                 currency_name,
                 league,
-                direction,
-                value as price,
-                chaos_equivalent,
-                sample_time as date,
-                confidence_level,
-                total_change,
-                listing_count,
+                mean_price as price,
+                divine_price as chaos_equivalent,
+                fetch_time as date,
+                CASE WHEN low_confidence THEN 0.5 ELSE 0.8 END as confidence_level,
+                price_change_percent as total_change,
+                current_listings as listing_count,
                 currency_name as currency
-            FROM live_currency_prices 
-            WHERE sample_time >= %s
-                AND value > 0
-                AND direction = 'receive'  -- Focus on chaos -> currency direction
+            FROM live_poe_watch 
+            WHERE fetch_time >= %s
+                AND mean_price > 0
                 AND league = 'Mercenaries'  -- Filter for current league
-            ORDER BY sample_time DESC
+            ORDER BY fetch_time DESC
             """
             
             df = pd.read_sql(live_query, conn, params=[cutoff_date])
@@ -289,6 +287,9 @@ class ModelPredictor:
             df['league_start'] = df['date'].min()  # Approximate
             df['league_day'] = (df['date'] - df['league_start']).dt.days
             
+            # Fill missing chaos_equivalent with price for compatibility
+            df['chaos_equivalent'] = df['chaos_equivalent'].fillna(df['price'])
+            
             # Add derived columns for compatibility
             df['id'] = range(len(df))
             df['leagueId'] = 1  # Default league ID
@@ -303,7 +304,7 @@ class ModelPredictor:
             return df if not df.empty else None
             
         except Exception as e:
-            self.logger.error(f"Failed to get live ninja data: {str(e)}")
+            self.logger.error(f"Failed to get live POE Watch data: {str(e)}")
             return None
     
     def _get_historical_data(
