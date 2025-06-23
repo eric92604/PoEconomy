@@ -270,8 +270,8 @@ class ModelTrainingPipeline:
             else:
                 if target_column not in processed_data.columns:
                     self.logger.warning(f"Target column {target_column} not found for {currency_name}")
-                    self.processing_stats['validation_failures'] += 1
-                    return None
+                self.processing_stats['validation_failures'] += 1
+                return None
             
             X = processed_data[feature_columns].values
             
@@ -283,7 +283,21 @@ class ModelTrainingPipeline:
                 self.logger.info(f"Single-output training with target: {target_column}")
 
             self.logger.info(f"Initial data shape: X={X.shape}, y={y.shape}")
-            self.logger.info(f"Initial NaN count in features: {np.isnan(X).sum()}")
+            
+            # Check for NaN values only if X is numeric
+            if X.dtype.kind in 'biufc':  # binary, integer, unsigned, float, complex
+                nan_count = np.isnan(X).sum()
+                self.logger.info(f"Initial NaN count in features: {nan_count}")
+            else:
+                self.logger.info(f"Features contain non-numeric data (dtype: {X.dtype})")
+                # Convert to numeric if possible, otherwise this will be caught later
+                try:
+                    X = X.astype(float)
+                    nan_count = np.isnan(X).sum()
+                    self.logger.info(f"Converted to numeric. NaN count in features: {nan_count}")
+                except (ValueError, TypeError) as e:
+                    self.logger.error(f"Cannot convert features to numeric: {e}")
+                    return None
 
             # Handle NaN filtering for both single and multi-output
             if is_multi_output:
@@ -405,11 +419,19 @@ class ModelTrainingPipeline:
         feature_cols = [col for col in df.columns 
                        if not any(pattern in col for pattern in exclude_patterns)]
         
-        if not feature_cols:
-            self.logger.warning("No feature columns found after filtering")
+        # Filter to only include numeric columns
+        numeric_feature_cols = []
+        for col in feature_cols:
+            if df[col].dtype in ['int64', 'float64', 'int32', 'float32', 'int16', 'float16']:
+                numeric_feature_cols.append(col)
+            else:
+                self.logger.debug(f"Excluding non-numeric column: {col} (dtype: {df[col].dtype})")
+        
+        if not numeric_feature_cols:
+            self.logger.warning("No numeric feature columns found after filtering")
             return None
             
-        return feature_cols
+        return numeric_feature_cols
     
     def _get_target_column(self, df: pd.DataFrame) -> Union[str, List[str]]:
         """Get target column(s) from dataframe."""
@@ -504,7 +526,8 @@ class ModelTrainingPipeline:
             
             if len(X_valid) > 0:
                 # Impute any remaining NaN values
-                if np.isnan(X_valid).any():
+                # Check if X_valid is numeric before using np.isnan
+                if X_valid.dtype.kind in 'biufc' and np.isnan(X_valid).any():
                     imputer = SimpleImputer(strategy='median')
                     X_valid = imputer.fit_transform(X_valid)
                 

@@ -108,7 +108,7 @@ def identify_high_value_currencies(min_avg_value=50, filter_by_availability=True
     for _, row in high_value_currencies.iterrows():
         volatility = row['price_volatility'] if row['price_volatility'] is not None else 0
         median_val = row['median_price_chaos'] if row['median_price_chaos'] is not None else 0
-        is_available = "✓" if row.get('is_available', True) else "✗"
+        is_available = "Y" if row.get('is_available', True) else "N"
         
         print(f"{row['currency_name']:<25} {is_available:>9} {row['min_price_chaos']:>6.1f} {median_val:>7.1f} "
               f"{row['avg_price_chaos']:>7.1f} {row['max_price_chaos']:>8.1f} {volatility:>6.1f} {row['total_records']:>7}")
@@ -150,7 +150,7 @@ def generate_all_currencies_list(
     apply_availability_filter = filter_by_availability and check_availability_columns_exist()
     
     if not apply_availability_filter and filter_by_availability:
-        print("⚠️  Availability filtering requested but database columns not found")
+        print("WARNING:  Availability filtering requested but database columns not found")
         print("    Run 'python ml/scripts/add_currency_availability_column.py' first")
         print("    Proceeding without availability filtering...\n")
     
@@ -193,7 +193,7 @@ def generate_all_currencies_list(
         target_pairs.append(pair)
         
         median_val = currency['median_price_chaos'] if currency['median_price_chaos'] is not None else 0
-        availability_indicator = "✓" if pair['is_available'] else "✗"
+        availability_indicator = "Y" if pair['is_available'] else "N"
         print(f"  {availability_indicator} {pair['get_currency']} -> {pair['pay_currency']} "
               f"(Min: {currency['min_price_chaos']:.1f}, Med: {median_val:.1f}, "
               f"Avg: {currency['avg_price_chaos']:.1f}, Max: {currency['max_price_chaos']:.1f}, "
@@ -218,12 +218,12 @@ def generate_all_currencies_list(
         print(f"Available pairs: {available_pairs}/{len(unique_pairs)}")
     
     print("=" * 140)
-    print(f"{'#':>2} {'✓':>1} {'Currency Pair':<35} {'Min':>6} {'Med':>6} {'Avg':>6} {'Max':>7} {'Vol':>5} {'Records':>7} {'Source':>12}")
+    print(f"{'#':>2} {'Y':>1} {'Currency Pair':<35} {'Min':>6} {'Med':>6} {'Avg':>6} {'Max':>7} {'Vol':>5} {'Records':>7} {'Source':>12}")
     print("-" * 140)
     
     for i, pair in enumerate(unique_pairs, 1):
         pair_name = f"{pair['get_currency']} -> {pair['pay_currency']}"
-        availability_indicator = "✓" if pair['is_available'] else "✗"
+        availability_indicator = "Y" if pair['is_available'] else "N"
         source = pair['availability_source'][:12] if pair['availability_source'] else 'unknown'
         
         print(f"{i:2d}. {availability_indicator} {pair_name:<35} {pair['min_value']:>6.1f} {pair['median_value']:>6.1f} "
@@ -255,7 +255,7 @@ def generate_target_currency_list(
     apply_availability_filter = filter_by_availability and check_availability_columns_exist()
     
     if not apply_availability_filter and filter_by_availability:
-        print("⚠️  Availability filtering requested but database columns not found")
+        print("WARNING:  Availability filtering requested but database columns not found")
         print("    Run 'python ml/scripts/add_currency_availability_column.py' first")
         print("    Proceeding without availability filtering...\n")
     
@@ -296,7 +296,7 @@ def generate_target_currency_list(
         target_pairs.append(pair)
         
         median_val = currency['median_price_chaos'] if currency['median_price_chaos'] is not None else 0
-        availability_indicator = "✓" if pair['is_available'] else "✗"
+        availability_indicator = "Y" if pair['is_available'] else "N"
         print(f"  {availability_indicator} {pair['get_currency']} -> {pair['pay_currency']} "
               f"(Min: {currency['min_price_chaos']:.1f}, Med: {median_val:.1f}, "
               f"Avg: {currency['avg_price_chaos']:.1f}, Max: {currency['max_price_chaos']:.1f})")
@@ -320,12 +320,12 @@ def generate_target_currency_list(
         print(f"Available pairs: {available_pairs}/{len(unique_pairs)}")
     
     print("=" * 140)
-    print(f"{'#':>2} {'✓':>1} {'Currency Pair':<35} {'Min':>6} {'Med':>6} {'Avg':>6} {'Max':>7} {'Vol':>5} {'Records':>7} {'Source':>12}")
+    print(f"{'#':>2} {'Y':>1} {'Currency Pair':<35} {'Min':>6} {'Med':>6} {'Avg':>6} {'Max':>7} {'Vol':>5} {'Records':>7} {'Source':>12}")
     print("-" * 140)
     
     for i, pair in enumerate(unique_pairs, 1):
         pair_name = f"{pair['get_currency']} -> {pair['pay_currency']}"
-        availability_indicator = "✓" if pair['is_available'] else "✗"
+        availability_indicator = "Y" if pair['is_available'] else "N"
         source = pair['availability_source'][:12] if pair['availability_source'] else 'unknown'
         
         print(f"{i:2d}. {availability_indicator} {pair_name:<35} {pair['min_value']:>6.1f} {pair['median_value']:>6.1f} "
@@ -341,7 +341,7 @@ def get_available_currencies() -> List[str]:
         List of available currency names
     """
     if not check_availability_columns_exist():
-        print("⚠️  Availability columns not found - returning all currencies")
+        print("WARNING:  Availability columns not found - returning all currencies")
         
         # Fallback: return all currencies
         conn = get_db_connection()
@@ -365,12 +365,12 @@ def get_available_currencies() -> List[str]:
         conn.close()
         
         available_currencies = df['name'].tolist()
-        print(f"ℹ️  Found {len(available_currencies)} available currencies")
+        print(f"INFO:  Found {len(available_currencies)} available currencies")
         
         return available_currencies
         
     except Exception as e:
-        print(f"❌ Error getting available currencies: {str(e)}")
+        print(f"ERROR: Error getting available currencies: {str(e)}")
         return []
 
 if __name__ == "__main__":
@@ -379,7 +379,7 @@ if __name__ == "__main__":
     
     # Check if availability system is set up
     has_availability = check_availability_columns_exist()
-    print(f"Currency availability system: {'✓ Active' if has_availability else '✗ Not configured'}")
+    print(f"Currency availability system: {'Y Active' if has_availability else 'N Not configured'}")
     
     if not has_availability:
         print("\nTo enable availability filtering:")

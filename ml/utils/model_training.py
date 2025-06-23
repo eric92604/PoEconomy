@@ -210,26 +210,25 @@ class BaseModel(ABC):
             if X_val is not None:
                 X_val = self.scaler.transform(X_val)
         
-        # Handle multi-output case
+        # Handle multi-output case - only wrap if not already wrapped
+        from sklearn.multioutput import MultiOutputRegressor
         self.is_multi_output = y.ndim > 1 and y.shape[1] > 1
         
-        if self.is_multi_output:
+        if self.is_multi_output and not isinstance(self.model, MultiOutputRegressor):
             # For multi-output regression, we need to recreate the model without early stopping
             from sklearn.multioutput import MultiOutputRegressor
-            # Only wrap if not already wrapped
-            if not isinstance(self.model, MultiOutputRegressor):
-                # Recreate the base model without early stopping for multi-output
-                if hasattr(self, '_create_model_without_early_stopping'):
-                    base_model = self._create_model_without_early_stopping()
-                else:
-                    base_model = self.model
-                    # Fallback: try to disable early stopping parameters
-                    if hasattr(base_model, 'callbacks'):
-                        base_model.callbacks = None
-                    if hasattr(base_model, 'early_stopping_rounds'):
-                        base_model.early_stopping_rounds = None
-                
-                self.model = MultiOutputRegressor(base_model, n_jobs=-1)
+            # Recreate the base model without early stopping for multi-output
+            if hasattr(self, '_create_model_without_early_stopping'):
+                base_model = self._create_model_without_early_stopping()
+            else:
+                base_model = self.model
+                # Fallback: try to disable early stopping parameters
+                if hasattr(base_model, 'callbacks'):
+                    base_model.callbacks = None
+                if hasattr(base_model, 'early_stopping_rounds'):
+                    base_model.early_stopping_rounds = None
+            
+            self.model = MultiOutputRegressor(base_model, n_jobs=-1)
         
         # Fit model - always use validation data if available
         model_type = type(self.model).__name__
@@ -799,7 +798,6 @@ class ModelTrainer:
         y: np.ndarray,
         currency: str,
         model_type: str = "ensemble",
-        optimize_hyperparameters: bool = True,
         target_names: Optional[List[str]] = None
     ) -> TrainingResult:
         """
@@ -810,7 +808,6 @@ class ModelTrainer:
             y: Target values (can be multi-output)
             currency: Currency identifier
             model_type: Type of model to train
-            optimize_hyperparameters: Whether to optimize hyperparameters
             target_names: Names of target columns for multi-output
             
         Returns:
@@ -843,16 +840,14 @@ class ModelTrainer:
             model = self._train_ensemble_model(
                 X_train, y_train,
                 X_val, y_val,
-                currency,
-                optimize_hyperparameters
+                currency
             )
         else:
             model = self._train_single_base_model(
                 X_train, y_train,
                 X_val, y_val,
                 currency,
-                model_type,
-                optimize_hyperparameters
+                model_type
             )
         
         # Calculate metrics
@@ -898,36 +893,55 @@ class ModelTrainer:
         y_train: np.ndarray,
         X_val: np.ndarray,
         y_val: np.ndarray,
-        currency: str,
-        optimize_hyperparameters: bool
+        currency: str
     ) -> EnsembleModel:
         """Train ensemble model."""
         models = []
         
+        # Determine if we need multi-output regression
+        is_multi_output = y_train.ndim > 1 and y_train.shape[1] > 1
+        
         # Create base models
         if self.config.use_lightgbm:
-            if optimize_hyperparameters:
-                lgb_model, _ = self.optimizer.optimize(
-                    LightGBMModel, X_train, y_train, currency
-                )
-            else:
-                lgb_model = LightGBMModel(self.config, self.logger)
-                lgb_model.model = lgb_model._create_model()
+            lgb_model, _ = self.optimizer.optimize(
+                LightGBMModel, X_train, y_train, currency
+            )
+            # Ensure the optimized model is properly configured for multi-output
+            if is_multi_output and not hasattr(lgb_model.model, 'estimators_'):
+                # The optimizer should have wrapped it, but double-check
+                from sklearn.multioutput import MultiOutputRegressor
+                if not isinstance(lgb_model.model, MultiOutputRegressor):
+                    base_model = lgb_model._create_model_without_early_stopping()
+                    lgb_model.model = MultiOutputRegressor(base_model, n_jobs=-1)
+                    lgb_model.is_multi_output = True
+            
+            # Fit the optimized model on the training data
+            lgb_model.fit(X_train, y_train, X_val, y_val)
             models.append(lgb_model)
         
         if self.config.use_xgboost:
-            if optimize_hyperparameters:
-                xgb_model, _ = self.optimizer.optimize(
-                    XGBoostModel, X_train, y_train, currency
-                )
-            else:
-                xgb_model = XGBoostModel(self.config, self.logger)
-                xgb_model.model = xgb_model._create_model()
+            xgb_model, _ = self.optimizer.optimize(
+                XGBoostModel, X_train, y_train, currency
+            )
+            # Ensure the optimized model is properly configured for multi-output
+            if is_multi_output and not hasattr(xgb_model.model, 'estimators_'):
+                # The optimizer should have wrapped it, but double-check
+                from sklearn.multioutput import MultiOutputRegressor
+                if not isinstance(xgb_model.model, MultiOutputRegressor):
+                    base_model = xgb_model._create_model_without_early_stopping()
+                    xgb_model.model = MultiOutputRegressor(base_model, n_jobs=-1)
+                    xgb_model.is_multi_output = True
+            
+            # Fit the optimized model on the training data
+            xgb_model.fit(X_train, y_train, X_val, y_val)
             models.append(xgb_model)
         
-        # Create ensemble
+        # Create ensemble - don't call fit here as individual models are already fitted
         ensemble = EnsembleModel(models, logger=self.logger)
-        ensemble.fit(X_train, y_train, X_val, y_val)
+        
+        # Set ensemble properties
+        ensemble.is_multi_output = is_multi_output
+        ensemble.is_fitted = True
         
         return ensemble
     
@@ -938,8 +952,7 @@ class ModelTrainer:
         X_val: np.ndarray,
         y_val: np.ndarray,
         currency: str,
-        model_type: str,
-        optimize_hyperparameters: bool
+        model_type: str
     ) -> BaseModel:
         """Train single base model."""
         model_classes = {
@@ -948,36 +961,14 @@ class ModelTrainer:
             'random_forest': RandomForestModel
         }
         
-        # Add Prophet models for different horizons
-        if model_type.startswith('prophet_'):
-            from utils.prophet_models import ProphetModel
-            
-            # Extract horizon from model type (e.g., 'prophet_1d', 'prophet_3d', 'prophet_7d')
-            horizon_str = model_type.split('_')[1]  # e.g., '1d', '3d', '7d'
-            horizon_days = int(horizon_str.replace('d', ''))  # e.g., 1, 3, 7
-            
-            model = ProphetModel(self.config, horizon_days, self.logger)
-            model.model = model._create_model()
-            
-            # Prophet requires special handling for training data
-            # We need to pass the original dataframe with date column
-            # This is a limitation - we need to modify the training pipeline
-            # For now, we'll use the standard fit method
-            model.fit(X_train, y_train, X_val, y_val)
-            return model
-        
         if model_type not in model_classes:
             raise ValueError(f"Unknown model type: {model_type}")
         
         model_class = model_classes[model_type]
         
-        if optimize_hyperparameters:
-            model, _ = self.optimizer.optimize(
-                model_class, X_train, y_train, currency
-            )
-        else:
-            model = model_class(self.config, self.logger)
-            model.model = model._create_model()
+        model, _ = self.optimizer.optimize(
+            model_class, X_train, y_train, currency
+        )
         
         model.fit(X_train, y_train, X_val, y_val)
         return model
