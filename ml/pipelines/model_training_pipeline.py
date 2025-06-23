@@ -8,7 +8,7 @@ separating the orchestration logic from the core model training functionality.
 import sys
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 import warnings
 import argparse
 from datetime import datetime
@@ -246,18 +246,52 @@ class ModelTrainingPipeline:
             feature_columns = self._get_feature_columns(processed_data)
             target_column = self._get_target_column(processed_data)
             
-            if not feature_columns or target_column not in processed_data.columns:
-                self.logger.warning(f"Invalid features/targets for {currency_name}")
+            # Handle both single and multi-output cases
+            is_multi_output = isinstance(target_column, list)
+            target_names = target_column if is_multi_output else None
+            
+            if not feature_columns:
+                self.logger.warning(f"No feature columns found for {currency_name}")
                 self.processing_stats['validation_failures'] += 1
                 return None
             
+            if target_column is None:
+                self.logger.warning(f"No target columns found for {currency_name}")
+                self.processing_stats['validation_failures'] += 1
+                return None
+            
+            # Validate target columns exist
+            if is_multi_output:
+                missing_targets = [col for col in target_column if col not in processed_data.columns]
+                if missing_targets:
+                    self.logger.warning(f"Missing target columns for {currency_name}: {missing_targets}")
+                    self.processing_stats['validation_failures'] += 1
+                    return None
+            else:
+                if target_column not in processed_data.columns:
+                    self.logger.warning(f"Target column {target_column} not found for {currency_name}")
+                    self.processing_stats['validation_failures'] += 1
+                    return None
+            
             X = processed_data[feature_columns].values
-            y = processed_data[target_column].values
+            
+            if is_multi_output:
+                y = processed_data[target_column].values
+                self.logger.info(f"Multi-output training enabled with {len(target_column)} targets: {target_column}")
+            else:
+                y = processed_data[target_column].values
+                self.logger.info(f"Single-output training with target: {target_column}")
 
-            self.logger.info(f"Initial data shape: {X.shape}")
+            self.logger.info(f"Initial data shape: X={X.shape}, y={y.shape}")
             self.logger.info(f"Initial NaN count in features: {np.isnan(X).sum()}")
 
-            target_valid_mask = ~pd.isna(y)
+            # Handle NaN filtering for both single and multi-output
+            if is_multi_output:
+                # For multi-output, remove rows where ALL targets are NaN
+                target_valid_mask = ~pd.isna(y).all(axis=1)
+            else:
+                target_valid_mask = ~pd.isna(y)
+            
             X = X[target_valid_mask]
             y = y[target_valid_mask]
             
@@ -310,7 +344,7 @@ class ModelTrainingPipeline:
 
             # Train model
             training_result = self.model_trainer.train_single_model(
-                X, y, currency_name
+                X, y, currency_name, target_names=target_names
             )
             
             if training_result is None:
@@ -377,13 +411,19 @@ class ModelTrainingPipeline:
             
         return feature_cols
     
-    def _get_target_column(self, df: pd.DataFrame) -> str:
-        """Get target column from dataframe."""
-        # Use the shortest prediction horizon by default
+    def _get_target_column(self, df: pd.DataFrame) -> Union[str, List[str]]:
+        """Get target column(s) from dataframe."""
         target_cols = [col for col in df.columns if col.startswith('target_price_')]
         if not target_cols:
             return None
-        return min(target_cols, key=lambda x: int(''.join(filter(str.isdigit, x))))
+        
+        # Use multi-output when multiple prediction horizons are available
+        if len(target_cols) > 1:
+            # Return all target columns for multi-output regression
+            return sorted(target_cols, key=lambda x: int(''.join(filter(str.isdigit, x))))
+        else:
+            # Use single target when only one horizon is available
+            return target_cols[0]
     
     def _get_currency_ids(self, get_currency: str, pay_currency: str) -> Optional[tuple]:
         """Get currency IDs from database using standardizer."""
@@ -420,7 +460,7 @@ class ModelTrainingPipeline:
         training_result: Any, 
         currency: str,
         feature_columns: List[str],
-        target_column: str
+        target_column: Union[str, List[str]]
     ) -> Dict[str, Any]:
         """
         Comprehensive model evaluation including league-specific metrics.
@@ -430,7 +470,7 @@ class ModelTrainingPipeline:
             training_result: Trained model result
             currency: Currency name
             feature_columns: List of feature column names
-            target_column: Target column name
+            target_column: Target column name(s) - can be single string or list for multi-output
             
         Returns:
             Dictionary containing comprehensive evaluation metrics
@@ -443,12 +483,21 @@ class ModelTrainingPipeline:
         }
         
         try:
+            # Handle both single and multi-output cases
+            is_multi_output = isinstance(target_column, list)
+            
             # Overall evaluation
             X = df[feature_columns].values
-            y = df[target_column].values
             
-            # Remove NaN values
-            valid_mask = ~(pd.isna(X).any(axis=1) | pd.isna(y))
+            if is_multi_output:
+                y = df[target_column].values
+                # For multi-output, remove rows where ALL targets are NaN
+                valid_mask = ~(pd.isna(X).any(axis=1) | pd.isna(y).all(axis=1))
+            else:
+                y = df[target_column].values
+                # For single output, remove rows where target is NaN
+                valid_mask = ~(pd.isna(X).any(axis=1) | pd.isna(y))
+            
             X_valid = X[valid_mask]
             y_valid = y[valid_mask]
             df_valid = df[valid_mask].reset_index(drop=True)
@@ -462,13 +511,42 @@ class ModelTrainingPipeline:
                 # Overall predictions
                 y_pred = training_result.model.predict(X_valid)
                 
-                evaluation_results['overall_metrics'] = {
-                    'mae': float(mean_absolute_error(y_valid, y_pred)),
-                    'rmse': float(np.sqrt(mean_squared_error(y_valid, y_pred))),
-                    'r2': float(r2_score(y_valid, y_pred)),
-                    'samples': len(y_valid),
-                    'mape': float(np.mean(np.abs((y_valid - y_pred) / y_valid)) * 100) if np.all(y_valid != 0) else None
-                }
+                # Calculate metrics based on output type
+                if is_multi_output:
+                    # Multi-output metrics
+                    target_names = target_column
+                    overall_metrics = {}
+                    
+                    for i, target_name in enumerate(target_names):
+                        y_true_single = y_valid[:, i]
+                        y_pred_single = y_pred[:, i]
+                        
+                        # Skip if all values are NaN
+                        valid_mask_single = ~(np.isnan(y_true_single) | np.isnan(y_pred_single))
+                        if not np.any(valid_mask_single):
+                            continue
+                        
+                        y_true_valid = y_true_single[valid_mask_single]
+                        y_pred_valid = y_pred_single[valid_mask_single]
+                        
+                        overall_metrics[target_name] = {
+                            'mae': float(mean_absolute_error(y_true_valid, y_pred_valid)),
+                            'rmse': float(np.sqrt(mean_squared_error(y_true_valid, y_pred_valid))),
+                            'r2': float(r2_score(y_true_valid, y_pred_valid)),
+                            'samples': len(y_true_valid),
+                            'mape': float(np.mean(np.abs((y_true_valid - y_pred_valid) / y_true_valid)) * 100) if np.all(y_true_valid != 0) else None
+                        }
+                    
+                    evaluation_results['overall_metrics'] = overall_metrics
+                else:
+                    # Single output metrics
+                    evaluation_results['overall_metrics'] = {
+                        'mae': float(mean_absolute_error(y_valid, y_pred)),
+                        'rmse': float(np.sqrt(mean_squared_error(y_valid, y_pred))),
+                        'r2': float(r2_score(y_valid, y_pred)),
+                        'samples': len(y_valid),
+                        'mape': float(np.mean(np.abs((y_valid - y_pred) / y_valid)) * 100) if np.all(y_valid != 0) else None
+                    }
                 
                 # League-specific evaluation
                 if 'league_name' in df.columns:

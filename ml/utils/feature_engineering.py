@@ -322,6 +322,7 @@ class FeatureEngineer:
         
         original_len = len(df)
         
+        # Create targets for all horizons
         for horizon in self.config.prediction_horizons:
             if 'league_name' in df.columns:
                 # Future price within same league only
@@ -357,6 +358,19 @@ class FeatureEngineer:
                         'nan_targets': nan_count,
                         'valid_ratio': valid_count / original_len if original_len > 0 else 0
                     }
+                )
+        
+        # Multi-output target: create combined matrix for all horizons
+        if len(self.config.prediction_horizons) > 1:
+            # Create a multi-output target matrix
+            target_price_cols = [f'target_price_{h}d' for h in self.config.prediction_horizons]
+            
+            # Add multi-output target column names for reference
+            df['_multi_output_targets'] = ','.join(target_price_cols)
+            
+            if hasattr(self, 'logger') and self.logger:
+                self.logger.info(
+                    f"Multi-output regression enabled with targets: {target_price_cols}"
                 )
         
         # Get all target price columns

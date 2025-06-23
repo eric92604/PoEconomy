@@ -30,19 +30,30 @@ from utils.logging_utils import MLLogger
 @dataclass
 class ModelMetrics:
     """Container for model evaluation metrics."""
-    mae: float
-    rmse: float
-    mape: float
-    r2: float
-    directional_accuracy: float
+    mae: Union[float, Dict[str, float]]
+    rmse: Union[float, Dict[str, float]]
+    mape: Union[float, Dict[str, float]]
+    r2: Union[float, Dict[str, float]]
+    directional_accuracy: Union[float, Dict[str, float]]
     
-    def to_dict(self) -> Dict[str, float]:
+    def to_dict(self) -> Dict[str, Union[float, Dict[str, float]]]:
         """Convert to dictionary."""
         return asdict(self)
     
     @classmethod
-    def from_predictions(cls, y_true: np.ndarray, y_pred: np.ndarray) -> 'ModelMetrics':
+    def from_predictions(cls, y_true: np.ndarray, y_pred: np.ndarray, 
+                        target_names: Optional[List[str]] = None) -> 'ModelMetrics':
         """Calculate metrics from predictions."""
+        # Handle multi-output case
+        if y_true.ndim > 1 and y_true.shape[1] > 1 and target_names is not None:
+            return cls._from_multi_output_predictions(y_true, y_pred, target_names)
+        
+        # Single output case - flatten if needed
+        if y_true.ndim > 1:
+            y_true = y_true.flatten()
+        if y_pred.ndim > 1:
+            y_pred = y_pred.flatten()
+        
         # Basic metrics
         mae = mean_absolute_error(y_true, y_pred)
         rmse = np.sqrt(mean_squared_error(y_true, y_pred))
@@ -72,6 +83,66 @@ class ModelMetrics:
             mape=mape,
             r2=max(r2, -1.0),  # Cap at -1 for very bad predictions
             directional_accuracy=directional_accuracy
+        )
+    
+    @classmethod
+    def _from_multi_output_predictions(cls, y_true: np.ndarray, y_pred: np.ndarray, 
+                                     target_names: List[str]) -> 'ModelMetrics':
+        """Calculate metrics for multi-output predictions."""
+        n_outputs = y_true.shape[1]
+        
+        mae_dict = {}
+        rmse_dict = {}
+        mape_dict = {}
+        r2_dict = {}
+        directional_accuracy_dict = {}
+        
+        for i, target_name in enumerate(target_names):
+            y_true_single = y_true[:, i]
+            y_pred_single = y_pred[:, i]
+            
+            # Skip if all values are NaN
+            valid_mask = ~(np.isnan(y_true_single) | np.isnan(y_pred_single))
+            if not np.any(valid_mask):
+                mae_dict[target_name] = float('inf')
+                rmse_dict[target_name] = float('inf')
+                mape_dict[target_name] = float('inf')
+                r2_dict[target_name] = -1.0
+                directional_accuracy_dict[target_name] = 0.0
+                continue
+            
+            y_true_valid = y_true_single[valid_mask]
+            y_pred_valid = y_pred_single[valid_mask]
+            
+            # Basic metrics
+            mae_dict[target_name] = mean_absolute_error(y_true_valid, y_pred_valid)
+            rmse_dict[target_name] = np.sqrt(mean_squared_error(y_true_valid, y_pred_valid))
+            r2_dict[target_name] = max(r2_score(y_true_valid, y_pred_valid), -1.0)
+            
+            # MAPE with robust calculation
+            epsilon = 1e-8
+            mape_values = []
+            for true, pred in zip(y_true_valid, y_pred_valid):
+                if abs(true) > epsilon:
+                    denominator = (abs(true) + abs(pred)) / 2 + epsilon
+                    mape_val = abs(true - pred) / denominator * 100
+                    mape_values.append(mape_val)
+            mape_dict[target_name] = np.mean(mape_values) if mape_values else float('inf')
+            
+            # Directional accuracy
+            if len(y_true_valid) > 1:
+                true_direction = np.diff(y_true_valid) > 0
+                pred_direction = np.diff(y_pred_valid) > 0
+                directional_accuracy_dict[target_name] = np.mean(true_direction == pred_direction) * 100
+            else:
+                directional_accuracy_dict[target_name] = 0.0
+        
+        return cls(
+            mae=mae_dict,
+            rmse=rmse_dict,
+            mape=mape_dict,
+            r2=r2_dict,
+            directional_accuracy=directional_accuracy_dict
         )
 
 
@@ -128,7 +199,7 @@ class BaseModel(ABC):
         
         Args:
             X: Training features
-            y: Training targets
+            y: Training targets (can be multi-output)
             X_val: Optional validation features
             y_val: Optional validation targets
         """
@@ -139,14 +210,38 @@ class BaseModel(ABC):
             if X_val is not None:
                 X_val = self.scaler.transform(X_val)
         
+        # Handle multi-output case
+        self.is_multi_output = y.ndim > 1 and y.shape[1] > 1
+        
+        if self.is_multi_output:
+            # For multi-output regression, we need to recreate the model without early stopping
+            from sklearn.multioutput import MultiOutputRegressor
+            # Only wrap if not already wrapped
+            if not isinstance(self.model, MultiOutputRegressor):
+                # Recreate the base model without early stopping for multi-output
+                if hasattr(self, '_create_model_without_early_stopping'):
+                    base_model = self._create_model_without_early_stopping()
+                else:
+                    base_model = self.model
+                    # Fallback: try to disable early stopping parameters
+                    if hasattr(base_model, 'callbacks'):
+                        base_model.callbacks = None
+                    if hasattr(base_model, 'early_stopping_rounds'):
+                        base_model.early_stopping_rounds = None
+                
+                self.model = MultiOutputRegressor(base_model, n_jobs=-1)
+        
         # Fit model - always use validation data if available
         model_type = type(self.model).__name__
+        base_model_type = type(self.model.estimators_[0] if hasattr(self.model, 'estimators_') else self.model).__name__
         
-        if X_val is not None and y_val is not None and model_type in ['LGBMRegressor', 'XGBRegressor']:
-            # Use validation data for models that support eval_set (keeps early stopping)
+        if (X_val is not None and y_val is not None and 
+            base_model_type in ['LGBMRegressor', 'XGBRegressor'] and 
+            not self.is_multi_output):
+            # Use validation data for models that support eval_set (single-output only)
             self.model.fit(X, y, eval_set=[(X_val, y_val)])
         else:
-            # For other models or when no validation data available
+            # For other models, multi-output, or when no validation data available
             self.model.fit(X, y)
         
         self.is_fitted = True
@@ -159,7 +254,7 @@ class BaseModel(ABC):
             X: Features for prediction
             
         Returns:
-            Predictions
+            Predictions (can be multi-output)
         """
         if not self.is_fitted:
             raise ValueError("Model must be fitted before making predictions")
@@ -168,14 +263,36 @@ class BaseModel(ABC):
         if self.scaler is not None:
             X = self.scaler.transform(X)
         
-        return self.model.predict(X)
+        predictions = self.model.predict(X)
+        
+        # Ensure predictions have correct shape for multi-output
+        if hasattr(self, 'is_multi_output') and self.is_multi_output:
+            if predictions.ndim == 1:
+                predictions = predictions.reshape(-1, 1)
+        
+        return predictions
     
     def get_feature_importance(self) -> Optional[Dict[str, float]]:
         """Get feature importance if available."""
-        if not self.is_fitted or not hasattr(self.model, 'feature_importances_'):
+        if not self.is_fitted:
             return None
+            
+        # Handle multi-output case
+        if hasattr(self, 'is_multi_output') and self.is_multi_output:
+            if hasattr(self.model, 'estimators_'):
+                # Average importance across all outputs
+                importances = []
+                for estimator in self.model.estimators_:
+                    if hasattr(estimator, 'feature_importances_'):
+                        importances.append(estimator.feature_importances_)
+                
+                if importances:
+                    avg_importance = np.mean(importances, axis=0)
+                    return dict(enumerate(avg_importance))
+        elif hasattr(self.model, 'feature_importances_'):
+            return dict(enumerate(self.model.feature_importances_))
         
-        return dict(enumerate(self.model.feature_importances_))
+        return None
 
 
 class LightGBMModel(BaseModel):
@@ -216,6 +333,44 @@ class LightGBMModel(BaseModel):
             'n_jobs': -1,
             'verbose': -1,
             'early_stopping_rounds': self.config.early_stopping_rounds if trial is None else None
+        })
+        
+        return lgb.LGBMRegressor(**params)
+    
+    def _create_model_without_early_stopping(self, trial: Optional[optuna.Trial] = None) -> lgb.LGBMRegressor:
+        """Create LightGBM model without early stopping for multi-output."""
+        if trial is not None:
+            # Hyperparameter optimization
+            params = {
+                'n_estimators': trial.suggest_int('lgb_n_estimators', 100, 1000),
+                'max_depth': trial.suggest_int('lgb_max_depth', 3, 15),
+                'learning_rate': trial.suggest_float('lgb_learning_rate', 0.01, 0.3),
+                'num_leaves': trial.suggest_int('lgb_num_leaves', 10, 300),
+                'min_child_samples': trial.suggest_int('lgb_min_child_samples', 5, 100),
+                'subsample': trial.suggest_float('lgb_subsample', 0.5, 1.0),
+                'colsample_bytree': trial.suggest_float('lgb_colsample_bytree', 0.5, 1.0),
+                'reg_alpha': trial.suggest_float('lgb_reg_alpha', 0.0, 10.0),
+                'reg_lambda': trial.suggest_float('lgb_reg_lambda', 0.0, 10.0),
+            }
+        else:
+            # Default parameters
+            params = {
+                'n_estimators': 500,
+                'max_depth': 8,
+                'learning_rate': 0.1,
+                'num_leaves': 100,
+                'min_child_samples': 20,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'reg_alpha': 0.1,
+                'reg_lambda': 0.1,
+            }
+        
+        # Common parameters - NO early stopping
+        params.update({
+            'random_state': self.config.random_state,
+            'n_jobs': -1,
+            'verbose': -1
         })
         
         return lgb.LGBMRegressor(**params)
@@ -261,6 +416,42 @@ class XGBoostModel(BaseModel):
             'n_jobs': -1,
             'verbosity': 0,
             'early_stopping_rounds': self.config.early_stopping_rounds if trial is None else None
+        })
+        
+        return xgb.XGBRegressor(**params)
+    
+    def _create_model_without_early_stopping(self, trial: Optional[optuna.Trial] = None) -> xgb.XGBRegressor:
+        """Create XGBoost model without early stopping for multi-output."""
+        if trial is not None:
+            # Hyperparameter optimization
+            params = {
+                'n_estimators': trial.suggest_int('xgb_n_estimators', 100, 1000),
+                'max_depth': trial.suggest_int('xgb_max_depth', 3, 15),
+                'learning_rate': trial.suggest_float('xgb_learning_rate', 0.01, 0.3),
+                'min_child_weight': trial.suggest_int('xgb_min_child_weight', 1, 10),
+                'subsample': trial.suggest_float('xgb_subsample', 0.5, 1.0),
+                'colsample_bytree': trial.suggest_float('xgb_colsample_bytree', 0.5, 1.0),
+                'reg_alpha': trial.suggest_float('xgb_reg_alpha', 0.0, 10.0),
+                'reg_lambda': trial.suggest_float('xgb_reg_lambda', 0.0, 10.0),
+            }
+        else:
+            # Default parameters
+            params = {
+                'n_estimators': 500,
+                'max_depth': 8,
+                'learning_rate': 0.1,
+                'min_child_weight': 3,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'reg_alpha': 0.1,
+                'reg_lambda': 0.1,
+            }
+        
+        # Common parameters - NO early stopping
+        params.update({
+            'random_state': self.config.random_state,
+            'n_jobs': -1,
+            'verbosity': 0
         })
         
         return xgb.XGBRegressor(**params)
@@ -344,10 +535,13 @@ class EnsembleModel:
         
         Args:
             X: Training features
-            y: Training targets
+            y: Training targets (can be multi-output)
             X_val: Optional validation features
             y_val: Optional validation targets
         """
+        # Store multi-output information
+        self.is_multi_output = y.ndim > 1 and y.shape[1] > 1
+        
         for i, model in enumerate(self.models):
             self.logger.info(f"Training ensemble model {i+1}/{len(self.models)}: {model.get_model_type()}")
             model.fit(X, y, X_val, y_val)
@@ -362,7 +556,7 @@ class EnsembleModel:
             X: Features for prediction
             
         Returns:
-            Weighted ensemble predictions
+            Weighted ensemble predictions (can be multi-output)
         """
         if not self.is_fitted:
             raise ValueError("Ensemble must be fitted before making predictions")
@@ -372,8 +566,18 @@ class EnsembleModel:
             pred = model.predict(X)
             predictions.append(pred)
         
-        # Weighted average
-        ensemble_pred = np.average(predictions, axis=0, weights=self.weights)
+        # Convert to numpy array for easier manipulation
+        predictions = np.array(predictions)
+        
+        # Handle multi-output case
+        if hasattr(self, 'is_multi_output') and self.is_multi_output:
+            # For multi-output: predictions shape is (n_models, n_samples, n_outputs)
+            # We want to average across models for each output
+            ensemble_pred = np.average(predictions, axis=0, weights=self.weights)
+        else:
+            # For single output: predictions shape is (n_models, n_samples)
+            ensemble_pred = np.average(predictions, axis=0, weights=self.weights)
+        
         return ensemble_pred
     
     def get_model_type(self) -> str:
@@ -426,6 +630,17 @@ class HyperparameterOptimizer:
             model = model_class(self.config, self.logger)
             model.model = model._create_model(trial)
             
+            # Check if we need multi-output regression
+            is_multi_output = y.ndim > 1 and y.shape[1] > 1
+            if is_multi_output:
+                from sklearn.multioutput import MultiOutputRegressor
+                # Disable early stopping for MultiOutputRegressor
+                if hasattr(model.model, 'callbacks') and model.model.callbacks:
+                    model.model.callbacks = None
+                if hasattr(model.model, 'early_stopping_rounds') and model.model.early_stopping_rounds:
+                    model.model.early_stopping_rounds = None
+                model.model = MultiOutputRegressor(model.model, n_jobs=-1)
+            
             # Time series cross-validation
             tscv = TimeSeriesSplit(n_splits=cv_folds)
             scores = []
@@ -434,12 +649,66 @@ class HyperparameterOptimizer:
                 X_train, X_val = X[train_idx], X[val_idx]
                 y_train, y_val = y[train_idx], y[val_idx]
                 
+                # Handle NaN values in targets for cross-validation
+                if is_multi_output:
+                    # For multi-output, remove rows where ALL targets are NaN
+                    valid_train_mask = ~np.isnan(y_train).all(axis=1)
+                    valid_val_mask = ~np.isnan(y_val).all(axis=1)
+                else:
+                    # For single output, remove rows where target is NaN
+                    valid_train_mask = ~np.isnan(y_train)
+                    valid_val_mask = ~np.isnan(y_val)
+                
+                X_train = X_train[valid_train_mask]
+                y_train = y_train[valid_train_mask]
+                X_val = X_val[valid_val_mask]
+                y_val = y_val[valid_val_mask]
+                
+                # Skip if no valid samples
+                if len(X_train) == 0 or len(X_val) == 0:
+                    continue
+                
+                # Apply median imputation to remaining NaN values in targets
+                if is_multi_output and np.isnan(y_train).any():
+                    from sklearn.impute import SimpleImputer
+                    imputer = SimpleImputer(strategy='median')
+                    y_train = imputer.fit_transform(y_train)
+                    if np.isnan(y_val).any():
+                        y_val = imputer.transform(y_val)
+                
+                # Apply scaling if configured
+                if hasattr(self.config, 'use_scaling') and self.config.use_scaling:
+                    from sklearn.preprocessing import RobustScaler
+                    scaler = RobustScaler()
+                    X_train = scaler.fit_transform(X_train)
+                    X_val = scaler.transform(X_val)
+                
                 # Fit and predict
-                model.fit(X_train, y_train)
-                y_pred = model.predict(X_val)
+                model.model.fit(X_train, y_train)
+                y_pred = model.model.predict(X_val)
                 
                 # Calculate RMSE (optimization target)
-                rmse = np.sqrt(mean_squared_error(y_val, y_pred))
+                if y_val.ndim > 1 and y_val.shape[1] > 1:
+                    # Multi-output case: calculate average RMSE across all outputs
+                    rmse_per_output = []
+                    for i in range(y_val.shape[1]):
+                        valid_mask = ~(np.isnan(y_val[:, i]) | np.isnan(y_pred[:, i]))
+                        if np.any(valid_mask):
+                            rmse_single = np.sqrt(mean_squared_error(
+                                y_val[valid_mask, i], 
+                                y_pred[valid_mask, i]
+                            ))
+                            rmse_per_output.append(rmse_single)
+                    
+                    rmse = np.mean(rmse_per_output) if rmse_per_output else float('inf')
+                else:
+                    # Single output case
+                    if y_val.ndim > 1:
+                        y_val = y_val.flatten()
+                    if y_pred.ndim > 1:
+                        y_pred = y_pred.flatten()
+                    rmse = np.sqrt(mean_squared_error(y_val, y_pred))
+                
                 scores.append(rmse)
             
             return np.mean(scores)
@@ -459,15 +728,36 @@ class HyperparameterOptimizer:
         
         # Create best model
         best_model = model_class(self.config, self.logger)
-        best_model.model = best_model._create_model()
+        
+        # Check if we need multi-output regression for the best model too
+        is_multi_output = y.ndim > 1 and y.shape[1] > 1
+        if is_multi_output:
+            from sklearn.multioutput import MultiOutputRegressor
+            # Create model without early stopping for multi-output
+            if hasattr(best_model, '_create_model_without_early_stopping'):
+                base_model = best_model._create_model_without_early_stopping()
+            else:
+                base_model = best_model._create_model()
+                # Fallback: try to disable early stopping parameters
+                if hasattr(base_model, 'callbacks'):
+                    base_model.callbacks = None
+                if hasattr(base_model, 'early_stopping_rounds'):
+                    base_model.early_stopping_rounds = None
+            
+            best_model.model = MultiOutputRegressor(base_model, n_jobs=-1)
+            # Store reference to base model for parameter updates
+            actual_model = base_model
+        else:
+            best_model.model = best_model._create_model()
+            actual_model = best_model.model
         
         # Update model with best parameters
         best_params = study.best_params
         for param_name, param_value in best_params.items():
             # Remove model prefix from parameter name
             clean_param_name = param_name.split('_', 1)[1] if '_' in param_name else param_name
-            if hasattr(best_model.model, clean_param_name):
-                setattr(best_model.model, clean_param_name, param_value)
+            if hasattr(actual_model, clean_param_name):
+                setattr(actual_model, clean_param_name, param_value)
         
         self.logger.info(
             f"Optimization completed for {currency}",
@@ -509,22 +799,27 @@ class ModelTrainer:
         y: np.ndarray,
         currency: str,
         model_type: str = "ensemble",
-        optimize_hyperparameters: bool = True
+        optimize_hyperparameters: bool = True,
+        target_names: Optional[List[str]] = None
     ) -> TrainingResult:
         """
         Train a single model for a currency.
         
         Args:
             X: Feature matrix
-            y: Target values
+            y: Target values (can be multi-output)
             currency: Currency identifier
             model_type: Type of model to train
             optimize_hyperparameters: Whether to optimize hyperparameters
+            target_names: Names of target columns for multi-output
             
         Returns:
             Training result
         """
         start_time = time.time()
+        
+        # Determine if multi-output
+        is_multi_output = y.ndim > 1 and y.shape[1] > 1
         
         # Split data into train/val
         n_samples = len(X)
@@ -534,6 +829,14 @@ class ModelTrainer:
         
         X_train, y_train = X[train_idx], y[train_idx]
         X_val, y_val = X[val_idx], y[val_idx]
+        
+        # Apply imputation to train/validation splits if needed
+        if is_multi_output and (np.isnan(y_train).any() or np.isnan(y_val).any()):
+            from sklearn.impute import SimpleImputer
+            imputer = SimpleImputer(strategy='median')
+            y_train = imputer.fit_transform(y_train)
+            if np.isnan(y_val).any():
+                y_val = imputer.transform(y_val)
         
         # Train model
         if model_type == "ensemble" and self.config.use_ensemble:
@@ -554,7 +857,12 @@ class ModelTrainer:
         
         # Calculate metrics
         y_pred = model.predict(X)
-        metrics = ModelMetrics.from_predictions(y, y_pred)
+        
+        # Handle metrics calculation for multi-output
+        if is_multi_output and target_names:
+            metrics = ModelMetrics.from_predictions(y, y_pred, target_names)
+        else:
+            metrics = ModelMetrics.from_predictions(y, y_pred)
         
         # Calculate cross-validation scores if enough data
         cv_scores = self._calculate_cv_scores(model, X, y)
@@ -693,7 +1001,29 @@ class ModelTrainer:
                 
                 temp_model.fit(X_train, y_train)
                 y_pred = temp_model.predict(X_val)
-                rmse = np.sqrt(mean_squared_error(y_val, y_pred))
+                
+                # Handle multi-output case
+                if y_val.ndim > 1 and y_val.shape[1] > 1:
+                    # For multi-output, calculate average RMSE across all outputs
+                    rmse_per_output = []
+                    for i in range(y_val.shape[1]):
+                        valid_mask = ~(np.isnan(y_val[:, i]) | np.isnan(y_pred[:, i]))
+                        if np.any(valid_mask):
+                            rmse_single = np.sqrt(mean_squared_error(
+                                y_val[valid_mask, i], 
+                                y_pred[valid_mask, i]
+                            ))
+                            rmse_per_output.append(rmse_single)
+                    
+                    rmse = np.mean(rmse_per_output) if rmse_per_output else float('inf')
+                else:
+                    # Single output case
+                    if y_val.ndim > 1:
+                        y_val = y_val.flatten()
+                    if y_pred.ndim > 1:
+                        y_pred = y_pred.flatten()
+                    rmse = np.sqrt(mean_squared_error(y_val, y_pred))
+                
                 scores.append(rmse)
             
             return scores
