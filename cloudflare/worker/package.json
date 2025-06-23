@@ -1,0 +1,23 @@
+{
+  "name": "poeconomy-worker",
+  "version": "1.0.0",
+  "description": "PoEconomy Cloudflare Worker for edge caching and rate limiting",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:production": "wrangler deploy --env production",
+    "tail": "wrangler tail",
+    "kv:create": "wrangler kv:namespace create RATE_LIMIT_KV && wrangler kv:namespace create CACHE_KV",
+    "type-check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20231025.0",
+    "typescript": "^5.0.0",
+    "wrangler": "^3.0.0"
+  },
+  "keywords": ["cloudflare", "worker", "edge", "caching", "rate-limiting"],
+  "author": "PoEconomy Team",
+  "license": "MIT"
+} 

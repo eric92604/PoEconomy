@@ -1,0 +1,38 @@
+name = "poeconomy-worker"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# KV Namespaces
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "your-rate-limit-kv-namespace-id"
+preview_id = "your-rate-limit-kv-preview-id"
+
+[[kv_namespaces]]
+binding = "CACHE_KV"
+id = "your-cache-kv-namespace-id"
+preview_id = "your-cache-kv-preview-id"
+
+# Environment Variables
+[vars]
+ENVIRONMENT = "development"
+
+# Production Environment
+[env.production]
+name = "poeconomy-worker-prod"
+vars = { ENVIRONMENT = "production" }
+
+# Staging Environment  
+[env.staging]
+name = "poeconomy-worker-staging"
+vars = { ENVIRONMENT = "staging" }
+
+# Routes (configure after domain setup)
+# [[env.production.routes]]
+# pattern = "api.yourdomain.com/*"
+# zone_name = "yourdomain.com"
+
+# Secrets (set via: wrangler secret put SECRET_NAME)
+# - AWS_API_GATEWAY_URL
+# - API_KEY (optional) 

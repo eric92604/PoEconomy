@@ -1,0 +1,560 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'PoEconomy - DynamoDB + S3 Architecture'
+
+Parameters:
+  EnvironmentName:
+    Description: Environment name prefix
+    Type: String
+    Default: poeconomy
+    
+  CloudflareApiToken:
+    Description: Cloudflare API token (optional)
+    Type: String
+    NoEcho: true
+    Default: ''
+    
+  MLModelsLayerArn:
+    Description: ARN of the Lambda layer containing ML models (optional)
+    Type: String
+    Default: ''
+
+Conditions:
+  HasMLModelsLayer: !Not [!Equals [!Ref MLModelsLayerArn, '']]
+
+Resources:
+  # S3 Data Lake with Optimized Lifecycle
+  DataLakeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${EnvironmentName}-data-lake
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Suspended  # Simplified versioning
+      LifecycleConfiguration:
+        Rules:
+          - Id: DataLifecycleRule
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 14
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+      NotificationConfiguration:
+        CloudWatchConfigurations:
+          - Event: s3:ObjectCreated:*
+            CloudWatchConfiguration:
+              LogGroupName: !Ref DataLakeLogGroup
+
+  # S3 ML Models Bucket
+  ModelsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${EnvironmentName}-models
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ModelLifecycleRule
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # DynamoDB Tables for Hot Data (14 days)
+  CurrencyMetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${EnvironmentName}-metadata
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: currency_name
+          AttributeType: S
+        - AttributeName: league
+          AttributeType: S
+      KeySchema:
+        - AttributeName: currency_name
+          KeyType: HASH
+        - AttributeName: league
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+
+  LivePricesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${EnvironmentName}-live-prices
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: currency_league
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+        - AttributeName: league
+          AttributeType: S
+        - AttributeName: price_change_percent
+          AttributeType: N
+      KeySchema:
+        - AttributeName: currency_league
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: league-price-change-index
+          KeySchema:
+            - AttributeName: league
+              KeyType: HASH
+            - AttributeName: price_change_percent
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+
+  PredictionsCacheTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${EnvironmentName}-predictions-cache
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: prediction_key
+          AttributeType: S
+        - AttributeName: currency_league
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: prediction_key
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: currency-league-index
+          KeySchema:
+            - AttributeName: currency_league
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3DataLakeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub '${DataLakeBucket}/*'
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Ref DataLakeBucket
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt CurrencyMetadataTable.Arn
+                  - !GetAtt LivePricesTable.Arn
+                  - !GetAtt PredictionsCacheTable.Arn
+                  - !Sub '${LivePricesTable.Arn}/index/*'
+                  - !Sub '${PredictionsCacheTable.Arn}/index/*'
+        - PolicyName: DynamoDBStreamAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:ListStreams
+                Resource: !GetAtt LivePricesTable.StreamArn
+
+  # Data Ingestion Lambda (Triggered by EventBridge)
+  DataIngestionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-data-ingestion
+      Runtime: python3.11
+      Handler: data_ingestion_handler.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          def lambda_handler(event, context):
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'PoEconomy data ingestion - DynamoDB + S3',
+                      'architecture': 'poeconomy'
+                  })
+              }
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          DATA_LAKE_BUCKET: !Ref DataLakeBucket
+          METADATA_TABLE: !Ref CurrencyMetadataTable
+          LIVE_PRICES_TABLE: !Ref LivePricesTable
+          HOT_DATA_RETENTION_DAYS: '14'
+
+  # ML Computation Lambda (Triggered by DynamoDB Stream)
+  MLComputationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-ml-computation
+      Runtime: python3.11
+      Handler: ml_computation_handler.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          def lambda_handler(event, context):
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'PoEconomy ML computation triggered by price changes',
+                      'records_processed': len(event.get('Records', [])),
+                      'architecture': 'poeconomy'
+                  })
+              }
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300  # 5 minutes for ML computation
+      MemorySize: 1024  # More memory for ML workloads
+      Environment:
+        Variables:
+          METADATA_TABLE: !Ref CurrencyMetadataTable
+          LIVE_PRICES_TABLE: !Ref LivePricesTable
+          PREDICTIONS_CACHE_TABLE: !Ref PredictionsCacheTable
+          DATA_LAKE_BUCKET: !Ref DataLakeBucket
+          MODELS_BUCKET: !Ref ModelsBucket
+
+  # ML Prediction Lambda (Layer-optimized real-time predictions)
+  MLPredictionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-ml-prediction
+      Runtime: python3.11
+      Handler: ml_prediction_handler.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          def lambda_handler(event, context):
+              return {
+                  'statusCode': 200,
+                  'headers': {
+                      'Content-Type': 'application/json',
+                      'Access-Control-Allow-Origin': '*'
+                  },
+                  'body': json.dumps({
+                      'message': 'PoEconomy ML prediction with Lambda Layer optimization',
+                      'architecture': 'poeconomy-layer-optimized',
+                      'cost_optimization': 'lambda_layers'
+                  })
+              }
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30  # Optimized for real-time predictions
+      MemorySize: 512  # Sufficient for model loading and caching
+      Layers: !If 
+        - HasMLModelsLayer
+        - [!Ref MLModelsLayerArn]
+        - !Ref AWS::NoValue
+      Environment:
+        Variables:
+          METADATA_TABLE: !Ref CurrencyMetadataTable
+          LIVE_PRICES_TABLE: !Ref LivePricesTable
+          PREDICTIONS_CACHE_TABLE: !Ref PredictionsCacheTable
+          DATA_LAKE_BUCKET: !Ref DataLakeBucket
+          MODELS_BUCKET: !Ref ModelsBucket
+
+  # API Serving Lambda (Fast read-only operations)
+  ApiServingLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-api-serving
+      Runtime: python3.11
+      Handler: api_serving_handler.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          def lambda_handler(event, context):
+              return {
+                  'statusCode': 200,
+                  'headers': {
+                      'Content-Type': 'application/json',
+                      'Access-Control-Allow-Origin': '*'
+                  },
+                  'body': json.dumps({
+                      'message': 'PoEconomy API serving - instant predictions from cache',
+                      'architecture': 'poeconomy'
+                  })
+              }
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 10  # Fast API responses
+      MemorySize: 256  # Minimal memory for read operations
+      Environment:
+        Variables:
+          PREDICTIONS_CACHE_TABLE: !Ref PredictionsCacheTable
+          METADATA_TABLE: !Ref CurrencyMetadataTable
+          MODELS_BUCKET: !Ref ModelsBucket
+
+  # Data Ingestion Schedule (Every 15 minutes)
+  DataIngestionSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Automated data ingestion (every 15 minutes)
+      ScheduleExpression: 'rate(15 minutes)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt DataIngestionLambda.Arn
+          Id: AutomatedDataIngestion
+
+  # DynamoDB Stream Trigger for ML Computation
+  MLComputationEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt LivePricesTable.StreamArn
+      FunctionName: !Ref MLComputationLambda
+      StartingPosition: LATEST
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 30
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"eventName": ["INSERT", "MODIFY"]}'
+
+  # Lambda Permissions
+  EventBridgeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DataIngestionLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DataIngestionSchedule.Arn
+
+  ApiGatewayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiServingLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub '${ApiGateway}/*/*'
+
+  MLPredictionLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MLPredictionLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub '${ApiGateway}/*/*'
+
+  # API Gateway with Caching
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub ${EnvironmentName}-api
+      Description: PoEconomy ML Prediction API
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  PredictResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: predict
+
+  SinglePredictResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref PredictResource
+      PathPart: single
+
+  MLPredictResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref PredictResource
+      PathPart: ml
+
+  SinglePredictMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref SinglePredictResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiServingLambda.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseHeaders:
+            Access-Control-Allow-Origin: "'*'"
+
+  MLPredictMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref MLPredictResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MLPredictionLambda.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseHeaders:
+            Access-Control-Allow-Origin: "'*'"
+
+  OptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref SinglePredictResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers: "'*'"
+              method.response.header.Access-Control-Allow-Methods: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseHeaders:
+            Access-Control-Allow-Origin: true
+            Access-Control-Allow-Headers: true
+            Access-Control-Allow-Methods: true
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: [SinglePredictMethod, OptionsMethod]
+    Properties:
+      RestApiId: !Ref ApiGateway
+      StageName: prod
+      StageDescription:
+        CachingEnabled: true
+        CacheTtlInSeconds: 900  # 15 minutes cache (matches data update frequency)
+        CacheKeyParameters:
+          - method.request.querystring.currency
+
+  # CloudWatch Log Groups (Minimal Retention)
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/${EnvironmentName}'
+      RetentionInDays: 7
+
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${EnvironmentName}'
+      RetentionInDays: 7
+
+  # Resource Monitoring Alert
+  ResourceBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub ${EnvironmentName}-resource-monitor
+        BudgetLimit:
+          Amount: 50.00
+          Unit: USD
+        TimeUnit: MONTHLY
+        BudgetType: COST
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod'
+    Export:
+      Name: !Sub ${EnvironmentName}-api-url
+
+  MLPredictionEndpoint:
+    Description: ML Prediction endpoint URL (Layer-optimized)
+    Value: !Sub 'https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/predict/ml'
+    Export:
+      Name: !Sub ${EnvironmentName}-ml-prediction-url
+
+  DataLakeBucket:
+    Description: S3 Data Lake bucket name
+    Value: !Ref DataLakeBucket
+    Export:
+      Name: !Sub ${EnvironmentName}-data-lake-bucket
+
+  ModelsBucket:
+    Description: S3 ML Models bucket name
+    Value: !Ref ModelsBucket
+    Export:
+      Name: !Sub ${EnvironmentName}-models-bucket
+
+  MLPredictionLambdaArn:
+    Description: ML Prediction Lambda function ARN
+    Value: !GetAtt MLPredictionLambda.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-ml-prediction-lambda-arn
+
+  LayerOptimizationStatus:
+    Description: Lambda Layer optimization status
+    Value: !If 
+      - HasMLModelsLayer
+      - 'Enabled - Zero S3 costs for model access'
+      - 'Disabled - Add MLModelsLayerArn parameter to enable'
+    Export:
+      Name: !Sub ${EnvironmentName}-layer-optimization
+
+  ArchitectureType:
+    Description: Architecture type and benefits
+    Value: 'DynamoDB + S3 + Lambda Layers - Cost-Optimized ML Predictions'
+    Export:
+      Name: !Sub ${EnvironmentName}-architecture 

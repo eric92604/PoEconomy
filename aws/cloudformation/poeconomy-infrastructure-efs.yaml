@@ -1,0 +1,205 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'PoEconomy - EFS Integration for Large ML Models'
+
+Parameters:
+  EnvironmentName:
+    Description: Environment name prefix
+    Type: String
+    Default: poeconomy
+
+Resources:
+  # EFS for ML Models (Persistent, Fast Access)
+  MLModelsFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      CreationToken: !Sub ${EnvironmentName}-ml-models
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      Encrypted: true
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ml-models
+        - Key: Purpose
+          Value: ML-Model-Storage
+
+  # EFS Mount Target (for Lambda access)
+  EFSMountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref MLModelsFileSystem
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  # Security Group for EFS
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EFS ML models access
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-efs-sg
+
+  # Lambda Security Group
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda functions
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          DestinationSecurityGroupId: !Ref EFSSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-lambda-sg
+
+  # VPC Configuration
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-vpc
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-private-subnet
+
+  # Enhanced Lambda with EFS Mount
+  MLPredictionLambdaEFS:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-ml-prediction-efs
+      Runtime: python3.11
+      Handler: ml_prediction_handler_efs.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import pickle
+          from pathlib import Path
+          
+          # EFS mount point
+          EFS_MOUNT_PATH = '/mnt/efs'
+          
+          def lambda_handler(event, context):
+              try:
+                  # List available models in EFS
+                  models_path = Path(EFS_MOUNT_PATH) / 'models'
+                  available_models = list(models_path.glob('**/*.pkl')) if models_path.exists() else []
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': 'EFS ML models access working',
+                          'efs_mount_path': EFS_MOUNT_PATH,
+                          'available_models': len(available_models),
+                          'model_files': [str(m) for m in available_models[:5]]  # First 5 models
+                      })
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 1024
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet
+      FileSystemConfigs:
+        - Arn: !GetAtt EFSAccessPoint.Arn
+          LocalMountPath: /mnt/efs
+      Environment:
+        Variables:
+          EFS_MOUNT_PATH: /mnt/efs
+
+  # EFS Access Point for Lambda
+  EFSAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref MLModelsFileSystem
+      PosixUser:
+        Uid: 1000
+        Gid: 1000
+      RootDirectory:
+        Path: /lambda
+        CreationInfo:
+          OwnerUid: 1000
+          OwnerGid: 1000
+          Permissions: 755
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-lambda-access-point
+
+  # Lambda Execution Role with EFS permissions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: EFSClientWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:ClientRootAccess
+                Resource: !Sub '${MLModelsFileSystem}/*'
+
+Outputs:
+  EFSFileSystemId:
+    Description: EFS File System ID for ML models
+    Value: !Ref MLModelsFileSystem
+    Export:
+      Name: !Sub ${EnvironmentName}-efs-id
+
+  EFSAccessPointArn:
+    Description: EFS Access Point ARN for Lambda
+    Value: !GetAtt EFSAccessPoint.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}-efs-access-point
+
+  ModelSyncCommand:
+    Description: Command to sync models to EFS
+    Value: !Sub |
+      # Mount EFS locally and sync models
+      sudo mount -t efs -o tls ${MLModelsFileSystem}:/ /mnt/efs-models
+      rsync -av ml/models/ /mnt/efs-models/models/
+      
+      # Or use EFS Sync script:
+      aws efs put-backup-policy --file-system-id ${MLModelsFileSystem} --backup-policy Status=ENABLED 
