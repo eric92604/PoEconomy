@@ -39,15 +39,41 @@ python feature_engineering.py --experiment-id my_experiment --description "Testi
 ```
 
 ### 2. Model Training
+
+#### Quick Pipeline Verification (⚡ 30 seconds)
 ```bash
-# Production training with full optimization
-python train_models.py --mode production
+# Ultra-fast test mode - verifies entire pipeline is working
+python scripts/test_pipeline.py
 
-# Development training (faster for testing)
-python train_models.py --mode development
+# Or using the parallel training script
+python scripts/train_models_parallel.py --mode test --monitor-resources
+```
 
-# Testing mode (minimal for CI/CD)
-python train_models.py --mode testing
+#### Production Training
+```bash
+# Full production training with parallel optimization (recommended)
+python scripts/train_models_parallel.py --mode production --monitor-resources
+
+# Traditional sequential training
+python scripts/train_models.py --mode production
+```
+
+#### Development Training
+```bash
+# Faster development training with parallel optimization
+python scripts/train_models_parallel.py --mode development --monitor-resources
+
+# Traditional development mode
+python scripts/train_models.py --mode development
+```
+
+#### Train ALL Currencies
+```bash
+# Train ALL currencies with sufficient data (regardless of value)
+python scripts/train_models_parallel.py --train-all-currencies
+
+# Train ALL currencies with custom thresholds
+python scripts/train_models.py --train-all-currencies --min-avg-value 0.1 --min-records 50
 ```
 
 ### 3. Configuration Management
@@ -81,11 +107,19 @@ config.save('custom_config.json')
 - **Debug logging** for detailed troubleshooting
 - **Reduced data requirements** for testing
 
-#### Testing Configuration
-- **10 hyperparameter trials** for CI/CD pipelines
-- **2-fold cross-validation** for speed
-- **Warning-level logging** for clean output
-- **Minimal resource usage**
+#### Test Configuration (⚡ Fast Verification)
+- **3 hyperparameter trials** for ultra-fast completion (~30 seconds)
+- **2-fold cross-validation** for minimal validation
+- **Single currency training** (1 out of 99 available)
+- **2 parallel workers** to test parallelization
+- **Full resource monitoring** to verify CPU utilization
+- **Complete pipeline coverage** (data loading, feature engineering, training)
+
+Perfect for:
+- ✅ Quick development verification
+- ✅ CI/CD pipeline validation  
+- ✅ System health checks
+- ✅ Debugging setup issues
 
 ### Configuration Structure
 ```python
@@ -140,7 +174,7 @@ processed_data, metadata = processor.process_currency_data(df, "chaos_orb")
 from utils.model_training import ModelTrainer, save_model_artifacts
 
 # Model training
-trainer = ModelTrainer(config.model, config.processing)
+trainer = ModelTrainer(config.model, logger)
 result = trainer.train_single_model(X, y, "chaos_orb")
 
 # Save model artifacts
