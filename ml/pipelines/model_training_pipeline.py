@@ -32,6 +32,10 @@ from utils.model_training import ModelTrainer, save_model_artifacts
 from utils.identify_target_currencies import generate_target_currency_list, generate_all_currencies_list
 from utils.currency_standardizer import CurrencyStandardizer
 
+# Add parallel processing imports
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
+
 
 class ModelTrainingPipeline:
     """
@@ -132,6 +136,13 @@ class ModelTrainingPipeline:
                     availability_check_days=self.config.data.availability_check_days
                 )
                 self.logger.info(f"Training high-value currencies mode: {len(target_currencies)} currencies selected")
+            
+            # Apply currency limit if specified
+            if (self.config.data.max_currencies_to_train is not None and 
+                len(target_currencies) > self.config.data.max_currencies_to_train):
+                original_count = len(target_currencies)
+                target_currencies = target_currencies[:self.config.data.max_currencies_to_train]
+                self.logger.info(f"Limited currencies for testing: {original_count} -> {len(target_currencies)} currencies")
                 
             self.processing_stats['total_currencies'] = len(target_currencies)
             
@@ -149,28 +160,17 @@ class ModelTrainingPipeline:
                 self.logger, len(target_currencies), "Currency Model Training"
             )
             
-            # Process each currency
-            for currency in target_currencies:
-                try:
-                    result = self._train_currency_model(df, currency)
-                    if result:
-                        self.results.append(result)
-                        self.processing_stats['successful_training'] += 1
-                    
-                except Exception as e:
-                    self.logger.error(
-                        f"Failed to train model for {currency}",
-                        exception=e
-                    )
-                    self.failed_currencies.append({
-                        'currency': currency,
-                        'error': str(e),
-                        'timestamp': datetime.now().isoformat()
-                    })
-                    self.processing_stats['failed_training'] += 1
-                
-                finally:
-                    progress.update()
+            # Always use parallel currency training
+            max_workers = self.config.model.max_currency_workers
+            
+            # Ensure we have enough currencies to warrant parallel processing
+            if len(target_currencies) == 1:
+                max_workers = 1
+                self.logger.info("Single currency training - using 1 worker")
+            else:
+                self.logger.info(f"Parallel currency training with {max_workers} workers")
+            
+            self._train_currencies_parallel(df, target_currencies, progress, max_workers)
             
             progress.complete()
             
@@ -183,7 +183,8 @@ class ModelTrainingPipeline:
                 {
                     'total_models_trained': len(self.results),
                     'success_rate': len(self.results) / len(target_currencies) if target_currencies else 0,
-                    'processing_stats': self.processing_stats
+                    'processing_stats': self.processing_stats,
+                    'parallel_workers_used': max_workers
                 }
             )
             
@@ -192,6 +193,168 @@ class ModelTrainingPipeline:
         except Exception as e:
             self.logger.error("Training pipeline failed", exception=e)
             raise
+    
+    def _train_currencies_parallel(self, df: pd.DataFrame, target_currencies: List[Dict[str, Any]], 
+                                 progress: ProgressLogger, max_workers: int) -> None:
+        """
+        Train currencies in parallel using ProcessPoolExecutor.
+        
+        Args:
+            df: Training dataframe
+            target_currencies: List of currency dictionaries
+            progress: Progress logger instance
+            max_workers: Maximum number of parallel workers
+        """
+        if max_workers == 1:
+            # Single worker case - no need for ProcessPoolExecutor overhead
+            for currency in target_currencies:
+                try:
+                    result = self._train_currency_model(df, currency)
+                    if result:
+                        self.results.append(result)
+                        self.processing_stats['successful_training'] += 1
+                    else:
+                        self.processing_stats['failed_training'] += 1
+                        
+                except Exception as e:
+                    currency_name = currency.get('get_currency', 'Unknown')
+                    self.logger.error(f"Failed to train model for {currency_name}", exception=e)
+                    self.failed_currencies.append({
+                        'currency': currency,
+                        'error': str(e),
+                        'timestamp': datetime.now().isoformat()
+                    })
+                    self.processing_stats['failed_training'] += 1
+                finally:
+                    progress.update()
+            return
+        
+        # Multi-worker parallel processing
+        shared_data = {
+            'df_path': self._save_temp_dataframe(df),
+            'config_dict': self.config.to_dict(),
+            'experiment_id': self.config.experiment.experiment_id
+        }
+        
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all currency training tasks
+            future_to_currency = {
+                executor.submit(
+                    self._train_currency_worker,
+                    currency,
+                    shared_data
+                ): currency for currency in target_currencies
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_currency):
+                currency = future_to_currency[future]
+                currency_name = currency.get('get_currency', 'Unknown')
+                
+                try:
+                    result = future.result()
+                    if result:
+                        self.results.append(result)
+                        self.processing_stats['successful_training'] += 1
+                        self.logger.info(f"Successfully trained model for {currency_name}")
+                    else:
+                        self.processing_stats['failed_training'] += 1
+                        self.logger.warning(f"Training returned None for {currency_name}")
+                
+                except Exception as e:
+                    self.logger.error(f"Failed to train model for {currency_name}", exception=e)
+                    self.failed_currencies.append({
+                        'currency': currency,
+                        'error': str(e),
+                        'timestamp': datetime.now().isoformat()
+                    })
+                    self.processing_stats['failed_training'] += 1
+                
+                finally:
+                    progress.update()
+        
+        # Clean up temporary file
+        self._cleanup_temp_dataframe(shared_data['df_path'])
+    
+    @staticmethod
+    def _train_currency_worker(currency: Dict[str, Any], shared_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Worker function for parallel currency training.
+        
+        Args:
+            currency: Currency dictionary
+            shared_data: Shared data containing df_path and config
+            
+        Returns:
+            Training result dictionary or None if failed
+        """
+        try:
+            # Reconstruct configuration from dict
+            config = MLConfig.from_dict(shared_data['config_dict'])
+            
+            # Ensure paths are converted to Path objects
+            from pathlib import Path
+            if isinstance(config.paths.models_dir, str):
+                config.paths.models_dir = Path(config.paths.models_dir)
+            if isinstance(config.paths.data_dir, str):
+                config.paths.data_dir = Path(config.paths.data_dir)
+            if isinstance(config.paths.logs_dir, str):
+                config.paths.logs_dir = Path(config.paths.logs_dir)
+            
+            # Load dataframe from temporary file
+            import pandas as pd
+            df = pd.read_parquet(shared_data['df_path'])
+            
+            # Create pipeline instance for this worker
+            pipeline = ModelTrainingPipeline(config)
+            
+            # Train the currency model
+            result = pipeline._train_currency_model(df, currency)
+            
+            return result
+            
+        except Exception as e:
+            # Create a simple logger for error reporting
+            import logging
+            logger = logging.getLogger("CurrencyWorker")
+            logger.error(f"Worker failed for currency {currency}: {str(e)}")
+            return None
+    
+    def _save_temp_dataframe(self, df: pd.DataFrame) -> str:
+        """
+        Save dataframe to temporary file for parallel processing.
+        
+        Args:
+            df: Dataframe to save
+            
+        Returns:
+            Path to temporary file
+        """
+        import tempfile
+        import os
+        
+        temp_dir = tempfile.mkdtemp()
+        temp_path = os.path.join(temp_dir, f"training_data_{self.config.experiment.experiment_id}.parquet")
+        df.to_parquet(temp_path, index=False)
+        
+        self.logger.debug(f"Saved temporary dataframe to {temp_path}")
+        return temp_path
+    
+    def _cleanup_temp_dataframe(self, temp_path: str) -> None:
+        """
+        Clean up temporary dataframe file.
+        
+        Args:
+            temp_path: Path to temporary file
+        """
+        try:
+            import os
+            import shutil
+            temp_dir = os.path.dirname(temp_path)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            self.logger.debug(f"Cleaned up temporary dataframe at {temp_path}")
+        except Exception as e:
+            self.logger.warning(f"Failed to clean up temporary file {temp_path}: {e}")
     
     def _train_currency_model(self, df: pd.DataFrame, currency: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """

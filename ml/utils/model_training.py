@@ -27,6 +27,37 @@ from config.training_config import ModelConfig, ProcessingConfig
 from utils.logging_utils import MLLogger
 
 
+
+def configure_environment_for_parallel_training(config: ModelConfig) -> None:
+    """Configure environment variables for optimal parallel ML performance on c4d VMs."""
+    import os
+    
+    # Set thread allocation based on config
+    threads_per_worker = str(config.currency_worker_threads)
+    
+    # Environment variables for thread control
+    env_vars = {
+        'OMP_NUM_THREADS': threads_per_worker,
+        'MKL_NUM_THREADS': threads_per_worker,
+        'NUMEXPR_NUM_THREADS': threads_per_worker,
+        'OPENBLAS_NUM_THREADS': threads_per_worker,
+        'BLIS_NUM_THREADS': threads_per_worker,
+        'VECLIB_MAXIMUM_THREADS': threads_per_worker,
+        
+        # Memory optimizations
+        'MALLOC_TRIM_THRESHOLD_': '100000',
+        'PYTHONHASHSEED': '42',
+        
+        # ML library optimizations
+        'TF_CPP_MIN_LOG_LEVEL': '2',
+        'CUDA_VISIBLE_DEVICES': '',  # Focus on CPU optimization
+    }
+    
+    for var, value in env_vars.items():
+        if var not in os.environ:
+            os.environ[var] = value
+
+
 @dataclass
 class ModelMetrics:
     """Container for model evaluation metrics."""
@@ -594,7 +625,7 @@ class HyperparameterOptimizer:
         logger: Optional[MLLogger] = None
     ):
         """
-        Initialize hyperparameter optimizer.
+        Initialize hyperparameter optimizer with parallel configuration.
         
         Args:
             config: Model configuration
@@ -602,6 +633,9 @@ class HyperparameterOptimizer:
         """
         self.config = config
         self.logger = logger or MLLogger("HyperparameterOptimizer")
+        
+        # Configure environment for optimal parallel performance
+        configure_environment_for_parallel_training(config)
     
     def optimize(
         self,
@@ -612,7 +646,7 @@ class HyperparameterOptimizer:
         cv_folds: int = 5
     ) -> Tuple[BaseModel, Dict[str, Any]]:
         """
-        Optimize hyperparameters for a model.
+        Optimize hyperparameters using parallel Optuna optimization.
         
         Args:
             model_class: Model class to optimize
@@ -638,7 +672,9 @@ class HyperparameterOptimizer:
                     model.model.callbacks = None
                 if hasattr(model.model, 'early_stopping_rounds') and model.model.early_stopping_rounds:
                     model.model.early_stopping_rounds = None
-                model.model = MultiOutputRegressor(model.model, n_jobs=-1)
+                
+                # Use configured n_jobs for parallelization
+                model.model = MultiOutputRegressor(model.model, n_jobs=self.config.model_n_jobs)
             
             # Time series cross-validation
             tscv = TimeSeriesSplit(n_splits=cv_folds)
@@ -712,18 +748,56 @@ class HyperparameterOptimizer:
             
             return np.mean(scores)
         
-        # Create study
+        # Always use parallel optimization with SQLite storage
         study_name = f"optimize_{currency}_{model_class.__name__}"
+        max_workers = self.config.max_optuna_workers
+        
+        # Use SQLite storage for parallel optimization
+        import tempfile
+        import os
+        temp_dir = tempfile.mkdtemp()
+        storage_url = f"sqlite:///{temp_dir}/optuna_{currency}_{model_class.__name__}.db"
+        
         study = optuna.create_study(
             direction='minimize',
             sampler=TPESampler(seed=self.config.random_state),
             pruner=MedianPruner(n_startup_trials=5, n_warmup_steps=10),
-            study_name=study_name
+            study_name=study_name,
+            storage=storage_url,
+            load_if_exists=True
         )
         
-        # Optimize
-        with self.logger.log_operation(f"Hyperparameter optimization for {currency}"):
-            study.optimize(objective, n_trials=self.config.n_trials, show_progress_bar=False)
+        # Run parallel optimization using ThreadPoolExecutor (to avoid pickling issues)
+        with self.logger.log_operation(f"Parallel hyperparameter optimization for {currency} (workers={max_workers})"):
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            
+            # Calculate trials per worker
+            trials_per_worker = getattr(self.config, 'optuna_trials_per_worker', 
+                                       max(1, self.config.n_trials // max_workers))
+            
+            def worker_function(worker_id, n_trials):
+                """Thread worker for Optuna optimization."""
+                worker_study = optuna.load_study(
+                    study_name=study_name,
+                    storage=storage_url
+                )
+                worker_study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+                return worker_id, n_trials
+            
+            # Run parallel workers using threads
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(worker_function, i, trials_per_worker)
+                    for i in range(max_workers)
+                ]
+                
+                for future in as_completed(futures):
+                    worker_id, trials = future.result()
+                    self.logger.debug(f"Worker {worker_id} completed {trials} trials")
+        
+        # Clean up temp directory
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
         
         # Create best model
         best_model = model_class(self.config, self.logger)
@@ -743,7 +817,7 @@ class HyperparameterOptimizer:
                 if hasattr(base_model, 'early_stopping_rounds'):
                     base_model.early_stopping_rounds = None
             
-            best_model.model = MultiOutputRegressor(base_model, n_jobs=-1)
+            best_model.model = MultiOutputRegressor(base_model, n_jobs=self.config.model_n_jobs)
             # Store reference to base model for parameter updates
             actual_model = base_model
         else:
@@ -763,7 +837,8 @@ class HyperparameterOptimizer:
             extra={
                 "best_score": study.best_value,
                 "n_trials": len(study.trials),
-                "best_params": best_params
+                "best_params": best_params,
+                "parallel_workers": max_workers
             }
         )
         
@@ -895,48 +970,61 @@ class ModelTrainer:
         y_val: np.ndarray,
         currency: str
     ) -> EnsembleModel:
-        """Train ensemble model."""
+        """Train ensemble model with parallel base model training."""
         models = []
         
         # Determine if we need multi-output regression
         is_multi_output = y_train.ndim > 1 and y_train.shape[1] > 1
         
-        # Create base models
-        if self.config.use_lightgbm:
+        def train_lightgbm():
+            """Train LightGBM model in parallel."""
             lgb_model, _ = self.optimizer.optimize(
                 LightGBMModel, X_train, y_train, currency
             )
-            # Ensure the optimized model is properly configured for multi-output
+            
+            # Configure for multi-output if needed
             if is_multi_output and not hasattr(lgb_model.model, 'estimators_'):
-                # The optimizer should have wrapped it, but double-check
                 from sklearn.multioutput import MultiOutputRegressor
                 if not isinstance(lgb_model.model, MultiOutputRegressor):
                     base_model = lgb_model._create_model_without_early_stopping()
-                    lgb_model.model = MultiOutputRegressor(base_model, n_jobs=-1)
+                    lgb_model.model = MultiOutputRegressor(base_model, n_jobs=self.config.model_n_jobs)
                     lgb_model.is_multi_output = True
             
-            # Fit the optimized model on the training data
             lgb_model.fit(X_train, y_train, X_val, y_val)
-            models.append(lgb_model)
+            return lgb_model
         
-        if self.config.use_xgboost:
+        def train_xgboost():
+            """Train XGBoost model in parallel."""
             xgb_model, _ = self.optimizer.optimize(
                 XGBoostModel, X_train, y_train, currency
             )
-            # Ensure the optimized model is properly configured for multi-output
+            
+            # Configure for multi-output if needed
             if is_multi_output and not hasattr(xgb_model.model, 'estimators_'):
-                # The optimizer should have wrapped it, but double-check
                 from sklearn.multioutput import MultiOutputRegressor
                 if not isinstance(xgb_model.model, MultiOutputRegressor):
                     base_model = xgb_model._create_model_without_early_stopping()
-                    xgb_model.model = MultiOutputRegressor(base_model, n_jobs=-1)
+                    xgb_model.model = MultiOutputRegressor(base_model, n_jobs=self.config.model_n_jobs)
                     xgb_model.is_multi_output = True
             
-            # Fit the optimized model on the training data
             xgb_model.fit(X_train, y_train, X_val, y_val)
-            models.append(xgb_model)
+            return xgb_model
         
-        # Create ensemble - don't call fit here as individual models are already fitted
+        from concurrent.futures import ThreadPoolExecutor
+        
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = []
+            if self.config.use_lightgbm:
+                futures.append(executor.submit(train_lightgbm))
+            if self.config.use_xgboost:
+                futures.append(executor.submit(train_xgboost))
+            
+            # Collect results
+            for future in futures:
+                model = future.result()
+                models.append(model)
+        
+        # Create ensemble - models are already fitted
         ensemble = EnsembleModel(models, logger=self.logger)
         
         # Set ensemble properties

@@ -25,6 +25,15 @@ class ModelConfig:
     # Model parameters
     random_state: int = 42
     test_size: float = 0.2
+    
+    # Parallelization settings (always enabled)
+    max_currency_workers: int = 4      # Parallel currency training jobs
+    max_optuna_workers: int = 2        # Parallel Optuna trials per currency
+    currency_worker_threads: int = 2   # Threads per currency worker
+    model_n_jobs: int = 2              # Threads for individual ML models
+    
+    # Performance tuning for c4d VM (8 vCPU, 4 core)
+    optuna_trials_per_worker: int = 100  # Distribute trials across workers
 
 
 @dataclass
@@ -47,6 +56,7 @@ class DataConfig:
     train_all_currencies: bool = True  # If True, train models for all currencies with sufficient data
     min_avg_value_threshold: float = 1.0  # Minimum average value (in Chaos Orbs) for currency selection
     min_records_threshold: int = 50  # Minimum number of records required for training
+    max_currencies_to_train: Optional[int] = None  # Limit number of currencies (None = no limit)
     
     # Currency availability filtering
     filter_by_availability: bool = True
@@ -163,11 +173,17 @@ class MLConfig:
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'MLConfig':
         """Create configuration from dictionary."""
+        # Convert path strings back to Path objects
+        paths_dict = config_dict.get('paths', {})
+        for key, value in paths_dict.items():
+            if isinstance(value, str) and ('dir' in key or 'root' in key):
+                paths_dict[key] = Path(value)
+        
         return cls(
             model=ModelConfig(**config_dict.get('model', {})),
             data=DataConfig(**config_dict.get('data', {})),
             processing=ProcessingConfig(**config_dict.get('processing', {})),
-            paths=PathConfig(**config_dict.get('paths', {})),
+            paths=PathConfig(**paths_dict),
             logging=LoggingConfig(**config_dict.get('logging', {})),
             experiment=ExperimentConfig(**config_dict.get('experiment', {}))
         )
