@@ -1,5 +1,5 @@
 """
-Comprehensive model training utilities for ML pipeline.
+Model training utilities optimized for multi-core systems.
 """
 
 import numpy as np
@@ -11,6 +11,7 @@ import joblib
 import json
 import time
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 # ML imports
 import lightgbm as lgb
@@ -27,35 +28,60 @@ from config.training_config import ModelConfig, ProcessingConfig
 from utils.logging_utils import MLLogger
 
 
-
 def configure_environment_for_parallel_training(config: ModelConfig) -> None:
-    """Configure environment variables for optimal parallel ML performance on c4d VMs."""
+    """Configure environment variables for optimal parallel training."""
     import os
     
-    # Set thread allocation based on config
-    threads_per_worker = str(config.currency_worker_threads)
+    # Set threading environment variables
+    os.environ['OMP_NUM_THREADS'] = str(config.model_n_jobs)
+    os.environ['MKL_NUM_THREADS'] = str(config.model_n_jobs)
+    os.environ['OPENBLAS_NUM_THREADS'] = str(config.model_n_jobs)
+    os.environ['NUMEXPR_NUM_THREADS'] = str(config.model_n_jobs)
     
-    # Environment variables for thread control
+    # LightGBM specific
+    os.environ['LGB_NUM_THREADS'] = str(config.model_n_jobs)
+    
+    # XGBoost specific  
+    os.environ['XGB_NUM_THREADS'] = str(config.model_n_jobs)
+
+
+def configure_optimal_threading(config: ModelConfig) -> None:
+    """
+    Configure optimal threading strategy for ML training.
+    
+    Strategy: Use process-level parallelism for multiple currencies,
+    limit individual model threading to 2-4 cores for optimal performance.
+    """
+    import os
+    import multiprocessing
+    
+    total_cores = multiprocessing.cpu_count()
+    
+    # Optimal threading strategy based on research:
+    # - Individual models perform best with 2-4 cores
+    # - Use remaining cores for process-level parallelism
+    optimal_model_threads = min(4, max(2, total_cores // config.max_currency_workers))
+    
+    print(f"Threading Configuration:")
+    print(f"  Total CPU cores: {total_cores}")
+    print(f"  Currency workers: {config.max_currency_workers}")
+    print(f"  Threads per model: {optimal_model_threads}")
+    
+    # Set environment variables for consistent threading
     env_vars = {
-        'OMP_NUM_THREADS': threads_per_worker,
-        'MKL_NUM_THREADS': threads_per_worker,
-        'NUMEXPR_NUM_THREADS': threads_per_worker,
-        'OPENBLAS_NUM_THREADS': threads_per_worker,
-        'BLIS_NUM_THREADS': threads_per_worker,
-        'VECLIB_MAXIMUM_THREADS': threads_per_worker,
-        
-        # Memory optimizations
-        'MALLOC_TRIM_THRESHOLD_': '100000',
-        'PYTHONHASHSEED': '42',
-        
-        # ML library optimizations
-        'TF_CPP_MIN_LOG_LEVEL': '2',
-        'CUDA_VISIBLE_DEVICES': '',  # Focus on CPU optimization
+        'OMP_NUM_THREADS': str(optimal_model_threads),
+        'MKL_NUM_THREADS': str(optimal_model_threads),
+        'NUMEXPR_NUM_THREADS': str(optimal_model_threads),
+        'OPENBLAS_NUM_THREADS': str(optimal_model_threads),
     }
     
     for var, value in env_vars.items():
-        if var not in os.environ:
-            os.environ[var] = value
+        os.environ[var] = value
+    
+    # Update config to use optimal threading
+    config.model_n_jobs = optimal_model_threads
+    
+    print(f"  Model n_jobs set to: {optimal_model_threads}")
 
 
 @dataclass
@@ -195,27 +221,21 @@ class BaseModel(ABC):
     """Abstract base class for ML models."""
     
     def __init__(self, config: ModelConfig, logger: Optional[MLLogger] = None):
-        """
-        Initialize base model.
-        
-        Args:
-            config: Model configuration
-            logger: Optional logger instance
-        """
         self.config = config
-        self.logger = logger or MLLogger("BaseModel")
+        self.logger = logger
         self.model = None
-        self.scaler = None
-        self.is_fitted = False
+        
+        if self.logger:
+            self.logger.info(f"Initializing {self.get_model_type()} model")
     
     @abstractmethod
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> Any:
-        """Create model instance with optional hyperparameter optimization."""
+        """Create the underlying model with optional hyperparameter optimization."""
         pass
     
     @abstractmethod
     def get_model_type(self) -> str:
-        """Get model type identifier."""
+        """Return the model type identifier."""
         pass
     
     def fit(
@@ -225,111 +245,72 @@ class BaseModel(ABC):
         X_val: Optional[np.ndarray] = None,
         y_val: Optional[np.ndarray] = None
     ) -> None:
-        """
-        Fit the model.
+        """Fit the model to training data."""
+        start_time = time.time()
         
-        Args:
-            X: Training features
-            y: Training targets (can be multi-output)
-            X_val: Optional validation features
-            y_val: Optional validation targets
-        """
-        # Scale features if configured
-        if hasattr(self.config, 'use_scaling') and self.config.use_scaling:
-            self.scaler = RobustScaler()
-            X = self.scaler.fit_transform(X)
-            if X_val is not None:
-                X_val = self.scaler.transform(X_val)
-        
-        # Handle multi-output case - only wrap if not already wrapped
-        from sklearn.multioutput import MultiOutputRegressor
-        self.is_multi_output = y.ndim > 1 and y.shape[1] > 1
-        
-        if self.is_multi_output and not isinstance(self.model, MultiOutputRegressor):
-            # For multi-output regression, we need to recreate the model without early stopping
-            from sklearn.multioutput import MultiOutputRegressor
-            # Recreate the base model without early stopping for multi-output
-            if hasattr(self, '_create_model_without_early_stopping'):
-                base_model = self._create_model_without_early_stopping()
+        if X_val is not None and y_val is not None:
+            # Handle early stopping for different model types
+            if isinstance(self.model, lgb.LGBMRegressor):
+                # LightGBM early stopping
+                self.model.fit(
+                    X, y,
+                    eval_set=[(X_val, y_val)],
+                    callbacks=[lgb.early_stopping(self.config.early_stopping_rounds)]
+                )
+            elif isinstance(self.model, xgb.XGBRegressor):
+                # XGBoost early stopping (early_stopping_rounds set in constructor)
+                self.model.fit(
+                    X, y,
+                    eval_set=[(X_val, y_val)],
+                    verbose=False
+                )
             else:
-                base_model = self.model
-                # Fallback: try to disable early stopping parameters
-                if hasattr(base_model, 'callbacks'):
-                    base_model.callbacks = None
-                if hasattr(base_model, 'early_stopping_rounds'):
-                    base_model.early_stopping_rounds = None
-            
-            self.model = MultiOutputRegressor(base_model, n_jobs=-1)
-        
-        # Fit model - always use validation data if available
-        model_type = type(self.model).__name__
-        base_model_type = type(self.model.estimators_[0] if hasattr(self.model, 'estimators_') else self.model).__name__
-        
-        if (X_val is not None and y_val is not None and 
-            base_model_type in ['LGBMRegressor', 'XGBRegressor'] and 
-            not self.is_multi_output):
-            # Use validation data for models that support eval_set (single-output only)
-            self.model.fit(X, y, eval_set=[(X_val, y_val)])
+                # Other models without early stopping
+                self.model.fit(X, y)
         else:
-            # For other models, multi-output, or when no validation data available
+            # No validation data - train without early stopping
             self.model.fit(X, y)
         
-        self.is_fitted = True
+        training_time = time.time() - start_time
+        
+        if self.logger:
+            self.logger.info(f"{self.get_model_type()} training completed in {training_time:.2f}s")
     
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        Make predictions.
-        
-        Args:
-            X: Features for prediction
-            
-        Returns:
-            Predictions (can be multi-output)
-        """
-        if not self.is_fitted:
-            raise ValueError("Model must be fitted before making predictions")
-        
-        # Scale features if scaler exists
-        if self.scaler is not None:
-            X = self.scaler.transform(X)
+        """Make predictions using the trained model."""
+        if self.model is None:
+            raise ValueError("Model has not been trained yet")
         
         predictions = self.model.predict(X)
         
-        # Ensure predictions have correct shape for multi-output
-        if hasattr(self, 'is_multi_output') and self.is_multi_output:
-            if predictions.ndim == 1:
-                predictions = predictions.reshape(-1, 1)
+        # Handle potential shape issues
+        if predictions.ndim == 1:
+            predictions = predictions.reshape(-1, 1)
         
         return predictions
     
     def get_feature_importance(self) -> Optional[Dict[str, float]]:
-        """Get feature importance if available."""
-        if not self.is_fitted:
+        """Get feature importance from the trained model."""
+        if self.model is None:
             return None
+        
+        if hasattr(self.model, 'feature_importances_'):
+            importance = self.model.feature_importances_
+            if hasattr(self.model, 'feature_names_in_'):
+                feature_names = self.model.feature_names_in_
+            else:
+                feature_names = [f'feature_{i}' for i in range(len(importance))]
             
-        # Handle multi-output case
-        if hasattr(self, 'is_multi_output') and self.is_multi_output:
-            if hasattr(self.model, 'estimators_'):
-                # Average importance across all outputs
-                importances = []
-                for estimator in self.model.estimators_:
-                    if hasattr(estimator, 'feature_importances_'):
-                        importances.append(estimator.feature_importances_)
-                
-                if importances:
-                    avg_importance = np.mean(importances, axis=0)
-                    return dict(enumerate(avg_importance))
-        elif hasattr(self.model, 'feature_importances_'):
-            return dict(enumerate(self.model.feature_importances_))
+            return dict(zip(feature_names, importance))
         
         return None
 
 
 class LightGBMModel(BaseModel):
-    """LightGBM model implementation."""
+    """LightGBM model implementation with optimal threading."""
     
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> lgb.LGBMRegressor:
-        """Create LightGBM model with optional hyperparameter optimization."""
+        """Create LightGBM model with optimal parameters."""
         if trial is not None:
             # Hyperparameter optimization
             params = {
@@ -357,50 +338,13 @@ class LightGBMModel(BaseModel):
                 'reg_lambda': 0.1,
             }
         
-        # Common parameters
+        # Optimal threading configuration
         params.update({
             'random_state': self.config.random_state,
-            'n_jobs': -1,
+            'n_jobs': self.config.model_n_jobs,
+            'force_row_wise': True,  # Better for multi-threading
             'verbose': -1,
             'early_stopping_rounds': self.config.early_stopping_rounds if trial is None else None
-        })
-        
-        return lgb.LGBMRegressor(**params)
-    
-    def _create_model_without_early_stopping(self, trial: Optional[optuna.Trial] = None) -> lgb.LGBMRegressor:
-        """Create LightGBM model without early stopping for multi-output."""
-        if trial is not None:
-            # Hyperparameter optimization
-            params = {
-                'n_estimators': trial.suggest_int('lgb_n_estimators', 100, 1000),
-                'max_depth': trial.suggest_int('lgb_max_depth', 3, 15),
-                'learning_rate': trial.suggest_float('lgb_learning_rate', 0.01, 0.3),
-                'num_leaves': trial.suggest_int('lgb_num_leaves', 10, 300),
-                'min_child_samples': trial.suggest_int('lgb_min_child_samples', 5, 100),
-                'subsample': trial.suggest_float('lgb_subsample', 0.5, 1.0),
-                'colsample_bytree': trial.suggest_float('lgb_colsample_bytree', 0.5, 1.0),
-                'reg_alpha': trial.suggest_float('lgb_reg_alpha', 0.0, 10.0),
-                'reg_lambda': trial.suggest_float('lgb_reg_lambda', 0.0, 10.0),
-            }
-        else:
-            # Default parameters
-            params = {
-                'n_estimators': 500,
-                'max_depth': 8,
-                'learning_rate': 0.1,
-                'num_leaves': 100,
-                'min_child_samples': 20,
-                'subsample': 0.8,
-                'colsample_bytree': 0.8,
-                'reg_alpha': 0.1,
-                'reg_lambda': 0.1,
-            }
-        
-        # Common parameters - NO early stopping
-        params.update({
-            'random_state': self.config.random_state,
-            'n_jobs': -1,
-            'verbose': -1
         })
         
         return lgb.LGBMRegressor(**params)
@@ -411,10 +355,10 @@ class LightGBMModel(BaseModel):
 
 
 class XGBoostModel(BaseModel):
-    """XGBoost model implementation."""
+    """XGBoost model implementation with optimal threading."""
     
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> xgb.XGBRegressor:
-        """Create XGBoost model with optional hyperparameter optimization."""
+        """Create XGBoost model with optimal parameters."""
         if trial is not None:
             # Hyperparameter optimization
             params = {
@@ -440,48 +384,13 @@ class XGBoostModel(BaseModel):
                 'reg_lambda': 0.1,
             }
         
-        # Common parameters
+        # Optimal threading configuration
         params.update({
             'random_state': self.config.random_state,
-            'n_jobs': -1,
+            'n_jobs': self.config.model_n_jobs,
+            'tree_method': 'hist',  # Optimal for multi-core
             'verbosity': 0,
             'early_stopping_rounds': self.config.early_stopping_rounds if trial is None else None
-        })
-        
-        return xgb.XGBRegressor(**params)
-    
-    def _create_model_without_early_stopping(self, trial: Optional[optuna.Trial] = None) -> xgb.XGBRegressor:
-        """Create XGBoost model without early stopping for multi-output."""
-        if trial is not None:
-            # Hyperparameter optimization
-            params = {
-                'n_estimators': trial.suggest_int('xgb_n_estimators', 100, 1000),
-                'max_depth': trial.suggest_int('xgb_max_depth', 3, 15),
-                'learning_rate': trial.suggest_float('xgb_learning_rate', 0.01, 0.3),
-                'min_child_weight': trial.suggest_int('xgb_min_child_weight', 1, 10),
-                'subsample': trial.suggest_float('xgb_subsample', 0.5, 1.0),
-                'colsample_bytree': trial.suggest_float('xgb_colsample_bytree', 0.5, 1.0),
-                'reg_alpha': trial.suggest_float('xgb_reg_alpha', 0.0, 10.0),
-                'reg_lambda': trial.suggest_float('xgb_reg_lambda', 0.0, 10.0),
-            }
-        else:
-            # Default parameters
-            params = {
-                'n_estimators': 500,
-                'max_depth': 8,
-                'learning_rate': 0.1,
-                'min_child_weight': 3,
-                'subsample': 0.8,
-                'colsample_bytree': 0.8,
-                'reg_alpha': 0.1,
-                'reg_lambda': 0.1,
-            }
-        
-        # Common parameters - NO early stopping
-        params.update({
-            'random_state': self.config.random_state,
-            'n_jobs': -1,
-            'verbosity': 0
         })
         
         return xgb.XGBRegressor(**params)
@@ -495,7 +404,7 @@ class RandomForestModel(BaseModel):
     """Random Forest model implementation."""
     
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> RandomForestRegressor:
-        """Create Random Forest model with optional hyperparameter optimization."""
+        """Create Random Forest model."""
         if trial is not None:
             # Hyperparameter optimization
             params = {
@@ -515,10 +424,10 @@ class RandomForestModel(BaseModel):
                 'max_features': 'sqrt',
             }
         
-        # Common parameters
+        # Threading configuration
         params.update({
             'random_state': self.config.random_state,
-            'n_jobs': -1,
+            'n_jobs': self.config.model_n_jobs,
         })
         
         return RandomForestRegressor(**params)
@@ -537,21 +446,19 @@ class EnsembleModel:
         weights: Optional[List[float]] = None,
         logger: Optional[MLLogger] = None
     ):
-        """
-        Initialize ensemble model.
-        
-        Args:
-            models: List of base models
-            weights: Optional weights for ensemble (default: equal weights)
-            logger: Optional logger instance
-        """
         self.models = models
-        self.weights = weights or [1.0 / len(models)] * len(models)
-        self.logger = logger or MLLogger("EnsembleModel")
-        self.is_fitted = False
+        self.weights = weights if weights is not None else [1.0] * len(models)
+        self.logger = logger
         
         if len(self.weights) != len(self.models):
             raise ValueError("Number of weights must match number of models")
+        
+        # Normalize weights
+        total_weight = sum(self.weights)
+        self.weights = [w / total_weight for w in self.weights]
+        
+        if self.logger:
+            self.logger.info(f"Initialized ensemble with {len(models)} models")
     
     def fit(
         self,
@@ -560,82 +467,73 @@ class EnsembleModel:
         X_val: Optional[np.ndarray] = None,
         y_val: Optional[np.ndarray] = None
     ) -> None:
-        """
-        Fit all models in the ensemble.
-        
-        Args:
-            X: Training features
-            y: Training targets (can be multi-output)
-            X_val: Optional validation features
-            y_val: Optional validation targets
-        """
-        # Store multi-output information
-        self.is_multi_output = y.ndim > 1 and y.shape[1] > 1
-        
+        """Fit all models in the ensemble."""
         for i, model in enumerate(self.models):
-            self.logger.info(f"Training ensemble model {i+1}/{len(self.models)}: {model.get_model_type()}")
+            if self.logger:
+                self.logger.info(f"Training ensemble model {i+1}/{len(self.models)}: {model.get_model_type()}")
+            
+            model.model = model._create_model()
             model.fit(X, y, X_val, y_val)
-        
-        self.is_fitted = True
     
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        Make ensemble predictions.
-        
-        Args:
-            X: Features for prediction
-            
-        Returns:
-            Weighted ensemble predictions (can be multi-output)
-        """
-        if not self.is_fitted:
-            raise ValueError("Ensemble must be fitted before making predictions")
+        """Make ensemble predictions."""
+        if not self.models or any(model.model is None for model in self.models):
+            raise ValueError("All models must be trained before making predictions")
         
         predictions = []
         for model in self.models:
             pred = model.predict(X)
             predictions.append(pred)
         
-        # Convert to numpy array for easier manipulation
-        predictions = np.array(predictions)
+        # Weighted average of predictions
+        weighted_pred = np.zeros_like(predictions[0])
+        for pred, weight in zip(predictions, self.weights):
+            weighted_pred += weight * pred
         
-        # Handle multi-output case
-        if hasattr(self, 'is_multi_output') and self.is_multi_output:
-            # For multi-output: predictions shape is (n_models, n_samples, n_outputs)
-            # We want to average across models for each output
-            ensemble_pred = np.average(predictions, axis=0, weights=self.weights)
-        else:
-            # For single output: predictions shape is (n_models, n_samples)
-            ensemble_pred = np.average(predictions, axis=0, weights=self.weights)
+        return weighted_pred
+    
+    def get_feature_importance(self) -> Optional[Dict[str, float]]:
+        """Get aggregated feature importance from all models."""
+        importance_dicts = []
         
-        return ensemble_pred
+        for model in self.models:
+            importance = model.get_feature_importance()
+            if importance is not None:
+                importance_dicts.append(importance)
+        
+        if not importance_dicts:
+            return None
+        
+        # Aggregate importance across models
+        all_features = set()
+        for imp_dict in importance_dicts:
+            all_features.update(imp_dict.keys())
+        
+        aggregated_importance = {}
+        for feature in all_features:
+            importances = [imp_dict.get(feature, 0.0) for imp_dict in importance_dicts]
+            aggregated_importance[feature] = np.mean(importances)
+        
+        return aggregated_importance
     
     def get_model_type(self) -> str:
-        """Get ensemble model type identifier."""
-        model_types = [model.get_model_type() for model in self.models]
-        return f"ensemble_{'_'.join(model_types)}"
+        """Get model type identifier."""
+        return "ensemble"
 
 
 class HyperparameterOptimizer:
-    """Hyperparameter optimization using Optuna."""
+    """Hyperparameter optimizer using Optuna."""
     
     def __init__(
         self,
         config: ModelConfig,
         logger: Optional[MLLogger] = None
     ):
-        """
-        Initialize hyperparameter optimizer with parallel configuration.
-        
-        Args:
-            config: Model configuration
-            logger: Optional logger instance
-        """
         self.config = config
-        self.logger = logger or MLLogger("HyperparameterOptimizer")
+        self.logger = logger
         
-        # Configure environment for optimal parallel performance
-        configure_environment_for_parallel_training(config)
+        # Configure Optuna to be less verbose
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
     
     def optimize(
         self,
@@ -645,208 +543,55 @@ class HyperparameterOptimizer:
         currency: str,
         cv_folds: int = 5
     ) -> Tuple[BaseModel, Dict[str, Any]]:
-        """
-        Optimize hyperparameters using parallel Optuna optimization.
+        """Optimize hyperparameters for a model."""
+        if self.logger:
+            self.logger.info(f"Starting hyperparameter optimization for {model_class.__name__}")
         
-        Args:
-            model_class: Model class to optimize
-            X: Training features
-            y: Training targets
-            currency: Currency identifier
-            cv_folds: Number of cross-validation folds
-            
-        Returns:
-            Tuple of (best_model, best_params)
-        """
         def objective(trial):
             # Create model with trial parameters
             model = model_class(self.config, self.logger)
             model.model = model._create_model(trial)
-            
-            # Check if we need multi-output regression
-            is_multi_output = y.ndim > 1 and y.shape[1] > 1
-            if is_multi_output:
-                from sklearn.multioutput import MultiOutputRegressor
-                # Disable early stopping for MultiOutputRegressor
-                if hasattr(model.model, 'callbacks') and model.model.callbacks:
-                    model.model.callbacks = None
-                if hasattr(model.model, 'early_stopping_rounds') and model.model.early_stopping_rounds:
-                    model.model.early_stopping_rounds = None
-                
-                # Use configured n_jobs for parallelization
-                model.model = MultiOutputRegressor(model.model, n_jobs=self.config.model_n_jobs)
             
             # Time series cross-validation
             tscv = TimeSeriesSplit(n_splits=cv_folds)
             scores = []
             
             for train_idx, val_idx in tscv.split(X):
-                X_train, X_val = X[train_idx], X[val_idx]
-                y_train, y_val = y[train_idx], y[val_idx]
+                X_train_fold, X_val_fold = X[train_idx], X[val_idx]
+                y_train_fold, y_val_fold = y[train_idx], y[val_idx]
                 
-                # Handle NaN values in targets for cross-validation
-                if is_multi_output:
-                    # For multi-output, remove rows where ALL targets are NaN
-                    valid_train_mask = ~np.isnan(y_train).all(axis=1)
-                    valid_val_mask = ~np.isnan(y_val).all(axis=1)
-                else:
-                    # For single output, remove rows where target is NaN
-                    valid_train_mask = ~np.isnan(y_train)
-                    valid_val_mask = ~np.isnan(y_val)
+                # Train and evaluate
+                model.model.fit(X_train_fold, y_train_fold)
+                y_pred = model.predict(X_val_fold)
                 
-                X_train = X_train[valid_train_mask]
-                y_train = y_train[valid_train_mask]
-                X_val = X_val[valid_val_mask]
-                y_val = y_val[valid_val_mask]
-                
-                # Skip if no valid samples
-                if len(X_train) == 0 or len(X_val) == 0:
-                    continue
-                
-                # Apply median imputation to remaining NaN values in targets
-                if is_multi_output and np.isnan(y_train).any():
-                    from sklearn.impute import SimpleImputer
-                    imputer = SimpleImputer(strategy='median')
-                    y_train = imputer.fit_transform(y_train)
-                    if np.isnan(y_val).any():
-                        y_val = imputer.transform(y_val)
-                
-                # Apply scaling if configured
-                if hasattr(self.config, 'use_scaling') and self.config.use_scaling:
-                    from sklearn.preprocessing import RobustScaler
-                    scaler = RobustScaler()
-                    X_train = scaler.fit_transform(X_train)
-                    X_val = scaler.transform(X_val)
-                
-                # Fit and predict
-                model.model.fit(X_train, y_train)
-                y_pred = model.model.predict(X_val)
-                
-                # Calculate RMSE (optimization target)
-                if y_val.ndim > 1 and y_val.shape[1] > 1:
-                    # Multi-output case: calculate average RMSE across all outputs
-                    rmse_per_output = []
-                    for i in range(y_val.shape[1]):
-                        valid_mask = ~(np.isnan(y_val[:, i]) | np.isnan(y_pred[:, i]))
-                        if np.any(valid_mask):
-                            rmse_single = np.sqrt(mean_squared_error(
-                                y_val[valid_mask, i], 
-                                y_pred[valid_mask, i]
-                            ))
-                            rmse_per_output.append(rmse_single)
-                    
-                    rmse = np.mean(rmse_per_output) if rmse_per_output else float('inf')
-                else:
-                    # Single output case
-                    if y_val.ndim > 1:
-                        y_val = y_val.flatten()
-                    if y_pred.ndim > 1:
-                        y_pred = y_pred.flatten()
-                    rmse = np.sqrt(mean_squared_error(y_val, y_pred))
-                
-                scores.append(rmse)
+                # Calculate MAE as objective
+                mae = mean_absolute_error(y_val_fold, y_pred)
+                scores.append(mae)
             
             return np.mean(scores)
         
-        # Always use parallel optimization with SQLite storage
-        study_name = f"optimize_{currency}_{model_class.__name__}"
-        max_workers = self.config.max_optuna_workers
-        
-        # Use SQLite storage for parallel optimization
-        import tempfile
-        import os
-        temp_dir = tempfile.mkdtemp()
-        storage_url = f"sqlite:///{temp_dir}/optuna_{currency}_{model_class.__name__}.db"
-        
+        # Create study
         study = optuna.create_study(
             direction='minimize',
             sampler=TPESampler(seed=self.config.random_state),
-            pruner=MedianPruner(n_startup_trials=5, n_warmup_steps=10),
-            study_name=study_name,
-            storage=storage_url,
-            load_if_exists=True
+            pruner=MedianPruner()
         )
         
-        # Run parallel optimization using ThreadPoolExecutor (to avoid pickling issues)
-        with self.logger.log_operation(f"Parallel hyperparameter optimization for {currency} (workers={max_workers})"):
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            
-            # Calculate trials per worker
-            trials_per_worker = getattr(self.config, 'optuna_trials_per_worker', 
-                                       max(1, self.config.n_trials // max_workers))
-            
-            def worker_function(worker_id, n_trials):
-                """Thread worker for Optuna optimization."""
-                worker_study = optuna.load_study(
-                    study_name=study_name,
-                    storage=storage_url
-                )
-                worker_study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
-                return worker_id, n_trials
-            
-            # Run parallel workers using threads
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [
-                    executor.submit(worker_function, i, trials_per_worker)
-                    for i in range(max_workers)
-                ]
-                
-                for future in as_completed(futures):
-                    worker_id, trials = future.result()
-                    self.logger.debug(f"Worker {worker_id} completed {trials} trials")
-        
-        # Clean up temp directory
-        import shutil
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        # Optimize
+        study.optimize(objective, n_trials=self.config.n_trials)
         
         # Create best model
         best_model = model_class(self.config, self.logger)
+        best_model.model = best_model._create_model(study.best_trial)
         
-        # Check if we need multi-output regression for the best model too
-        is_multi_output = y.ndim > 1 and y.shape[1] > 1
-        if is_multi_output:
-            from sklearn.multioutput import MultiOutputRegressor
-            # Create model without early stopping for multi-output
-            if hasattr(best_model, '_create_model_without_early_stopping'):
-                base_model = best_model._create_model_without_early_stopping()
-            else:
-                base_model = best_model._create_model()
-                # Fallback: try to disable early stopping parameters
-                if hasattr(base_model, 'callbacks'):
-                    base_model.callbacks = None
-                if hasattr(base_model, 'early_stopping_rounds'):
-                    base_model.early_stopping_rounds = None
-            
-            best_model.model = MultiOutputRegressor(base_model, n_jobs=self.config.model_n_jobs)
-            # Store reference to base model for parameter updates
-            actual_model = base_model
-        else:
-            best_model.model = best_model._create_model()
-            actual_model = best_model.model
+        if self.logger:
+            self.logger.info(f"Optimization completed. Best MAE: {study.best_value:.4f}")
         
-        # Update model with best parameters
-        best_params = study.best_params
-        for param_name, param_value in best_params.items():
-            # Remove model prefix from parameter name
-            clean_param_name = param_name.split('_', 1)[1] if '_' in param_name else param_name
-            if hasattr(actual_model, clean_param_name):
-                setattr(actual_model, clean_param_name, param_value)
-        
-        self.logger.info(
-            f"Optimization completed for {currency}",
-            extra={
-                "best_score": study.best_value,
-                "n_trials": len(study.trials),
-                "best_params": best_params,
-                "parallel_workers": max_workers
-            }
-        )
-        
-        return best_model, best_params
+        return best_model, study.best_params
 
 
 class ModelTrainer:
-    """Main model training orchestrator."""
+    """Main model trainer with optimized multi-core performance."""
     
     def __init__(
         self,
@@ -854,18 +599,15 @@ class ModelTrainer:
         processing_config: ProcessingConfig,
         logger: Optional[MLLogger] = None
     ):
-        """
-        Initialize model trainer.
-        
-        Args:
-            config: Model configuration
-            processing_config: Processing configuration
-            logger: Optional logger instance
-        """
         self.config = config
         self.processing_config = processing_config
-        self.logger = logger or MLLogger("ModelTrainer")
-        self.optimizer = HyperparameterOptimizer(config, logger)
+        self.logger = logger
+        
+        # Configure optimal threading
+        configure_optimal_threading(config)
+        
+        if self.logger:
+            self.logger.info("ModelTrainer initialized with optimal threading configuration")
     
     def train_single_model(
         self,
@@ -875,90 +617,65 @@ class ModelTrainer:
         model_type: str = "ensemble",
         target_names: Optional[List[str]] = None
     ) -> TrainingResult:
-        """
-        Train a single model for a currency.
-        
-        Args:
-            X: Feature matrix
-            y: Target values (can be multi-output)
-            currency: Currency identifier
-            model_type: Type of model to train
-            target_names: Names of target columns for multi-output
-            
-        Returns:
-            Training result
-        """
+        """Train a single model with optimal performance."""
         start_time = time.time()
         
-        # Determine if multi-output
-        is_multi_output = y.ndim > 1 and y.shape[1] > 1
+        if self.logger:
+            self.logger.info(f"Training {model_type} model for {currency}")
         
-        # Split data into train/val
-        n_samples = len(X)
-        val_size = int(n_samples * self.config.test_size)
-        train_idx = np.arange(n_samples - val_size)
-        val_idx = np.arange(n_samples - val_size, n_samples)
+        # Split data
+        split_idx = int(len(X) * (1 - self.config.test_size))
+        X_train, X_test = X[:split_idx], X[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
         
-        X_train, y_train = X[train_idx], y[train_idx]
-        X_val, y_val = X[val_idx], y[val_idx]
+        # Further split training data for validation
+        val_split_idx = int(len(X_train) * 0.8)
+        X_train_split, X_val = X_train[:val_split_idx], X_train[val_split_idx:]
+        y_train_split, y_val = y_train[:val_split_idx], y_train[val_split_idx:]
         
-        # Apply imputation to train/validation splits if needed
-        if is_multi_output and (np.isnan(y_train).any() or np.isnan(y_val).any()):
-            from sklearn.impute import SimpleImputer
-            imputer = SimpleImputer(strategy='median')
-            y_train = imputer.fit_transform(y_train)
-            if np.isnan(y_val).any():
-                y_val = imputer.transform(y_val)
+        # Scale features if needed
+        scaler = None
+        if self.processing_config.robust_scaling:
+            scaler = RobustScaler()
+            X_train_split = scaler.fit_transform(X_train_split)
+            X_val = scaler.transform(X_val)
+            X_test = scaler.transform(X_test)
         
         # Train model
-        if model_type == "ensemble" and self.config.use_ensemble:
-            model = self._train_ensemble_model(
-                X_train, y_train,
-                X_val, y_val,
-                currency
-            )
+        if model_type == "ensemble":
+            model = self._train_ensemble_model(X_train_split, y_train_split, X_val, y_val, currency)
         else:
-            model = self._train_single_base_model(
-                X_train, y_train,
-                X_val, y_val,
-                currency,
-                model_type
-            )
+            model = self._train_single_base_model(X_train_split, y_train_split, X_val, y_val, currency, model_type)
         
-        # Calculate metrics
-        y_pred = model.predict(X)
-        
-        # Handle metrics calculation for multi-output
-        if is_multi_output and target_names:
-            metrics = ModelMetrics.from_predictions(y, y_pred, target_names)
-        else:
-            metrics = ModelMetrics.from_predictions(y, y_pred)
-        
-        # Calculate cross-validation scores if enough data
-        cv_scores = self._calculate_cv_scores(model, X, y)
+        # Make predictions and calculate metrics
+        y_pred = model.predict(X_test)
+        metrics = ModelMetrics.from_predictions(y_test, y_pred, target_names)
         
         # Get feature importance
-        feature_importance = model.get_feature_importance() if hasattr(model, 'get_feature_importance') else None
+        feature_importance = model.get_feature_importance()
+        
+        # Calculate cross-validation scores
+        cv_scores = self._calculate_cv_scores(model, X_train, y_train)
+        
+        training_time = time.time() - start_time
         
         # Get hyperparameters
         if hasattr(model, 'model') and hasattr(model.model, 'get_params'):
             hyperparameters = model.model.get_params()
-        elif hasattr(model, 'get_params'):
-            hyperparameters = model.get_params()
+        elif hasattr(model, 'models'):
+            hyperparameters = {f"model_{i}": m.model.get_params() for i, m in enumerate(model.models)}
         else:
             hyperparameters = {}
         
-        training_time = time.time() - start_time
-        
         return TrainingResult(
             model=model,
-            scaler=getattr(model, 'scaler', None),
+            scaler=scaler,
             metrics=metrics,
             training_time=training_time,
             hyperparameters=hyperparameters,
             feature_importance=feature_importance,
             cross_validation_scores=cv_scores,
-            model_type=model.get_model_type(),
+            model_type=model_type,
             currency=currency
         )
     
@@ -970,66 +687,21 @@ class ModelTrainer:
         y_val: np.ndarray,
         currency: str
     ) -> EnsembleModel:
-        """Train ensemble model with parallel base model training."""
+        """Train ensemble model with optimal threading."""
         models = []
         
-        # Determine if we need multi-output regression
-        is_multi_output = y_train.ndim > 1 and y_train.shape[1] > 1
+        if self.config.use_lightgbm:
+            lgb_model = LightGBMModel(self.config, self.logger)
+            lgb_model.model = lgb_model._create_model()
+            models.append(lgb_model)
         
-        def train_lightgbm():
-            """Train LightGBM model in parallel."""
-            lgb_model, _ = self.optimizer.optimize(
-                LightGBMModel, X_train, y_train, currency
-            )
-            
-            # Configure for multi-output if needed
-            if is_multi_output and not hasattr(lgb_model.model, 'estimators_'):
-                from sklearn.multioutput import MultiOutputRegressor
-                if not isinstance(lgb_model.model, MultiOutputRegressor):
-                    base_model = lgb_model._create_model_without_early_stopping()
-                    lgb_model.model = MultiOutputRegressor(base_model, n_jobs=self.config.model_n_jobs)
-                    lgb_model.is_multi_output = True
-            
-            lgb_model.fit(X_train, y_train, X_val, y_val)
-            return lgb_model
+        if self.config.use_xgboost:
+            xgb_model = XGBoostModel(self.config, self.logger)
+            xgb_model.model = xgb_model._create_model()
+            models.append(xgb_model)
         
-        def train_xgboost():
-            """Train XGBoost model in parallel."""
-            xgb_model, _ = self.optimizer.optimize(
-                XGBoostModel, X_train, y_train, currency
-            )
-            
-            # Configure for multi-output if needed
-            if is_multi_output and not hasattr(xgb_model.model, 'estimators_'):
-                from sklearn.multioutput import MultiOutputRegressor
-                if not isinstance(xgb_model.model, MultiOutputRegressor):
-                    base_model = xgb_model._create_model_without_early_stopping()
-                    xgb_model.model = MultiOutputRegressor(base_model, n_jobs=self.config.model_n_jobs)
-                    xgb_model.is_multi_output = True
-            
-            xgb_model.fit(X_train, y_train, X_val, y_val)
-            return xgb_model
-        
-        from concurrent.futures import ThreadPoolExecutor
-        
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = []
-            if self.config.use_lightgbm:
-                futures.append(executor.submit(train_lightgbm))
-            if self.config.use_xgboost:
-                futures.append(executor.submit(train_xgboost))
-            
-            # Collect results
-            for future in futures:
-                model = future.result()
-                models.append(model)
-        
-        # Create ensemble - models are already fitted
         ensemble = EnsembleModel(models, logger=self.logger)
-        
-        # Set ensemble properties
-        ensemble.is_multi_output = is_multi_output
-        ensemble.is_fitted = True
+        ensemble.fit(X_train, y_train, X_val, y_val)
         
         return ensemble
     
@@ -1042,73 +714,57 @@ class ModelTrainer:
         currency: str,
         model_type: str
     ) -> BaseModel:
-        """Train single base model."""
-        model_classes = {
-            'lightgbm': LightGBMModel,
-            'xgboost': XGBoostModel,
-            'random_forest': RandomForestModel
-        }
-        
-        if model_type not in model_classes:
+        """Train a single base model."""
+        if model_type == "lightgbm":
+            model = LightGBMModel(self.config, self.logger)
+        elif model_type == "xgboost":
+            model = XGBoostModel(self.config, self.logger)
+        elif model_type == "random_forest":
+            model = RandomForestModel(self.config, self.logger)
+        else:
             raise ValueError(f"Unknown model type: {model_type}")
         
-        model_class = model_classes[model_type]
-        
-        model, _ = self.optimizer.optimize(
-            model_class, X_train, y_train, currency
-        )
-        
+        model.model = model._create_model()
         model.fit(X_train, y_train, X_val, y_val)
+        
         return model
     
     def _calculate_cv_scores(self, model, X: np.ndarray, y: np.ndarray) -> List[float]:
         """Calculate cross-validation scores."""
         try:
-            tscv = TimeSeriesSplit(n_splits=self.config.cv_folds)
-            scores = []
+            tscv = TimeSeriesSplit(n_splits=min(self.config.cv_folds, len(X) // 50))
             
-            for train_idx, val_idx in tscv.split(X):
-                X_train, X_val = X[train_idx], X[val_idx]
-                y_train, y_val = y[train_idx], y[val_idx]
-                
-                # Create a copy of the model for CV
-                if hasattr(model, 'models'):  # Ensemble
-                    # For ensemble, use a simplified approach
-                    temp_model = model.models[0]  # Use first model as proxy
-                else:
-                    temp_model = model
-                
-                temp_model.fit(X_train, y_train)
-                y_pred = temp_model.predict(X_val)
-                
-                # Handle multi-output case
-                if y_val.ndim > 1 and y_val.shape[1] > 1:
-                    # For multi-output, calculate average RMSE across all outputs
-                    rmse_per_output = []
-                    for i in range(y_val.shape[1]):
-                        valid_mask = ~(np.isnan(y_val[:, i]) | np.isnan(y_pred[:, i]))
-                        if np.any(valid_mask):
-                            rmse_single = np.sqrt(mean_squared_error(
-                                y_val[valid_mask, i], 
-                                y_pred[valid_mask, i]
-                            ))
-                            rmse_per_output.append(rmse_single)
+            if hasattr(model, 'model'):
+                # Single model
+                scores = cross_val_score(
+                    model.model, X, y,
+                    cv=tscv,
+                    scoring='neg_mean_absolute_error',
+                    n_jobs=1  # Use single job for CV to avoid conflicts
+                )
+            else:
+                # Ensemble - manual CV
+                scores = []
+                for train_idx, val_idx in tscv.split(X):
+                    X_train_cv, X_val_cv = X[train_idx], X[val_idx]
+                    y_train_cv, y_val_cv = y[train_idx], y[val_idx]
                     
-                    rmse = np.mean(rmse_per_output) if rmse_per_output else float('inf')
-                else:
-                    # Single output case
-                    if y_val.ndim > 1:
-                        y_val = y_val.flatten()
-                    if y_pred.ndim > 1:
-                        y_pred = y_pred.flatten()
-                    rmse = np.sqrt(mean_squared_error(y_val, y_pred))
-                
-                scores.append(rmse)
+                    # Create temporary model
+                    temp_ensemble = EnsembleModel([
+                        LightGBMModel(self.config),
+                        XGBoostModel(self.config)
+                    ])
+                    temp_ensemble.fit(X_train_cv, y_train_cv)
+                    
+                    y_pred_cv = temp_ensemble.predict(X_val_cv)
+                    mae = mean_absolute_error(y_val_cv, y_pred_cv)
+                    scores.append(-mae)  # Negative for consistency
             
-            return scores
+            return scores.tolist()
             
         except Exception as e:
-            self.logger.warning(f"Cross-validation failed: {str(e)}")
+            if self.logger:
+                self.logger.warning(f"Cross-validation failed: {e}")
             return []
 
 
@@ -1117,52 +773,56 @@ def save_model_artifacts(
     output_dir: Path,
     currency: str
 ) -> Dict[str, str]:
-    """
-    Save model artifacts to disk.
-    
-    Args:
-        result: Training result
-        output_dir: Output directory
-        currency: Currency identifier
-        
-    Returns:
-        Dictionary of saved file paths
-    """
-    # Sanitize currency name for file system
-    safe_currency = currency.replace(" -> ", "_to_").replace("'", "").replace(":", "").replace("/", "_").replace("\\", "_").replace("?", "").replace("*", "").replace("|", "").replace("<", "").replace(">", "").replace('"', "")
-    
-    # Create currency-specific directory
-    currency_dir = output_dir / safe_currency
-    currency_dir.mkdir(parents=True, exist_ok=True)
+    """Save model artifacts to disk."""
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     saved_files = {}
     
-    # Save model
-    model_path = currency_dir / "ensemble_model.pkl"
+    # Save model with standard name expected by model inference utility
+    model_path = output_dir / "ensemble_model.pkl"
     joblib.dump(result.model, model_path)
     saved_files['model'] = str(model_path)
     
     # Save scaler if exists
     if result.scaler is not None:
-        scaler_path = currency_dir / "scaler.pkl"
+        scaler_path = output_dir / "scaler.pkl"
         joblib.dump(result.scaler, scaler_path)
         saved_files['scaler'] = str(scaler_path)
     
-    # Save metadata
+    # Save model metadata with comprehensive information
     metadata = {
-        'currency': result.currency,
         'model_type': result.model_type,
-        'metrics': result.metrics.to_dict(),
+        'currency': currency,
+        'training_timestamp': datetime.now().isoformat(),
         'training_time': result.training_time,
+        'metrics': result.metrics.to_dict(),
         'hyperparameters': result.hyperparameters,
         'feature_importance': result.feature_importance,
-        'cross_validation_scores': result.cross_validation_scores,
-        'training_timestamp': pd.Timestamp.now().isoformat()
+        'cross_validation_scores': result.cross_validation_scores
     }
     
-    metadata_path = currency_dir / "model_metadata.json"
+    metadata_path = output_dir / "model_metadata.json"
     with open(metadata_path, 'w') as f:
         json.dump(metadata, f, indent=2, default=str)
     saved_files['metadata'] = str(metadata_path)
+    
+    # Save individual metrics file for backward compatibility
+    metrics_path = output_dir / f"{currency}_metrics.json"
+    with open(metrics_path, 'w') as f:
+        json.dump(result.metrics.to_dict(), f, indent=2)
+    saved_files['metrics_legacy'] = str(metrics_path)
+    
+    # Save feature importance if exists
+    if result.feature_importance is not None:
+        importance_path = output_dir / f"{currency}_feature_importance.json"
+        with open(importance_path, 'w') as f:
+            json.dump(result.feature_importance, f, indent=2)
+        saved_files['feature_importance'] = str(importance_path)
+    
+    # Save hyperparameters
+    params_path = output_dir / f"{currency}_hyperparameters.json"
+    with open(params_path, 'w') as f:
+        json.dump(result.hyperparameters, f, indent=2, default=str)
+    saved_files['hyperparameters'] = str(params_path)
     
     return saved_files 

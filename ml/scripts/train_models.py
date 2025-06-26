@@ -18,6 +18,7 @@ from config.training_config import MLConfig, get_production_config, get_developm
 from utils.model_training import configure_environment_for_parallel_training
 
 
+
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -105,11 +106,23 @@ Examples:
         help='Minimum number of historical records required'
     )
     
+    parser.add_argument(
+        '--currencies',
+        nargs='*',
+        help='Specific currencies to train (space-separated list)'
+    )
+    
+    parser.add_argument(
+        '--max-workers',
+        type=int,
+        help='Maximum number of parallel workers for training'
+    )
+    
     return parser.parse_args()
 
 
 def main():
-    """Main entry point for model training."""
+    """Main execution function."""
     args = parse_arguments()
     
     try:
@@ -140,6 +153,18 @@ def main():
             config.data.min_avg_value_threshold = args.min_avg_value
         if args.min_records:
             config.data.min_records_threshold = args.min_records
+        
+        # Handle specific currencies
+        if args.currencies:
+            # Override to train only specific currencies
+            config.data.train_all_currencies = False
+            config.data.max_currencies_to_train = len(args.currencies)
+            # Store currencies for filtering in the pipeline
+            config.pipeline.currencies_to_train = args.currencies
+        
+        # Handle max workers
+        if args.max_workers:
+            config.model.max_currency_workers = args.max_workers
         
         # Add mode tag
         config.experiment.tags.append(args.mode)
