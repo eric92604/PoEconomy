@@ -6,34 +6,70 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 import os
+import multiprocessing
 
 
 @dataclass
 class ModelConfig:
-    """Configuration for model training parameters."""
+    """Configuration for ML model training with optimal threading strategy."""
     
-    # Model selection
+    # Model Selection
     use_lightgbm: bool = True
     use_xgboost: bool = True
     use_ensemble: bool = True
     
-    # Hyperparameter optimization
-    n_trials: int = 200
-    cv_folds: int = 5
-    early_stopping_rounds: int = 20
+    # Optimal Threading Strategy
+    # Based on research: Individual models perform best with 2-4 cores
+    # Use process-level parallelism for multiple currencies
+    max_currency_workers: int = None  # Auto-calculated based on CPU cores
+    max_optuna_workers: int = None    # Auto-calculated based on CPU cores
+    model_n_jobs: int = None          # Auto-calculated: 2-4 cores per model
     
-    # Model parameters
-    random_state: int = 42
+    # Training Parameters
     test_size: float = 0.2
+    random_state: int = 42
+    cv_folds: int = 5
+    early_stopping_rounds: int = 50
     
-    # Parallelization settings (always enabled)
-    max_currency_workers: int = 4      # Parallel currency training jobs
-    max_optuna_workers: int = 2        # Parallel Optuna trials per currency
-    currency_worker_threads: int = 2   # Threads per currency worker
-    model_n_jobs: int = 2              # Threads for individual ML models
+    # Hyperparameter Optimization
+    n_trials: int = 100
     
-    # Performance tuning for c4d VM (8 vCPU, 4 core)
-    optuna_trials_per_worker: int = 100  # Distribute trials across workers
+    # Model Performance
+    max_depth: int = 8
+    learning_rate: float = 0.1
+    n_estimators: int = 500
+    
+    def __post_init__(self):
+        """Auto-configure optimal threading based on system capabilities."""
+        total_cores = multiprocessing.cpu_count()
+        
+        # Optimal strategy based on research findings:
+        # - Use 2-4 cores per individual model for best performance
+        # - Use remaining cores for process-level parallelism
+        
+        if self.max_currency_workers is None:
+            # Use 2-4 currency workers depending on core count
+            if total_cores >= 8:
+                self.max_currency_workers = min(4, total_cores // 2)
+            elif total_cores >= 4:
+                self.max_currency_workers = 2
+            else:
+                self.max_currency_workers = 1
+        
+        if self.model_n_jobs is None:
+            # Optimal cores per model: 2-4 cores
+            cores_per_worker = max(1, total_cores // self.max_currency_workers)
+            self.model_n_jobs = min(4, max(2, cores_per_worker))
+        
+        if self.max_optuna_workers is None:
+            # Use same as currency workers for hyperparameter optimization
+            self.max_optuna_workers = self.max_currency_workers
+        
+        print(f"Optimal Threading Configuration:")
+        print(f"  Total CPU cores: {total_cores}")
+        print(f"  Currency workers: {self.max_currency_workers}")
+        print(f"  Cores per model: {self.model_n_jobs}")
+        print(f"  Optuna workers: {self.max_optuna_workers}")
 
 
 @dataclass
@@ -81,24 +117,33 @@ class DataConfig:
 
 @dataclass
 class ProcessingConfig:
-    """Configuration for data processing strategies."""
+    """Configuration for data processing."""
     
-    log_transform: bool = True
+    # Feature Engineering
+    max_lag_features: int = 10
+    technical_indicators: bool = True
+    statistical_features: bool = True
+    
+    # Data Quality
+    min_data_points: int = 100
+    outlier_threshold: float = 3.0
+    missing_value_threshold: float = 0.5
+    
+    # Scaling
     robust_scaling: bool = True
-    feature_selection: bool = True
-    outlier_removal: bool = True
-    advanced_cv: bool = True
     
-    # Feature selection parameters
-    max_features: int = 75 
-    feature_selection_k: int = 30
+    # Target Engineering
+    target_columns: List[str] = None
     
-    # Transformation thresholds
-    log_transform_ratio_threshold: float = 10.0
-    log_transform_cv_improvement: float = 0.8
-    
-    # Categorical encoding
-    max_categorical_cardinality: int = 50
+    def __post_init__(self):
+        """Set default target columns if not provided."""
+        if self.target_columns is None:
+            self.target_columns = [
+                'price_1d',
+                'price_3d', 
+                'price_7d',
+                'price_14d'
+            ]
 
 
 @dataclass
@@ -160,6 +205,51 @@ class ExperimentConfig:
 
 
 @dataclass
+class TrainingPipelineConfig:
+    """Configuration for the complete training pipeline."""
+    
+    # Model and processing configs
+    model_config: ModelConfig = None
+    processing_config: ProcessingConfig = None
+    
+    # Pipeline settings
+    currencies_to_train: Optional[List[str]] = None
+    output_dir: str = field(default_factory=lambda: str(Path(__file__).parent.parent / "models"))
+    
+    # Experiment settings
+    experiment_id: Optional[str] = None
+    description: str = ""
+    tags: List[str] = field(default_factory=list)
+    
+    # Currency selection settings
+    train_all_currencies: bool = False
+    min_avg_value_threshold: float = 1.0
+    min_records_threshold: int = 100
+    
+    # Logging
+    log_level: str = "INFO"
+    save_predictions: bool = True
+    save_feature_importance: bool = True
+    
+    # Performance monitoring
+    enable_monitoring: bool = True
+    monitoring_interval: int = 30  # seconds
+    
+    def __post_init__(self):
+        """Initialize sub-configurations if not provided."""
+        if self.model_config is None:
+            self.model_config = ModelConfig()
+        
+        if self.processing_config is None:
+            self.processing_config = ProcessingConfig()
+        
+        # Generate experiment ID if not provided
+        if self.experiment_id is None:
+            from datetime import datetime
+            self.experiment_id = f"parallel_exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+
+@dataclass
 class MLConfig:
     """Master configuration class combining all sub-configurations."""
     
@@ -169,6 +259,7 @@ class MLConfig:
     paths: PathConfig = field(default_factory=PathConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
+    pipeline: TrainingPipelineConfig = field(default_factory=TrainingPipelineConfig)
     
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'MLConfig':
@@ -185,7 +276,8 @@ class MLConfig:
             processing=ProcessingConfig(**config_dict.get('processing', {})),
             paths=PathConfig(**paths_dict),
             logging=LoggingConfig(**config_dict.get('logging', {})),
-            experiment=ExperimentConfig(**config_dict.get('experiment', {}))
+            experiment=ExperimentConfig(**config_dict.get('experiment', {})),
+            pipeline=TrainingPipelineConfig(**config_dict.get('pipeline', {}))
         )
     
     @classmethod

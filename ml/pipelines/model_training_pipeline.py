@@ -409,10 +409,6 @@ class ModelTrainingPipeline:
             feature_columns = self._get_feature_columns(processed_data)
             target_column = self._get_target_column(processed_data)
             
-            # Handle both single and multi-output cases
-            is_multi_output = isinstance(target_column, list)
-            target_names = target_column if is_multi_output else None
-            
             if not feature_columns:
                 self.logger.warning(f"No feature columns found for {currency_name}")
                 self.processing_stats['validation_failures'] += 1
@@ -424,36 +420,30 @@ class ModelTrainingPipeline:
                 return None
             
             # Validate target columns exist
-            if is_multi_output:
+            if isinstance(target_column, list):
                 missing_targets = [col for col in target_column if col not in processed_data.columns]
                 if missing_targets:
                     self.logger.warning(f"Missing target columns for {currency_name}: {missing_targets}")
                     self.processing_stats['validation_failures'] += 1
                     return None
+                self.logger.info(f"Found {len(target_column)} target horizons: {target_column}")
             else:
                 if target_column not in processed_data.columns:
                     self.logger.warning(f"Target column {target_column} not found for {currency_name}")
-                self.processing_stats['validation_failures'] += 1
-                return None
+                    self.processing_stats['validation_failures'] += 1
+                    return None
+                self.logger.info(f"Found single target: {target_column}")
             
+            # Prepare feature matrix
             X = processed_data[feature_columns].values
+            self.logger.info(f"Initial feature matrix shape: X={X.shape}")
             
-            if is_multi_output:
-                y = processed_data[target_column].values
-                self.logger.info(f"Multi-output training enabled with {len(target_column)} targets: {target_column}")
-            else:
-                y = processed_data[target_column].values
-                self.logger.info(f"Single-output training with target: {target_column}")
-
-            self.logger.info(f"Initial data shape: X={X.shape}, y={y.shape}")
-            
-            # Check for NaN values only if X is numeric
+            # Check for NaN values in features
             if X.dtype.kind in 'biufc':  # binary, integer, unsigned, float, complex
                 nan_count = np.isnan(X).sum()
                 self.logger.info(f"Initial NaN count in features: {nan_count}")
             else:
                 self.logger.info(f"Features contain non-numeric data (dtype: {X.dtype})")
-                # Convert to numeric if possible, otherwise this will be caught later
                 try:
                     X = X.astype(float)
                     nan_count = np.isnan(X).sum()
@@ -461,44 +451,16 @@ class ModelTrainingPipeline:
                 except (ValueError, TypeError) as e:
                     self.logger.error(f"Cannot convert features to numeric: {e}")
                     return None
-
-            # Handle NaN filtering for both single and multi-output
-            if is_multi_output:
-                # For multi-output, remove rows where ALL targets are NaN
-                target_valid_mask = ~pd.isna(y).all(axis=1)
-            else:
-                target_valid_mask = ~pd.isna(y)
             
-            X = X[target_valid_mask]
-            y = y[target_valid_mask]
-            
-            # Also filter the processed_data to maintain league information
-            processed_data = processed_data[target_valid_mask].reset_index(drop=True)
-
-            if len(X) == 0:
-                self.logger.warning(f"No valid target values for {currency_name}")
-                return None
-
-            self.logger.info(
-                f"Target filtering results:",
-                extra={
-                    'original_samples': len(target_valid_mask),
-                    'valid_samples': len(X),
-                    'removed_samples': len(target_valid_mask) - len(X)
-                }
-            )
-
-            # 2. Remove rows with too many NaN values (>70% of features are NaN)
+            # Basic data quality filtering
+            # Remove rows with too many NaN values (>70% of features are NaN)
             row_nan_ratio = np.isnan(X).sum(axis=1) / X.shape[1]
             valid_rows = row_nan_ratio <= 0.7
             X = X[valid_rows]
-            y = y[valid_rows]
-            
-            # Also filter processed_data
             processed_data = processed_data[valid_rows].reset_index(drop=True)
-
+            
             self.logger.info(
-                f"Row NaN filtering results:",
+                f"Feature NaN filtering results:",
                 extra={
                     'samples_before': len(row_nan_ratio),
                     'samples_after': len(X),
@@ -507,8 +469,8 @@ class ModelTrainingPipeline:
                     'mean_nan_ratio': float(row_nan_ratio.mean()) if len(row_nan_ratio) > 0 else 0
                 }
             )
-
-            # 3. Impute remaining NaN values with median (column-wise)
+            
+            # Impute remaining NaN values with median (column-wise)
             if np.isnan(X).any():
                 imputer = SimpleImputer(strategy='median')
                 X = imputer.fit_transform(X)
@@ -519,43 +481,122 @@ class ModelTrainingPipeline:
                 self.processing_stats['insufficient_data'] += 1
                 return None
 
-            # Train model
-            training_result = self.model_trainer.train_single_model(
-                X, y, currency_name, target_names=target_names
-            )
+            # Train model(s) for different prediction horizons
+            if isinstance(target_column, list) and len(target_column) > 1:
+                # Multi-horizon training: train separate models for each horizon
+                self.logger.info(f"Multi-horizon training for {len(target_column)} horizons: {target_column}")
+                
+                horizon_results = {}
+                horizon_models = {}
+                
+                for target_col in target_column:
+                    horizon = target_col.replace('target_price_', '')
+                    self.logger.info(f"Training model for {horizon} horizon")
+                    
+                    # Get target for this horizon
+                    y_horizon = processed_data[target_col].values
+                    
+                    # Filter out NaN values for this specific target
+                    target_valid_mask = ~pd.isna(y_horizon)
+                    X_horizon = X[target_valid_mask]
+                    y_horizon = y_horizon[target_valid_mask]
+                    
+                    if len(X_horizon) < 50:
+                        self.logger.warning(f"Insufficient data for {currency_name} {horizon} horizon: {len(X_horizon)} samples")
+                        continue
+                    
+                    # Train model for this horizon
+                    training_result = self.model_trainer.train_single_model(
+                        X_horizon, y_horizon, f"{currency_name}_{horizon}", target_names=[target_col]
+                    )
+                    
+                    if training_result is not None:
+                        horizon_results[horizon] = training_result
+                        horizon_models[horizon] = training_result.model
+                        self.logger.info(f"Successfully trained {horizon} model for {currency_name}")
+                    else:
+                        self.logger.warning(f"Failed to train {horizon} model for {currency_name}")
+                
+                if not horizon_results:
+                    self.logger.error(f"All horizon models failed for {currency_name}")
+                    return None
+                
+                # Create combined result for multi-horizon models
+                primary_horizon = '1d' if '1d' in horizon_results else list(horizon_results.keys())[0]
+                primary_result = horizon_results[primary_horizon]
+                
+                # Save models for each horizon
+                model_info = {}
+                for horizon, result in horizon_results.items():
+                    horizon_model_dir = self.config.paths.models_dir / f"{currency_name}_{horizon}"
+                    horizon_model_info = save_model_artifacts(result, horizon_model_dir, f"{currency_name}_{horizon}")
+                    model_info[f"{horizon}_model"] = horizon_model_info
+                
+                # Also save the primary model in the main directory for compatibility
+                main_model_info = save_model_artifacts(
+                    primary_result, self.config.paths.models_dir, currency_name
+                )
+                model_info['primary_model'] = main_model_info
+                
+                # Compile results
+                result = {
+                    'currency': currency_name,
+                    'get_currency': currency['get_currency'],
+                    'pay_currency': currency['pay_currency'],
+                    'training_samples': {horizon: len(processed_data[~pd.isna(processed_data[f'target_price_{horizon}'])]) 
+                                       for horizon in horizon_results.keys()},
+                    'training_metrics': {horizon: result.metrics for horizon, result in horizon_results.items()},
+                    'model_info': model_info,
+                    'processing_metadata': processing_metadata,
+                    'feature_count': len(feature_columns),
+                    'leagues_in_training': processing_metadata.get('leagues_included', []),
+                    'horizons_trained': list(horizon_results.keys()),
+                    'primary_horizon': primary_horizon
+                }
+                
+            else:
+                # Single-horizon training (fallback)
+                target_col = target_column if isinstance(target_column, str) else target_column[0]
+                y = processed_data[target_col].values
+                
+                # Filter out NaN values
+                target_valid_mask = ~pd.isna(y)
+                X = X[target_valid_mask]
+                y = y[target_valid_mask]
+                
+                if len(X) < 50:
+                    self.logger.warning(f"Insufficient data for {currency_name}: {len(X)} samples")
+                    self.processing_stats['insufficient_data'] += 1
+                    return None
+                
+                # Train single model
+                training_result = self.model_trainer.train_single_model(
+                    X, y, currency_name, target_names=[target_col]
+                )
+                
+                if training_result is None:
+                    self.logger.error(f"Model training failed for {currency_name}")
+                    return None
+                
+                # Save model artifacts
+                model_info = save_model_artifacts(
+                    training_result, self.config.paths.models_dir, currency_name
+                )
+                
+                # Compile results
+                result = {
+                    'currency': currency_name,
+                    'get_currency': currency['get_currency'],
+                    'pay_currency': currency['pay_currency'],
+                    'training_samples': len(X),
+                    'training_metrics': training_result.metrics,
+                    'model_info': model_info,
+                    'processing_metadata': processing_metadata,
+                    'feature_count': len(feature_columns),
+                    'leagues_in_training': processing_metadata.get('leagues_included', [])
+                }
             
-            if training_result is None:
-                self.logger.error(f"Model training failed for {currency_name}")
-                return None
-
-            # Enhanced evaluation with league-specific metrics
-            evaluation_results = self._evaluate_model_comprehensive(
-                processed_data, training_result, currency_name, feature_columns, target_column
-            )
-            
-            # Save model artifacts
-            model_info = save_model_artifacts(
-                training_result,
-                self.config.paths.models_dir,
-                currency_name
-            )
-
-            # Compile final results
-            result = {
-                'currency': currency_name,
-                'get_currency': currency['get_currency'],
-                'pay_currency': currency['pay_currency'],
-                'training_samples': len(X),
-                'training_metrics': training_result.metrics,
-                'evaluation_results': evaluation_results,
-                'model_info': model_info,
-                'processing_metadata': processing_metadata,
-                'feature_count': len(feature_columns),
-                'leagues_in_training': processing_metadata.get('leagues_included', [])
-            }
-            
-            self.logger.info(f"Successfully trained model for {currency_name}")
-            
+            self.logger.info(f"Successfully trained model(s) for {currency_name}")
             return result
     
     def _find_latest_training_data(self) -> str:
@@ -602,13 +643,19 @@ class ModelTrainingPipeline:
         if not target_cols:
             return None
         
-        # Use multi-output when multiple prediction horizons are available
-        if len(target_cols) > 1:
-            # Return all target columns for multi-output regression
-            return sorted(target_cols, key=lambda x: int(''.join(filter(str.isdigit, x))))
+        # Return the primary prediction horizons for separate model training
+        # We'll train separate models for 1d, 3d, and 7d predictions
+        available_horizons = []
+        for horizon in ['1d', '3d', '7d']:
+            target_col = f'target_price_{horizon}'
+            if target_col in target_cols:
+                available_horizons.append(target_col)
+        
+        if available_horizons:
+            return available_horizons  # Return list for multi-horizon training
         else:
-            # Use single target when only one horizon is available
-            return target_cols[0]
+            # Fallback to any available target
+            return sorted(target_cols, key=lambda x: int(''.join(filter(str.isdigit, x))))[0]
     
     def _get_currency_ids(self, get_currency: str, pay_currency: str) -> Optional[tuple]:
         """Get currency IDs from database using standardizer."""
