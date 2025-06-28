@@ -132,6 +132,14 @@ class ProcessingConfig:
     # Scaling
     robust_scaling: bool = True
     
+    # Price transformations
+    log_transform: bool = True
+    log_transform_ratio_threshold: float = 10.0
+    
+    # Data processing options
+    outlier_removal: bool = True
+    feature_selection: bool = False
+    
     # Target Engineering
     target_columns: List[str] = None
     

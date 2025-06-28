@@ -84,18 +84,41 @@ class PoeWatchInvestmentReportGenerator:
             if production_models_dir.exists():
                 models_dir = production_models_dir
                 self.logger.info(f"Using production models directory: {models_dir}")
-            elif not models_dir.exists():
-                self.logger.error(f"Models directory not found: {models_dir}")
-                return False
+            else:
+                # Look for latest experiment directory
+                models_parent = models_dir.parent
+                experiment_dirs = [d for d in models_parent.iterdir() if d.is_dir() and d.name.startswith('currency_exp_')]
+                
+                if experiment_dirs:
+                    # Sort by modification time and use the latest
+                    latest_exp_dir = max(experiment_dirs, key=lambda d: d.stat().st_mtime)
+                    models_dir = latest_exp_dir
+                    self.logger.info(f"Using latest experiment models directory: {models_dir}")
+                elif not models_dir.exists():
+                    self.logger.error(f"Models directory not found: {models_dir}")
+                    return False
             
-            self.predictor = ModelPredictor(models_dir, logger=self.logger)
+            self.predictor = ModelPredictor(models_dir, config=self.config, logger=self.logger)
             available_models = self.predictor.load_available_models()
             
             if not available_models:
                 self.logger.error("No models available")
                 return False
             
-            self.logger.info(f"Loaded {len(available_models)} prediction models")
+            # Log detailed model information
+            multi_horizon_count = sum(1 for models in available_models.values() if 'horizons' in models and models['horizons'])
+            single_model_count = len(available_models) - multi_horizon_count
+            
+            self.logger.info(f"Loaded {len(available_models)} currencies: {multi_horizon_count} multi-horizon, {single_model_count} single models")
+            
+            # Log available currencies and their horizons
+            for currency, model_info in available_models.items():
+                if 'horizons' in model_info and model_info['horizons']:
+                    horizons = sorted(model_info['horizons'])
+                    self.logger.info(f"  {currency}: {horizons} day horizons")
+                else:
+                    self.logger.info(f"  {currency}: single model")
+            
             return True
         except Exception as e:
             self.logger.error(f"Failed to load models: {e}")
@@ -188,9 +211,21 @@ class PoeWatchInvestmentReportGenerator:
         
         # Create currency name mapping for fuzzy matching
         poe_watch_currencies = set(market_df['currency_name'].unique())
-        ml_currencies = set(predictions_df['currency'].unique()) if not predictions_df.empty else set()
+        
+        # Get ML currencies from loaded models, not from predictions (which might be empty)
+        ml_currencies = set()
+        if self.predictor and hasattr(self.predictor, 'loaded_models'):
+            for model_key in self.predictor.loaded_models.keys():
+                if '_' in model_key and model_key.split('_')[-1] in ['1d', '3d', '7d']:
+                    # Multi-horizon model: extract currency name
+                    currency_name = '_'.join(model_key.split('_')[:-1])
+                    ml_currencies.add(currency_name)
+                else:
+                    # Single model: use as-is
+                    ml_currencies.add(model_key)
         
         self.logger.info(f"Found {len(ml_currencies)} ML model currencies, {len(poe_watch_currencies)} POE Watch currencies")
+        self.logger.info(f"Available ML currencies: {sorted(ml_currencies)}")
         
         # Track matching statistics
         matched_currencies = 0
@@ -234,34 +269,32 @@ class PoeWatchInvestmentReportGenerator:
                 
                 # Check if we have an ML model for this standardized currency
                 if standardized_currency not in ml_currencies:
-                    self.logger.debug(f"Skipping {currency} (standardized: {standardized_currency}) - no ML model available")
-                    skipped_currencies += 1
-                    continue
-                
-                matched_ml_currency = standardized_currency
+                    # No ML model available - use fallback analysis with historical trends
+                    matched_ml_currency = None
+                else:
+                    matched_ml_currency = standardized_currency
             except Exception as e:
                 self.logger.warning(f"Error standardizing currency {currency}: {e}")
                 skipped_currencies += 1
                 continue
             
             # Get ML predictions for this currency using the matched name
-            currency_predictions = predictions_df[predictions_df['currency'] == matched_ml_currency]
-            
-            if currency_predictions.empty:
-                self.logger.debug(f"Skipping {currency} - no ML predictions found for {matched_ml_currency}")
-                skipped_currencies += 1
-                continue
+            currency_predictions = pd.DataFrame()  # Default to empty
+            if matched_ml_currency is not None:
+                currency_predictions = predictions_df[predictions_df['currency'] == matched_ml_currency]
+                if not currency_predictions.empty and matched_ml_currency != currency:
+                    self.logger.debug(f"Matched '{currency}' → '{matched_ml_currency}'")
             
             matched_currencies += 1
-            if matched_ml_currency != currency:
-                self.logger.debug(f"Matched '{currency}' → '{matched_ml_currency}'")
             
             # Default ML prediction values
             ml_pred_1d = period_change_percent  # fallback to historical trend
             ml_pred_3d = period_change_percent
             ml_pred_7d = period_change_percent
             ml_confidence = poe_watch_confidence  # fallback to POE Watch confidence
-            ml_predicted_price = last_price
+            ml_predicted_price_1d = last_price
+            ml_predicted_price_3d = last_price
+            ml_predicted_price_7d = last_price
             ml_data_points = len(currency_data)
             
             # Use ML predictions if available
@@ -273,14 +306,16 @@ class PoeWatchInvestmentReportGenerator:
                 if not pred_1d.empty:
                     ml_pred_1d = pred_1d['price_change_percent'].iloc[0]
                     ml_confidence = pred_1d['confidence_score'].iloc[0]
-                    ml_predicted_price = pred_1d['predicted_price'].iloc[0]
+                    ml_predicted_price_1d = pred_1d['predicted_price'].iloc[0]
                     ml_data_points = pred_1d['data_points_used'].iloc[0]
                 
                 if not pred_3d.empty:
                     ml_pred_3d = pred_3d['price_change_percent'].iloc[0]
+                    ml_predicted_price_3d = pred_3d['predicted_price'].iloc[0]
                 
                 if not pred_7d.empty:
                     ml_pred_7d = pred_7d['price_change_percent'].iloc[0]
+                    ml_predicted_price_7d = pred_7d['predicted_price'].iloc[0]
             
             # Combined confidence score (ML + POE Watch)
             combined_confidence = (ml_confidence * 0.7 + poe_watch_confidence * 0.3)
@@ -303,9 +338,11 @@ class PoeWatchInvestmentReportGenerator:
             
             analysis_results.append({
                 'currency': currency,
-                'ml_currency_name': matched_ml_currency,  # Track the matched ML name
+                'ml_currency_name': matched_ml_currency or 'No ML Model',  # Track the matched ML name
                 'current_price': last_price,
-                'predicted_price_1d': ml_predicted_price,
+                'predicted_price_1d': ml_predicted_price_1d,
+                'predicted_price_3d': ml_predicted_price_3d,
+                'predicted_price_7d': ml_predicted_price_7d,
                 'ml_pred_1d': ml_pred_1d,
                 'ml_pred_3d': ml_pred_3d,
                 'ml_pred_7d': ml_pred_7d,
@@ -509,7 +546,10 @@ class PoeWatchInvestmentReportGenerator:
         return html
     
     def create_investment_opportunities_table(self, analysis_df: pd.DataFrame) -> str:
-        """Create comprehensive investment opportunities table."""
+        """Create comprehensive investment opportunities table with multi-horizon forecasting."""
+        if analysis_df.empty:
+            return "<h2>💎 Investment Opportunities</h2><p>No investment opportunities available - no data to analyze.</p>"
+        
         # Sort by investment potential (combination of ML prediction, confidence, and volume)
         analysis_df['investment_score'] = (
             analysis_df['ml_pred_1d'] * 0.5 +
@@ -521,28 +561,33 @@ class PoeWatchInvestmentReportGenerator:
         
         html = f"""
         <div style="margin: 20px 0;">
-            <h2 style="color: #2c3e50; text-align: center;">💎 Investment Opportunities ({len(sorted_opportunities)} currencies)</h2>
+            <h2 style="color: #2c3e50; text-align: center;">💎 Multi-Horizon Investment Opportunities ({len(sorted_opportunities)} currencies)</h2>
             <div style="max-height: 600px; overflow-y: auto; border: 1px solid #ddd; border-radius: 5px;">
-                <table style="width: 100%; border-collapse: collapse; font-family: Arial, sans-serif; font-size: 11px;">
+                <table style="width: 100%; border-collapse: collapse; font-family: Arial, sans-serif; font-size: 10px;">
                     <thead style="position: sticky; top: 0; z-index: 10;">
                         <tr style="background-color: #34495e; color: white;">
-                            <th style="padding: 8px; text-align: left; border: 1px solid #ddd;">Currency</th>
-                            <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Current Price</th>
-                            <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Predicted Price</th>
-                            <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">1-day Profit %</th>
-                            <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Price Range</th>
-                            <th style="padding: 8px; text-align: center; border: 1px solid #ddd;">Confidence</th>
-                            <th style="padding: 8px; text-align: right; border: 1px solid #ddd;">Volume</th>
-                            <th style="padding: 8px; text-align: center; border: 1px solid #ddd;">Risk</th>
-                            <th style="padding: 8px; text-align: center; border: 1px solid #ddd;">Recommendation</th>
+                            <th style="padding: 6px; text-align: left; border: 1px solid #ddd;">Currency</th>
+                            <th style="padding: 6px; text-align: right; border: 1px solid #ddd;">Current Price</th>
+                            <th style="padding: 6px; text-align: right; border: 1px solid #ddd;">1d Pred</th>
+                            <th style="padding: 6px; text-align: right; border: 1px solid #ddd;">3d Pred</th>
+                            <th style="padding: 6px; text-align: right; border: 1px solid #ddd;">7d Pred</th>
+                            <th style="padding: 6px; text-align: right; border: 1px solid #ddd;">1d %</th>
+                            <th style="padding: 6px; text-align: right; border: 1px solid #ddd;">3d %</th>
+                            <th style="padding: 6px; text-align: right; border: 1px solid #ddd;">7d %</th>
+                            <th style="padding: 6px; text-align: center; border: 1px solid #ddd;">Confidence</th>
+                            <th style="padding: 6px; text-align: right; border: 1px solid #ddd;">Volume</th>
+                            <th style="padding: 6px; text-align: center; border: 1px solid #ddd;">Risk</th>
+                            <th style="padding: 6px; text-align: center; border: 1px solid #ddd;">Recommendation</th>
                         </tr>
                     </thead>
                     <tbody>
         """
         
         for i, (_, row) in enumerate(sorted_opportunities.iterrows(), 1):
-            # Color coding
-            change_color = '#27ae60' if row['ml_pred_1d'] > 0 else '#e74c3c'
+            # Color coding for different horizons
+            change_color_1d = '#27ae60' if row['ml_pred_1d'] > 0 else '#e74c3c'
+            change_color_3d = '#27ae60' if row['ml_pred_3d'] > 0 else '#e74c3c'
+            change_color_7d = '#27ae60' if row['ml_pred_7d'] > 0 else '#e74c3c'
             
             # Risk colors
             risk_colors = {
@@ -574,15 +619,18 @@ class PoeWatchInvestmentReportGenerator:
             
             html += f"""
                 <tr style="background-color: {'#f8f9fa' if i % 2 == 0 else 'white'};">
-                    <td style="padding: 6px; border: 1px solid #ddd; font-weight: bold;">{row['currency']}</td>
-                    <td style="padding: 6px; border: 1px solid #ddd; text-align: right;">{row['current_price']:.2f}c</td>
-                    <td style="padding: 6px; border: 1px solid #ddd; text-align: right; font-weight: bold;">{row['predicted_price_1d']:.2f}c</td>
-                    <td style="padding: 6px; border: 1px solid #ddd; text-align: right; color: {change_color}; font-weight: bold;">{row['ml_pred_1d']:+.1f}%</td>
-                    <td style="padding: 6px; border: 1px solid #ddd; text-align: right; font-size: 10px;">{price_range}</td>
-                    <td style="padding: 6px; border: 1px solid #ddd; text-align: center; color: {conf_color}; font-weight: bold;">{confidence_pct}</td>
-                    <td style="padding: 6px; border: 1px solid #ddd; text-align: right;">{row['daily_volume']:.0f}</td>
-                    <td style="padding: 6px; border: 1px solid #ddd; text-align: center; color: {risk_color}; font-weight: bold; font-size: 10px;">{row['risk_level']}</td>
-                    <td style="padding: 6px; border: 1px solid #ddd; text-align: center; color: {rec_color}; font-weight: bold; font-size: 10px;">{row['investment_recommendation']}</td>
+                    <td style="padding: 4px; border: 1px solid #ddd; font-weight: bold; font-size: 9px;">{row['currency']}</td>
+                    <td style="padding: 4px; border: 1px solid #ddd; text-align: right;">{row['current_price']:.2f}c</td>
+                    <td style="padding: 4px; border: 1px solid #ddd; text-align: right; font-weight: bold;">{row['predicted_price_1d']:.2f}c</td>
+                    <td style="padding: 4px; border: 1px solid #ddd; text-align: right; font-weight: bold;">{row['predicted_price_3d']:.2f}c</td>
+                    <td style="padding: 4px; border: 1px solid #ddd; text-align: right; font-weight: bold;">{row['predicted_price_7d']:.2f}c</td>
+                    <td style="padding: 4px; border: 1px solid #ddd; text-align: right; color: {change_color_1d}; font-weight: bold;">{row['ml_pred_1d']:+.1f}%</td>
+                    <td style="padding: 4px; border: 1px solid #ddd; text-align: right; color: {change_color_3d}; font-weight: bold;">{row['ml_pred_3d']:+.1f}%</td>
+                    <td style="padding: 4px; border: 1px solid #ddd; text-align: right; color: {change_color_7d}; font-weight: bold;">{row['ml_pred_7d']:+.1f}%</td>
+                    <td style="padding: 4px; border: 1px solid #ddd; text-align: center; color: {conf_color}; font-weight: bold;">{confidence_pct}</td>
+                    <td style="padding: 4px; border: 1px solid #ddd; text-align: right;">{row['daily_volume']:.0f}</td>
+                    <td style="padding: 4px; border: 1px solid #ddd; text-align: center; color: {risk_color}; font-weight: bold; font-size: 9px;">{row['risk_level']}</td>
+                    <td style="padding: 4px; border: 1px solid #ddd; text-align: center; color: {rec_color}; font-weight: bold; font-size: 8px;">{row['investment_recommendation']}</td>
                 </tr>
             """
         
@@ -597,6 +645,9 @@ class PoeWatchInvestmentReportGenerator:
     
     def create_portfolio_recommendations(self, analysis_df: pd.DataFrame) -> str:
         """Create portfolio recommendations based on POE Watch analysis."""
+        if analysis_df.empty:
+            return "<h2>💼 Portfolio Recommendations</h2><p>No portfolio recommendations available - no data to analyze.</p>"
+        
         # Conservative: Low risk, positive ML predictions
         conservative = analysis_df[
             (analysis_df['risk_level'] == '🟢 LOW') & 
@@ -715,15 +766,22 @@ class PoeWatchInvestmentReportGenerator:
         investment_opportunities = self.create_investment_opportunities_table(self.analysis_data)
         portfolio_recommendations = self.create_portfolio_recommendations(self.analysis_data)
         
-        # Calculate summary statistics
+        # Calculate summary statistics with safe defaults
         total_currencies = len(self.analysis_data)
-        profitable_count = len(self.analysis_data[self.analysis_data['ml_pred_1d'] > 0])
-        profitable_opportunities = len(self.analysis_data[
-            (self.analysis_data['ml_pred_1d'] > 5) & 
-            (self.analysis_data['combined_confidence'] > 0.5)
-        ])
-        highest_return = self.analysis_data['ml_pred_1d'].max()
-        avg_confidence = self.analysis_data['combined_confidence'].mean()
+        
+        if total_currencies > 0 and 'ml_pred_1d' in self.analysis_data.columns:
+            profitable_count = len(self.analysis_data[self.analysis_data['ml_pred_1d'] > 0])
+            profitable_opportunities = len(self.analysis_data[
+                (self.analysis_data['ml_pred_1d'] > 5) & 
+                (self.analysis_data['combined_confidence'] > 0.5)
+            ])
+            highest_return = self.analysis_data['ml_pred_1d'].max()
+            avg_confidence = self.analysis_data['combined_confidence'].mean()
+        else:
+            profitable_count = 0
+            profitable_opportunities = 0
+            highest_return = 0.0
+            avg_confidence = 0.0
         
         # Generate timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -818,18 +876,22 @@ class PoeWatchInvestmentReportGenerator:
         with open(report_path, 'w', encoding='utf-8') as f:
             f.write(html_content)
         
-        # Save data as JSON
+        # Save data as JSON (with safe handling for empty data)
         data_export = {
             'timestamp': timestamp,
             'data_source': 'poe.watch API',
-            'analysis_results': self.analysis_data.to_dict('records'),
+            'analysis_results': self.analysis_data.to_dict('records') if not self.analysis_data.empty else [],
             'market_summary': {
                 'total_currencies': total_currencies,
                 'profitable_count': profitable_count,
                 'highest_return': float(highest_return),
                 'average_confidence': float(avg_confidence),
                 'data_points_analyzed': len(self.market_data),
-                'top_opportunities': self.analysis_data.sort_values('investment_score', ascending=False).head(10).to_dict('records')
+                'top_opportunities': (
+                    self.analysis_data.sort_values('investment_score', ascending=False).head(10).to_dict('records')
+                    if not self.analysis_data.empty and 'investment_score' in self.analysis_data.columns
+                    else []
+                )
             }
         }
         

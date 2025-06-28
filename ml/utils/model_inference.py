@@ -115,7 +115,7 @@ class ModelPredictor:
     
     def load_available_models(self) -> Dict[str, Dict[str, Any]]:
         """
-        Load all available trained models.
+        Load all available trained models including multi-horizon models.
         
         Returns:
             Dictionary mapping currencies to model information
@@ -126,52 +126,116 @@ class ModelPredictor:
             self.logger.warning(f"Models directory not found: {self.models_dir}")
             return available_models
         
-        # Find all currency directories
-        for currency_dir in self.models_dir.iterdir():
-            if currency_dir.is_dir():
-                currency = currency_dir.name
+        # Find all currency directories (both single and multi-horizon)
+        for item in self.models_dir.iterdir():
+            if item.is_dir():
+                item_name = item.name
                 
-                # Check for model files
-                model_file = currency_dir / "ensemble_model.pkl"
-                metadata_file = currency_dir / "model_metadata.json"
-                
-                if model_file.exists():
-                    try:
-                        # Load metadata
-                        metadata = {}
-                        if metadata_file.exists():
-                            with open(metadata_file, 'r') as f:
-                                metadata = json.load(f)
-                        
-                        # Load model
-                        model = joblib.load(model_file)
-                        
-                        # Load scaler if exists
-                        scaler_file = currency_dir / "scaler.pkl"
-                        scaler = None
-                        if scaler_file.exists():
-                            scaler = joblib.load(scaler_file)
-                        
-                        # Store model and metadata
-                        self.loaded_models[currency] = model
-                        self.model_metadata[currency] = metadata
-                        self.feature_scalers[currency] = scaler
-                        
-                        available_models[currency] = {
-                            'model_type': metadata.get('model_type', 'unknown'),
-                            'training_metrics': metadata.get('metrics', {}),
-                            'training_time': metadata.get('training_time', 0),
-                            'features_used': (metadata.get('feature_importance') or {}).get('feature_count', 0),
-                            'training_timestamp': metadata.get('training_timestamp', 'unknown'),
-                            'has_scaler': scaler is not None
+                # Check if this is a horizon-specific directory (e.g., "Divine Orb_1d")
+                if '_' in item_name and item_name.split('_')[-1] in ['1d', '3d', '7d']:
+                    currency_name = '_'.join(item_name.split('_')[:-1])
+                    horizon = item_name.split('_')[-1]
+                    
+                    # Initialize currency entry if not exists
+                    if currency_name not in available_models:
+                        available_models[currency_name] = {
+                            'horizons': {},
+                            'model_type': 'multi-horizon',
+                            'has_multi_horizon': True
                         }
-                        
-                        self.logger.info(f"Loaded model for {currency}")
-                        
-                    except Exception as e:
-                        self.logger.error(f"Failed to load model for {currency}: {str(e)}")
+                    
+                    # Load horizon-specific model
+                    model_file = item / "ensemble_model.pkl"
+                    metadata_file = item / "model_metadata.json"
+                    
+                    if model_file.exists():
+                        try:
+                            # Load metadata
+                            metadata = {}
+                            if metadata_file.exists():
+                                with open(metadata_file, 'r') as f:
+                                    metadata = json.load(f)
+                            
+                            # Load model
+                            model = joblib.load(model_file)
+                            
+                            # Load scaler if exists
+                            scaler_file = item / "scaler.pkl"
+                            scaler = None
+                            if scaler_file.exists():
+                                scaler = joblib.load(scaler_file)
+                            
+                            # Store horizon-specific model
+                            horizon_key = f"{currency_name}_{horizon}"
+                            self.loaded_models[horizon_key] = model
+                            self.model_metadata[horizon_key] = metadata
+                            self.feature_scalers[horizon_key] = scaler
+                            
+                            # Store horizon information
+                            available_models[currency_name]['horizons'][horizon] = {
+                                'model_type': metadata.get('model_type', 'ensemble'),
+                                'training_metrics': metadata.get('metrics', {}),
+                                'training_time': metadata.get('training_time', 0),
+                                'features_used': len(metadata.get('feature_importance', {})),
+                                'training_timestamp': metadata.get('training_timestamp', 'unknown'),
+                                'has_scaler': scaler is not None
+                            }
+                            
+                            self.logger.info(f"Loaded {horizon} model for {currency_name}")
+                            
+                        except Exception as e:
+                            self.logger.error(f"Failed to load {horizon} model for {currency_name}: {str(e)}")
+                
+                else:
+                    # Traditional single model directory
+                    currency = item_name
+                    
+                    # Check for model files
+                    model_file = item / "ensemble_model.pkl"
+                    metadata_file = item / "model_metadata.json"
+                    
+                    if model_file.exists():
+                        try:
+                            # Load metadata
+                            metadata = {}
+                            if metadata_file.exists():
+                                with open(metadata_file, 'r') as f:
+                                    metadata = json.load(f)
+                            
+                            # Load model
+                            model = joblib.load(model_file)
+                            
+                            # Load scaler if exists
+                            scaler_file = item / "scaler.pkl"
+                            scaler = None
+                            if scaler_file.exists():
+                                scaler = joblib.load(scaler_file)
+                            
+                            # Store model and metadata
+                            self.loaded_models[currency] = model
+                            self.model_metadata[currency] = metadata
+                            self.feature_scalers[currency] = scaler
+                            
+                            available_models[currency] = {
+                                'model_type': metadata.get('model_type', 'unknown'),
+                                'training_metrics': metadata.get('metrics', {}),
+                                'training_time': metadata.get('training_time', 0),
+                                'features_used': len(metadata.get('feature_importance', {})),
+                                'training_timestamp': metadata.get('training_timestamp', 'unknown'),
+                                'has_scaler': scaler is not None,
+                                'has_multi_horizon': False
+                            }
+                            
+                            self.logger.info(f"Loaded single model for {currency}")
+                            
+                        except Exception as e:
+                            self.logger.error(f"Failed to load model for {currency}: {str(e)}")
         
-        self.logger.info(f"Loaded {len(available_models)} models successfully")
+        # Log summary
+        multi_horizon_count = sum(1 for model in available_models.values() if model.get('has_multi_horizon', False))
+        single_model_count = len(available_models) - multi_horizon_count
+        
+        self.logger.info(f"Loaded {len(available_models)} currencies: {multi_horizon_count} multi-horizon, {single_model_count} single models")
         return available_models
     
     def get_current_league_data(
@@ -254,18 +318,19 @@ class ModelPredictor:
         try:
             cutoff_date = datetime.now() - timedelta(days=days_back)
             
-            # Query live POE Watch data table
+            # Query live POE Watch data table with price history
             live_query = """
             SELECT 
                 currency_name,
                 league,
-                mean_price as price,
-                mean_price as chaos_equivalent,
-                fetch_time as date,
+                mean_price,
+                min_price,
+                max_price,
+                daily_volume,
+                price_change_percent,
+                price_history,
                 CASE WHEN low_confidence THEN 0.5 ELSE 0.8 END as confidence_level,
-                price_change_percent as total_change,
-                daily_volume as listing_count,
-                currency_name as currency
+                fetch_time
             FROM live_poe_watch 
             WHERE fetch_time >= %s
                 AND mean_price > 0
@@ -278,22 +343,110 @@ class ModelPredictor:
             if df.empty:
                 return None
             
-            # Convert to format compatible with prediction system
-            df['date'] = pd.to_datetime(df['date'])
-            df['league_name'] = df['league']
-            df['get_currency'] = df['currency_name']
-            df['pay_currency'] = 'Chaos Orb'
-            df['league_active'] = True
-            df['league_start'] = df['date'].min()  # Approximate
-            df['league_day'] = (df['date'] - df['league_start']).dt.days
+            # Expand price history data to create individual price records
+            expanded_records = []
             
-            # Fill missing chaos_equivalent with price for compatibility
-            df['chaos_equivalent'] = df['chaos_equivalent'].fillna(df['price'])
+            for _, row in df.iterrows():
+                try:
+                    # Parse price history JSON
+                    import json
+                    if row['price_history'] and row['price_history'] != 'null':
+                        price_history = json.loads(row['price_history'])
+                        
+                        # Extract historical prices (assuming format like [{'date': '...', 'price': ...}, ...])
+                        if isinstance(price_history, list):
+                            for entry in price_history:
+                                if isinstance(entry, dict) and 'date' in entry and 'price' in entry:
+                                    expanded_records.append({
+                                        'currency_name': row['currency_name'],
+                                        'currency': row['currency_name'],  # For compatibility
+                                        'league': row['league'],
+                                        'league_name': row['league'],
+                                        'price': float(entry['price']),
+                                        'chaos_equivalent': float(entry['price']),
+                                        'date': pd.to_datetime(entry['date']),
+                                        'confidence_level': row['confidence_level'],
+                                        'total_change': row['price_change_percent'],
+                                        'listing_count': row['daily_volume'],
+                                        'get_currency': row['currency_name'],
+                                        'pay_currency': 'Chaos Orb'
+                                    })
+                        elif isinstance(price_history, dict):
+                            # Handle different price history format
+                            for date_str, price_val in price_history.items():
+                                try:
+                                    expanded_records.append({
+                                        'currency_name': row['currency_name'],
+                                        'currency': row['currency_name'],
+                                        'league': row['league'],
+                                        'league_name': row['league'],
+                                        'price': float(price_val),
+                                        'chaos_equivalent': float(price_val),
+                                        'date': pd.to_datetime(date_str),
+                                        'confidence_level': row['confidence_level'],
+                                        'total_change': row['price_change_percent'],
+                                        'listing_count': row['daily_volume'],
+                                        'get_currency': row['currency_name'],
+                                        'pay_currency': 'Chaos Orb'
+                                    })
+                                except (ValueError, TypeError):
+                                    continue
+                    
+                    # Always add the current record as well
+                    expanded_records.append({
+                        'currency_name': row['currency_name'],
+                        'currency': row['currency_name'],
+                        'league': row['league'],
+                        'league_name': row['league'],
+                        'price': float(row['mean_price']),
+                        'chaos_equivalent': float(row['mean_price']),
+                        'date': pd.to_datetime(row['fetch_time']),
+                        'confidence_level': row['confidence_level'],
+                        'total_change': row['price_change_percent'],
+                        'listing_count': row['daily_volume'],
+                        'get_currency': row['currency_name'],
+                        'pay_currency': 'Chaos Orb'
+                    })
+                    
+                except Exception as e:
+                    self.logger.debug(f"Error processing price history for {row['currency_name']}: {e}")
+                    # Fallback to current price only
+                    expanded_records.append({
+                        'currency_name': row['currency_name'],
+                        'currency': row['currency_name'],
+                        'league': row['league'],
+                        'league_name': row['league'],
+                        'price': float(row['mean_price']),
+                        'chaos_equivalent': float(row['mean_price']),
+                        'date': pd.to_datetime(row['fetch_time']),
+                        'confidence_level': row['confidence_level'],
+                        'total_change': row['price_change_percent'],
+                        'listing_count': row['daily_volume'],
+                        'get_currency': row['currency_name'],
+                        'pay_currency': 'Chaos Orb'
+                    })
+            
+            if not expanded_records:
+                return None
+                
+            # Convert to DataFrame
+            df = pd.DataFrame(expanded_records)
+            
+            # Remove duplicates based on currency and date
+            df = df.drop_duplicates(subset=['currency', 'date'], keep='last')
+            
+            # Sort by currency and date
+            df = df.sort_values(['currency', 'date']).reset_index(drop=True)
+            
+            # Add required columns for training compatibility
+            df['league_active'] = True
+            df['league_start'] = pd.to_datetime('2025-06-13 15:00:00+00:00')  # Mercenaries start date
+            df['league_day'] = (df['date'] - df['league_start']).dt.days
             
             # Add derived columns for compatibility
             df['id'] = range(len(df))
             df['leagueId'] = 1  # Default league ID
-            df['getCurrencyId'] = 1  # Default currency ID
+            df['getCurrencyId'] = 1  # Default currency ID  
             df['payCurrencyId'] = 2  # Default pay currency ID
             
             # Filter for specific currencies if requested
@@ -346,7 +499,8 @@ class ModelPredictor:
             self.logger.info(f"Getting historical data for league: {league_name}")
             
             # Get recent price data - focus on currencies priced in Chaos Orbs
-            cutoff_date = datetime.now() - timedelta(days=days_back)
+            # Use more recent data (last 14 days) for better relevance
+            cutoff_date = datetime.now() - timedelta(days=min(days_back, 14))
             
             data_query = """
             SELECT 
@@ -356,6 +510,7 @@ class ModelPredictor:
                 cp."payCurrencyId",
                 cp.date AT TIME ZONE 'UTC' as date,
                 cp.value as price,
+                cp.value as chaos_equivalent,  -- Add for compatibility
                 l.name as league_name,
                 l."startDate" AT TIME ZONE 'UTC' as league_start,
                 l."endDate" AT TIME ZONE 'UTC' as league_end,
@@ -363,7 +518,11 @@ class ModelPredictor:
                 gc.name as get_currency,
                 pc.name as pay_currency,
                 gc.name as currency,
-                EXTRACT(DAY FROM (cp.date AT TIME ZONE 'UTC' - l."startDate" AT TIME ZONE 'UTC')) as league_day
+                EXTRACT(DAY FROM (cp.date AT TIME ZONE 'UTC' - l."startDate" AT TIME ZONE 'UTC')) as league_day,
+                -- Add default values for compatibility
+                1.0 as confidence_level,
+                0.0 as total_change,
+                0 as listing_count
             FROM currency_prices cp
             JOIN leagues l ON cp."leagueId" = l.id
             JOIN currency gc ON cp."getCurrencyId" = gc.id
@@ -402,7 +561,8 @@ class ModelPredictor:
     def prepare_features_for_prediction(
         self,
         currency: str,
-        raw_data: pd.DataFrame
+        raw_data: pd.DataFrame,
+        prediction_horizon_days: int = 1
     ) -> Optional[np.ndarray]:
         """
         Prepare features for prediction matching training data format.
@@ -434,25 +594,24 @@ class ModelPredictor:
                 self.logger.warning(f"Feature engineering failed for {currency}")
                 return None
             
-            # Get feature columns (exclude target and metadata columns)
+            # Get feature columns using EXACT same logic as training
             exclude_patterns = [
-                'target_', 'date', 'league_name', 'currency', 'id', 
-                'league_start', 'league_end', 'league_active', 'get_currency', 
-                'pay_currency', 'getCurrencyId', 'payCurrencyId', 'league'
+                'target_', 'date', 'league_name', 'currency', 'id', 'league_start', 'league_end',
+                'league_active', 'get_currency', 'pay_currency', 'getCurrencyId', 'payCurrencyId'
             ]
             
             feature_cols = [col for col in processed_data.columns 
                            if not any(pattern in col for pattern in exclude_patterns)]
             
-            # Also exclude any non-numeric columns
-            numeric_cols = []
+            # Filter to only include numeric columns (EXACT same logic as training)
+            numeric_feature_cols = []
             for col in feature_cols:
-                if processed_data[col].dtype in ['int64', 'float64', 'int32', 'float32']:
-                    numeric_cols.append(col)
+                if processed_data[col].dtype in ['int64', 'float64', 'int32', 'float32', 'int16', 'float16']:
+                    numeric_feature_cols.append(col)
                 else:
                     self.logger.debug(f"Excluding non-numeric column: {col} (dtype: {processed_data[col].dtype})")
             
-            feature_cols = numeric_cols
+            feature_cols = numeric_feature_cols
             
             if not feature_cols:
                 self.logger.warning(f"No numeric feature columns found for {currency}")
@@ -468,7 +627,12 @@ class ModelPredictor:
                 X = imputer.fit_transform(X)
             
             # Check if we need to align features with training data
-            model = self.loaded_models.get(currency)
+            model_key = f"{currency}_{prediction_horizon_days}d"
+            model = self.loaded_models.get(model_key)
+            if model is None:
+                # Fallback to base currency name for single-horizon models
+                model = self.loaded_models.get(currency)
+                
             if model and hasattr(model, 'models') and len(model.models) > 0:
                 # For ensemble models, check the first model's expected features
                 first_model = model.models[0]
@@ -477,17 +641,24 @@ class ModelPredictor:
                     current_features = X.shape[1]
                     
                     if current_features != expected_features:
-                        self.logger.warning(f"Feature mismatch for {currency}: got {current_features}, expected {expected_features}")
+                        self.logger.warning(f"Feature alignment needed for {currency}: got {current_features}, expected {expected_features}")
                         
                         if current_features < expected_features:
-                            # Pad with zeros for missing features
-                            padding = np.zeros((X.shape[0], expected_features - current_features))
-                            X = np.hstack([X, padding])
-                            self.logger.info(f"Padded features from {current_features} to {expected_features}")
+                            # Pad with feature means to maintain distributions
+                            if X.shape[0] > 0:
+                                feature_means = np.mean(X, axis=0)
+                                overall_mean = np.mean(feature_means) if len(feature_means) > 0 else 0.0
+                            else:
+                                overall_mean = 0.0
+                            padding = np.full((X.shape[0], expected_features - current_features), overall_mean)
+                            X = np.concatenate([X, padding], axis=1)
+                            self.logger.info(f"Padded {currency} features: {current_features} → {expected_features}")
                         elif current_features > expected_features:
-                            # Truncate extra features
+                            # Truncate to expected feature count (keep most important/first features)
                             X = X[:, :expected_features]
-                            self.logger.info(f"Truncated features from {current_features} to {expected_features}")
+                            self.logger.info(f"Truncated {currency} features: {current_features} → {expected_features}")
+                    else:
+                        self.logger.debug(f"Feature count matches for {currency}: {current_features} features")
             
             # Apply scaling if available
             if currency in self.feature_scalers and self.feature_scalers[currency] is not None:
@@ -760,7 +931,7 @@ class ModelPredictor:
         prediction_horizon_days: int = 1
     ) -> Optional[PredictionResult]:
         """
-        Predict future price for a currency.
+        Predict future price for a currency using multi-horizon models.
         
         Args:
             currency: Currency to predict (e.g., "Divine Orb")
@@ -769,13 +940,78 @@ class ModelPredictor:
         Returns:
             Prediction result or None if failed
         """
-        if currency not in self.loaded_models:
-            self.logger.error(f"No model loaded for {currency}")
+        # Map prediction horizon to model suffix
+        horizon_map = {1: '1d', 3: '3d', 7: '7d'}
+        
+        # Try to find the appropriate model
+        model_key = None
+        model = None
+        metadata = {}
+        
+        # First, try to find horizon-specific model
+        if prediction_horizon_days in horizon_map:
+            horizon_suffix = horizon_map[prediction_horizon_days]
+            model_key = f"{currency}_{horizon_suffix}"
+            
+            if model_key in self.loaded_models:
+                model = self.loaded_models[model_key]
+                metadata = self.model_metadata.get(model_key, {})
+                self.logger.info(f"Using {horizon_suffix} model for {currency}")
+            else:
+                self.logger.warning(f"No {horizon_suffix} model found for {currency}")
+        
+        # Fallback to single model if no horizon-specific model found
+        if model is None and currency in self.loaded_models:
+            model_key = currency
+            model = self.loaded_models[currency]
+            metadata = self.model_metadata.get(currency, {})
+            self.logger.info(f"Using single model for {currency} (requested {prediction_horizon_days}d)")
+        
+        # If still no model found, try to find any available horizon for this currency
+        if model is None:
+            available_horizons = []
+            for key in self.loaded_models.keys():
+                if key.startswith(f"{currency}_") and key.split('_')[-1] in ['1d', '3d', '7d']:
+                    available_horizons.append(key)
+            
+            if available_horizons:
+                # Use the closest available horizon
+                requested_days = prediction_horizon_days
+                best_match = None
+                min_diff = float('inf')
+                
+                for horizon_key in available_horizons:
+                    horizon_suffix = horizon_key.split('_')[-1]
+                    horizon_days = {'1d': 1, '3d': 3, '7d': 7}.get(horizon_suffix, 999)
+                    diff = abs(horizon_days - requested_days)
+                    
+                    if diff < min_diff:
+                        min_diff = diff
+                        best_match = horizon_key
+                
+                if best_match:
+                    model_key = best_match
+                    model = self.loaded_models[best_match]
+                    metadata = self.model_metadata.get(best_match, {})
+                    horizon_used = best_match.split('_')[-1]
+                    self.logger.info(f"Using closest available {horizon_used} model for {currency} (requested {prediction_horizon_days}d)")
+        
+        if model is None:
+            self.logger.error(f"No model available for {currency}")
             return None
         
         try:
-            # Get current data
-            current_data = self.get_current_league_data([currency], days_back=30)
+            # Get current data - use cached data if available, otherwise load for this currency
+            if self._current_league_data is not None and not self._current_league_data.empty:
+                # Use cached data and filter for this currency
+                current_data = self._current_league_data[self._current_league_data['currency'] == currency].copy()
+                if current_data.empty:
+                    # Currency not in cached data, load specifically for this currency
+                    current_data = self.get_current_league_data([currency], days_back=30)
+            else:
+                # No cached data, load for this currency
+                current_data = self.get_current_league_data([currency], days_back=30)
+            
             if current_data is None or current_data.empty:
                 self.logger.error(f"No current data available for {currency}")
                 return None
@@ -785,13 +1021,11 @@ class ModelPredictor:
             current_price = float(latest_data['price'])
             
             # Prepare features
-            X = self.prepare_features_for_prediction(currency, current_data)
+            X = self.prepare_features_for_prediction(currency, current_data, prediction_horizon_days)
             if X is None:
                 return None
             
-            # Get model and metadata
-            model = self.loaded_models[currency]
-            metadata = self.model_metadata.get(currency, {})
+            # Get model metadata
             model_type = metadata.get('model_type', 'unknown')
             
             # Make prediction
@@ -855,7 +1089,7 @@ class ModelPredictor:
                 confidence_score=confidence_score,
                 price_change_percent=price_change_percent,
                 prediction_timestamp=datetime.now().isoformat(),
-                model_type=model_type,
+                model_type=f"{model_type}_{model_key.split('_')[-1] if '_' in model_key else 'single'}",
                 features_used=X.shape[1] if len(X.shape) > 1 else 0,
                 data_points_used=len(X),
                 prediction_lower=lower_bound,
@@ -865,7 +1099,7 @@ class ModelPredictor:
                 uncertainty_components=uncertainty_components
             )
             
-            self.logger.info(f"Prediction for {currency}: {current_price:.2f} -> {predicted_price:.2f} ({price_change_percent:+.1f}%)")
+            self.logger.info(f"Prediction for {currency} ({prediction_horizon_days}d): {current_price:.2f} -> {predicted_price:.2f} ({price_change_percent:+.1f}%)")
             return result
             
         except Exception as e:
@@ -878,7 +1112,7 @@ class ModelPredictor:
         prediction_horizon_days: int = 1
     ) -> List[PredictionResult]:
         """
-        Predict prices for multiple currencies.
+        Predict prices for multiple currencies using multi-horizon models.
         
         Args:
             currencies: List of currencies to predict (None for all loaded models)
@@ -888,131 +1122,42 @@ class ModelPredictor:
             List of prediction results
         """
         if currencies is None:
-            currencies = list(self.loaded_models.keys())
-        
-        # Pre-load all current league data once to avoid repeated database queries
-        try:
-            all_current_data = self.get_current_league_data(
-                currencies=None,  # Get all available data
-                days_back=30,
-                use_live_data=True
-            )
+            # Extract unique currency names from loaded models
+            unique_currencies = set()
             
-            if all_current_data is None or all_current_data.empty:
-                self.logger.warning("No current league data available for any currency")
-                return []
-            
-            available_currencies = set(all_current_data['currency'].unique())
-            self.logger.info(f"Pre-loaded data for {len(available_currencies)} currencies: {sorted(available_currencies)}")
-            
-        except Exception as e:
-            self.logger.error(f"Failed to pre-load current league data: {str(e)}")
-            return []
-        
-        results = []
-        for currency in currencies:
-            if currency not in available_currencies:
-                self.logger.debug(f"No current data available for {currency}")
-                continue
-                
-            try:
-                # Filter the pre-loaded data for this currency
-                currency_data = all_current_data[all_current_data['currency'] == currency].copy()
-                
-                if currency_data.empty:
-                    continue
-                
-                # Get current price (most recent)
-                latest_data = currency_data.sort_values('date').iloc[-1]
-                current_price = float(latest_data['price'])
-                
-                # Prepare features
-                X = self.prepare_features_for_prediction(currency, currency_data)
-                if X is None:
-                    continue
-                
-                # Get model and metadata
-                model = self.loaded_models[currency]
-                metadata = self.model_metadata.get(currency, {})
-                model_type = metadata.get('model_type', 'unknown')
-                
-                # Make prediction
-                if len(X) > 0:
-                    if hasattr(model, 'predict'):
-                        prediction = model.predict(X[-1:])  # Use last data point
-                        if isinstance(prediction, np.ndarray):
-                            predicted_price = float(prediction[0])
-                        else:
-                            predicted_price = float(prediction)
-                    else:
-                        self.logger.error(f"Model for {currency} doesn't have predict method")
-                        continue
+            for model_key in self.loaded_models.keys():
+                if '_' in model_key and model_key.split('_')[-1] in ['1d', '3d', '7d']:
+                    # Multi-horizon model: extract currency name
+                    currency_name = '_'.join(model_key.split('_')[:-1])
+                    unique_currencies.add(currency_name)
                 else:
-                    self.logger.error(f"No data available for prediction")
-                    continue
-                
-                # Calculate metrics
-                price_change_percent = ((predicted_price - current_price) / current_price) * 100
-                
-                # Calculate prediction intervals and proper confidence
-                try:
-                    # We need training data for proper intervals - use current data as proxy
-                    X_train = X[:-1] if len(X) > 1 else X  # Use all but last point as "training"
-                    y_train = np.array([current_price] * len(X_train))  # Simplified - should be actual training targets
-                    X_new = X[-1:][0] if len(X) > 0 else X[0]  # Last point for prediction
-                    
-                    # Calculate prediction intervals
-                    lower_bound, upper_bound, confidence_score, method, uncertainty_components = self.calculate_prediction_intervals(
-                        model, X_train, y_train, X_new, predicted_price, currency
-                    )
-                    
-                    interval_width = upper_bound - lower_bound
-                    
-                except Exception as e:
-                    self.logger.warning(f"Failed to calculate prediction intervals for {currency}: {e}")
-                    # Fallback to simple confidence calculation
-                    training_metrics = metadata.get('metrics', {})
-                    r2_score = training_metrics.get('r2', 0)
-                    confidence_score = max(0, min(1, (r2_score + 1) / 2))  # Convert R² to 0-1 scale
-                        
-                    # Simple interval based on prediction magnitude
-                    margin = abs(predicted_price) * 0.2
-                    lower_bound = predicted_price - margin
-                    upper_bound = predicted_price + margin
-                    interval_width = upper_bound - lower_bound
-                    method = "fallback_r2"
-                    uncertainty_components = {
-                        'r2_score': r2_score,
-                        'fallback_margin': 0.2,
-                        'error': str(e)
-                    }
-                
-                result = PredictionResult(
-                    currency=currency,
-                    current_price=current_price,
-                    predicted_price=predicted_price,
-                    prediction_horizon_days=prediction_horizon_days,
-                    confidence_score=confidence_score,
-                    price_change_percent=price_change_percent,
-                    prediction_timestamp=datetime.now().isoformat(),
-                    model_type=model_type,
-                    features_used=X.shape[1] if len(X.shape) > 1 else 0,
-                    data_points_used=len(X),
-                    prediction_lower=lower_bound,
-                    prediction_upper=upper_bound,
-                    interval_width=interval_width,
-                    confidence_method=method,
-                    uncertainty_components=uncertainty_components
-                )
-                
-                self.logger.info(f"Prediction for {currency}: {current_price:.2f} -> {predicted_price:.2f} ({price_change_percent:+.1f}%)")
-                results.append(result)
-                
+                    # Single model: use as-is
+                    unique_currencies.add(model_key)
+            
+            currencies = list(unique_currencies)
+            self.logger.info(f"Predicting for {len(currencies)} unique currencies")
+        
+        # Pre-load data for all currencies to improve efficiency
+        try:
+            self.logger.info(f"Pre-loading data for {len(currencies)} currencies")
+            all_data = self.get_current_league_data(currencies, days_back=30)
+            if all_data is not None and not all_data.empty:
+                self.logger.info(f"Loaded data for currencies: {all_data['currency'].unique()}")
+        except Exception as e:
+            self.logger.warning(f"Failed to pre-load data: {e}")
+        
+        predictions = []
+        for currency in currencies:
+            try:
+                result = self.predict_price(currency, prediction_horizon_days)
+                if result:
+                    predictions.append(result)
             except Exception as e:
-                self.logger.error(f"Prediction failed for {currency}: {str(e)}")
+                self.logger.error(f"Failed to predict {currency}: {str(e)}")
                 continue
         
-        return results
+        self.logger.info(f"Generated {len(predictions)} predictions for {prediction_horizon_days}d horizon")
+        return predictions
     
     def get_top_predictions(
         self,
