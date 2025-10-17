@@ -72,11 +72,17 @@ def fetch_poe_watch_data(league: str, timeout: int, categories: List[str] = None
     return all_data
 
 
-def to_decimal(value: Optional[float]) -> Optional[Decimal]:
+def to_decimal(value: Optional[float], precision: int = 2) -> Optional[Decimal]:
+    """Convert float to Decimal with specified precision.
+    
+    Args:
+        value: Float value to convert
+        precision: Number of decimal places (2 for prices, 4 for percentages/confidence)
+    """
     if value is None:
         return None
     try:
-        return Decimal(str(round(float(value), 6)))
+        return Decimal(str(round(float(value), precision)))
     except (InvalidOperation, TypeError, ValueError):
         return None
 
@@ -111,7 +117,7 @@ def build_price_items(data: Iterable[dict], league: str, ttl_epoch: int) -> List
             "league": league,  # Separate field for GSI
             "pay_currency": "Chaos Orb",  # Required for prediction system
             "price": to_decimal(mean_price) or Decimal("0"),  # Keep as Decimal for precision
-            "confidence": to_decimal(confidence) or Decimal("0.5"),  # Keep as Decimal for precision
+            "confidence": to_decimal(confidence, precision=4) or Decimal("0.5000"),  # 4 decimal places for confidence
             "ttl": ttl_epoch,  # Keep as int for DynamoDB TTL
         }
         items.append(item)
