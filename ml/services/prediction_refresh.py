@@ -484,14 +484,20 @@ def _write_predictions(
                     # Convert prediction_timestamp to epoch seconds for DynamoDB sort key
                     timestamp_epoch = int(result.prediction_timestamp.timestamp()) if hasattr(result.prediction_timestamp, 'timestamp') else int(time.time())
                     
-                    # Helper function to safely convert float to Decimal, handling Infinity and NaN
-                    def safe_decimal(value):
+                    # Helper function to safely convert float to Decimal with precision control
+                    def safe_decimal(value, precision: int = 2):
+                        """Convert float to Decimal with specified precision.
+                        
+                        Args:
+                            value: Float value to convert
+                            precision: Number of decimal places (2 for prices, 4 for percentages)
+                        """
                         if value is None:
                             return None
                         if math.isnan(value) or math.isinf(value):
                             return None
                         try:
-                            return Decimal(str(value))
+                            return Decimal(str(round(value, precision)))
                         except (ValueError, TypeError):
                             return None
                     
@@ -503,13 +509,13 @@ def _write_predictions(
                         "currency": result.currency,
                         "league": result.league,
                         "pay_currency": result.pay_currency,
-                        "current_price": safe_decimal(result.current_price),
-                        "predicted_price": safe_decimal(result.predicted_price),
-                        "price_change_percent": safe_decimal(result.price_change_percent),
+                        "current_price": safe_decimal(result.current_price, precision=2),  # 2 decimal places for prices
+                        "predicted_price": safe_decimal(result.predicted_price, precision=2),  # 2 decimal places for prices
+                        "price_change_percent": safe_decimal(result.price_change_percent, precision=4),  # 4 decimal places for percentages
                         "prediction_timestamp": result.prediction_timestamp.isoformat() if hasattr(result.prediction_timestamp, 'isoformat') else str(result.prediction_timestamp),
-                        "confidence_score": safe_decimal(result.confidence_score),
-                        "prediction_lower": safe_decimal(result.prediction_lower),
-                        "prediction_upper": safe_decimal(result.prediction_upper),
+                        "confidence_score": safe_decimal(result.confidence_score, precision=4),  # 4 decimal places for confidence scores
+                        "prediction_lower": safe_decimal(result.prediction_lower, precision=2),  # 2 decimal places for prices
+                        "prediction_upper": safe_decimal(result.prediction_upper, precision=2),  # 2 decimal places for prices
                         "features_used": result.features_used,
                         "model_path": result.model_path,
                         "created_at": result.prediction_timestamp.isoformat() if hasattr(result.prediction_timestamp, 'isoformat') else str(result.prediction_timestamp),
