@@ -35,7 +35,6 @@ _PRICES_TABLE = None
 _PRICES_CACHE: Dict[str, Tuple[Dict[str, Any], float]] = {}
 _CACHE_TTL: int = 55 * 60  # 55 minutes (5 minutes before next ingestion)
 
-
 def lambda_handler(event: dict, _context) -> dict:
     """Handle API Gateway proxy events."""
     global _APP_ENV, _DYNAMO_RESOURCE, _METADATA_TABLE, _PREDICTIONS_TABLE, _PRICES_TABLE
@@ -66,6 +65,10 @@ def lambda_handler(event: dict, _context) -> dict:
             response_body, status = _handle_single_prediction(request.json_body)
         elif request.path == "/predict/batch" and request.http_method == "POST":
             response_body, status = _handle_batch_prediction(request.json_body)
+        elif request.path == "/predict/currency" and request.http_method == "GET":
+            response_body, status = _handle_currency_predictions(request.query_params)
+        elif request.path == "/predict/latest" and request.http_method == "GET":
+            response_body, status = _handle_latest_predictions(request.query_params)
         elif request.path == "/prices/live" and request.http_method == "GET":
             response_body, status = _handle_live_prices(request.query_params)
         else:
@@ -80,11 +83,16 @@ def lambda_handler(event: dict, _context) -> dict:
         response_body = {"message": "Internal server error", "detail": str(exc)}
         status = HTTPStatus.INTERNAL_SERVER_ERROR
 
-    # Add cache headers for live prices endpoint
+    # Add cache headers for specific endpoints
     headers = _cors_headers()
     if request.path == "/prices/live" and status == HTTPStatus.OK:
         headers.update({
             "Cache-Control": "public, max-age=300",  # 5 minutes browser cache
+            "ETag": f'"{hash(str(response_body))}"',  # Simple ETag for conditional requests
+        })
+    elif request.path == "/predict/latest" and status == HTTPStatus.OK:
+        headers.update({
+            "Cache-Control": "public, max-age=600",  # 10 minutes browser cache (optimal for fresh data)
             "ETag": f'"{hash(str(response_body))}"',  # Simple ETag for conditional requests
         })
     
@@ -235,6 +243,265 @@ def _handle_batch_prediction(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], H
     return {"results": responses}, HTTPStatus.OK
 
 
+def _handle_currency_predictions(query_params: Dict[str, str]) -> Tuple[Dict[str, Any], HTTPStatus]:
+    """Handle currency predictions endpoint using the new GSI for efficient queries.
+    
+    GET /predict/currency?currency=Divine Orb&league=Mercenaries&horizons=1d,3d,7d
+    
+    Args:
+        query_params: Query parameters from the request
+        
+    Returns:
+        Tuple of (response_body, status_code)
+    """
+    currency = query_params.get("currency")
+    if not currency:
+        raise ClientFacingError("currency parameter is required")
+    
+    league = query_params.get("league")
+    horizons_param = query_params.get("horizons", "1d,3d,7d")
+    horizons = [h.strip() for h in horizons_param.split(",") if h.strip()]
+    
+    if not horizons:
+        raise ClientFacingError("at least one horizon must be specified")
+    
+    # Use the new GSI to efficiently get all predictions for this currency
+    predictions = []
+    for horizon in horizons:
+        prediction = _fetch_cached_prediction(currency, league, horizon)
+        if prediction:
+            predictions.append(prediction)
+    
+    return {
+        "currency": currency,
+        "league": league or "auto-detected",
+        "predictions": predictions,
+        "metadata": {
+            "total_horizons_requested": len(horizons),
+            "predictions_found": len(predictions),
+            "source": "cache",
+            "query_efficiency": "GSI-optimized"
+        }
+    }, HTTPStatus.OK
+
+
+def _handle_latest_predictions(query_params: Dict[str, str]) -> Tuple[Dict[str, Any], HTTPStatus]:
+    """Handle latest predictions endpoint for frontend dashboard.
+    
+    This endpoint is optimized for frontend applications that need to load
+    all currency predictions across all horizons for the latest prediction time.
+    
+    GET /predict/latest?league=Mercenaries&horizons=1d,3d,7d&limit=50
+    
+    Args:
+        query_params: Query parameters from the request
+        
+    Returns:
+        Tuple of (response_body, status_code)
+    """
+    league = query_params.get("league")
+    horizons_param = query_params.get("horizons", "1d,3d,7d")
+    horizons = [h.strip() for h in horizons_param.split(",") if h.strip()]
+    limit = int(query_params.get("limit", "100"))
+    
+    # Validate parameters
+    if limit <= 0 or limit > 500:
+        raise ClientFacingError("limit must be between 1 and 500")
+    if not horizons:
+        raise ClientFacingError("at least one horizon must be specified")
+    
+    # Fetch fresh data from DynamoDB using efficient GSI queries
+    # Note: Caching is handled by Cloudflare Worker for better performance
+    predictions_data = _fetch_latest_predictions_from_db(league, horizons, limit)
+    
+    return predictions_data, HTTPStatus.OK
+
+
+def _fetch_latest_predictions_from_db(
+    league: Optional[str], 
+    horizons: List[str], 
+    limit: int
+) -> Dict[str, Any]:
+    """Fetch latest predictions for all currencies across specified horizons.
+    
+    This function uses the currency-horizon-index GSI for optimal performance
+    and aggregates results by currency and horizon.
+    
+    Args:
+        league: League name (optional, will auto-detect if not provided)
+        horizons: List of prediction horizons to fetch
+        limit: Maximum number of currencies to return per horizon
+        
+    Returns:
+        Dictionary containing organized prediction data
+    """
+    assert _PREDICTIONS_TABLE is not None
+    
+    # Auto-detect league if not provided
+    if not league:
+        league = _infer_latest_league("Divine Orb")  # Use a common currency for league detection
+        if not league:
+            raise ClientFacingError("Unable to determine current league")
+    
+    # Get list of available currencies from metadata table
+    available_currencies = _get_available_currencies(league)
+    if not available_currencies:
+        raise ClientFacingError(f"No currencies found for league: {league}")
+    
+    # Limit currencies to most popular ones for performance
+    top_currencies = available_currencies[:limit]
+    
+    # Fetch predictions for each currency across all horizons
+    all_predictions = {}
+    prediction_timestamps = set()
+    
+    for currency in top_currencies:
+        currency_predictions = {}
+        
+        for horizon in horizons:
+            try:
+                # Use GSI for efficient querying
+                response = _PREDICTIONS_TABLE.query(
+                    IndexName='currency-horizon-index',
+                    KeyConditionExpression=Key('currency').eq(currency) & Key('horizon').eq(horizon),
+                    FilterExpression=Key('league').eq(league),
+                    ScanIndexForward=False,  # Most recent first
+                    Limit=1
+                )
+                
+                items = response.get("Items", [])
+                if items:
+                    item = items[0]
+                    prediction_data = _format_prediction_item(item, currency, league, horizon)
+                    currency_predictions[horizon] = prediction_data
+                    prediction_timestamps.add(item.get("timestamp", 0))
+                    
+            except Exception as e:
+                LOGGER.warning(f"Failed to fetch prediction for {currency} {horizon}: {e}")
+                continue
+        
+        if currency_predictions:
+            all_predictions[currency] = currency_predictions
+    
+    # Calculate latest prediction time
+    latest_timestamp = max(prediction_timestamps) if prediction_timestamps else 0
+    latest_time_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(latest_timestamp)) if latest_timestamp else "unknown"
+    
+    # Organize data for frontend consumption
+    organized_data = {
+        "league": league,
+        "latest_prediction_time": latest_time_str,
+        "latest_timestamp": latest_timestamp,
+        "horizons": horizons,
+        "currencies": all_predictions,
+        "metadata": {
+            "total_currencies": len(all_predictions),
+            "total_currencies_available": len(available_currencies),
+            "horizons_requested": len(horizons),
+            "source": "cache",
+            "query_efficiency": "GSI-optimized",
+            "cache_handled_by": "Cloudflare Worker"
+        }
+    }
+    
+    return organized_data
+
+
+def _get_available_currencies(league: str) -> List[str]:
+    """Get list of available currencies for a specific league.
+    
+    Args:
+        league: League name
+        
+    Returns:
+        List of currency names, sorted by popularity/importance
+    """
+    assert _METADATA_TABLE is not None
+    
+    try:
+        # Get currencies from metadata table
+        response = _METADATA_TABLE.scan(
+            FilterExpression=Key('league').eq(league) if 'league' in _METADATA_TABLE.attribute_definitions else None,
+            ProjectionExpression='currency'
+        )
+        
+        currencies = [item.get('currency') for item in response.get('Items', []) if item.get('currency')]
+        
+        # Sort by importance (common currencies first)
+        priority_currencies = [
+            'Divine Orb', 'Chaos Orb', 'Exalted Orb', 'Mirror of Kalandra',
+            'Orb of Fusing', 'Chromatic Orb', 'Jeweller\'s Orb', 'Orb of Alchemy',
+            'Vaal Orb', 'Orb of Scouring', 'Regal Orb', 'Blessed Orb'
+        ]
+        
+        # Prioritize common currencies, then sort alphabetically
+        sorted_currencies = []
+        for priority_currency in priority_currencies:
+            if priority_currency in currencies:
+                sorted_currencies.append(priority_currency)
+                currencies.remove(priority_currency)
+        
+        sorted_currencies.extend(sorted(currencies))
+        return sorted_currencies
+        
+    except Exception as e:
+        LOGGER.warning(f"Failed to get available currencies: {e}")
+        # Fallback to common currencies
+        return [
+            'Divine Orb', 'Chaos Orb', 'Exalted Orb', 'Orb of Fusing',
+            'Chromatic Orb', 'Jeweller\'s Orb', 'Orb of Alchemy', 'Vaal Orb'
+        ]
+
+
+def _format_prediction_item(item: Dict[str, Any], currency: str, league: str, horizon: str) -> Dict[str, Any]:
+    """Format a prediction item for consistent API response.
+    
+    Args:
+        item: Raw prediction item from DynamoDB
+        currency: Currency name
+        league: League name
+        horizon: Prediction horizon
+        
+    Returns:
+        Formatted prediction data
+    """
+    # Handle both old and new data formats
+    if "prediction_data" in item:
+        # Old format: prediction_data field contains JSON
+        payload = item.get("prediction_data")
+        if isinstance(payload, str):
+            try:
+                prediction_dict = json.loads(payload)
+            except json.JSONDecodeError:
+                prediction_dict = {}
+        elif isinstance(payload, dict):
+            prediction_dict = payload
+        else:
+            prediction_dict = {}
+    else:
+        # New format: prediction data is stored directly in item fields
+        prediction_dict = {
+            "predicted_price": float(item.get("predicted_price", 0)) if item.get("predicted_price") else None,
+            "current_price": float(item.get("current_price", 0)) if item.get("current_price") else None,
+            "price_change_percent": float(item.get("price_change_percent", 0)) if item.get("price_change_percent") else None,
+            "confidence_score": float(item.get("confidence_score", 0)) if item.get("confidence_score") else None,
+            "prediction_lower": float(item.get("prediction_lower", 0)) if item.get("prediction_lower") else None,
+            "prediction_upper": float(item.get("prediction_upper", 0)) if item.get("prediction_upper") else None,
+            "features_used": item.get("features_used", []),
+            "model_path": item.get("model_path", ""),
+        }
+    
+    # Set common fields
+    prediction_dict.update({
+        "currency": currency,
+        "league": league,
+        "horizon": horizon,
+        "source": "cache",
+        "prediction_timestamp": item.get("prediction_timestamp", item.get("created_at", "")),
+        "timestamp": item.get("timestamp", 0)
+    })
+    
+    return prediction_dict
 
 
 def _fetch_cached_prediction(currency: str, league: Optional[str], horizon: str) -> Optional[Dict[str, Any]]:
@@ -243,36 +510,66 @@ def _fetch_cached_prediction(currency: str, league: Optional[str], horizon: str)
     if not league_value:
         return None
     
-    # Query using the correct table schema: currency_league (partition key) and timestamp (sort key)
-    currency_league = f"{currency}#{league_value}"
-    
-    # Query for the most recent prediction for this currency/league/horizon combination
-    response = _PREDICTIONS_TABLE.query(
-        KeyConditionExpression=Key("currency_league").eq(currency_league),
-        FilterExpression=Key("horizon").eq(horizon),
-        ScanIndexForward=False,  # Most recent first
-        Limit=1
-    )
+    # Use the new currency-horizon-index GSI for much more efficient queries
+    # This avoids the need for FilterExpression and provides direct access by currency + horizon
+    try:
+        response = _PREDICTIONS_TABLE.query(
+            IndexName='currency-horizon-index',
+            KeyConditionExpression=Key('currency').eq(currency) & Key('horizon').eq(horizon),
+            FilterExpression=Key('league').eq(league_value) if league_value else None,
+            ScanIndexForward=False,  # Most recent first
+            Limit=1
+        )
+    except Exception as e:
+        LOGGER.warning(f"GSI query failed, falling back to main table query: {e}")
+        # Fallback to original query method if GSI is not available yet
+        currency_league = f"{currency}#{league_value}"
+        response = _PREDICTIONS_TABLE.query(
+            KeyConditionExpression=Key("currency_league").eq(currency_league),
+            FilterExpression=Key("horizon").eq(horizon),
+            ScanIndexForward=False,
+            Limit=1
+        )
     
     items = response.get("Items", [])
     if not items:
         return None
     
     item = items[0]  # Get the most recent prediction
-    payload = item.get("prediction_data")
-    if isinstance(payload, str):
-        try:
-            payload_dict = json.loads(payload)
-        except json.JSONDecodeError:
+    
+    # Handle both old and new data formats
+    if "prediction_data" in item:
+        # Old format: prediction_data field contains JSON
+        payload = item.get("prediction_data")
+        if isinstance(payload, str):
+            try:
+                payload_dict = json.loads(payload)
+            except json.JSONDecodeError:
+                payload_dict = {}
+        elif isinstance(payload, dict):
+            payload_dict = payload
+        else:
             payload_dict = {}
-    elif isinstance(payload, dict):
-        payload_dict = payload
     else:
-        payload_dict = {}
+        # New format: prediction data is stored directly in item fields
+        payload_dict = {
+            "predicted_price": float(item.get("predicted_price", 0)) if item.get("predicted_price") else None,
+            "current_price": float(item.get("current_price", 0)) if item.get("current_price") else None,
+            "price_change_percent": float(item.get("price_change_percent", 0)) if item.get("price_change_percent") else None,
+            "confidence_score": float(item.get("confidence_score", 0)) if item.get("confidence_score") else None,
+            "prediction_lower": float(item.get("prediction_lower", 0)) if item.get("prediction_lower") else None,
+            "prediction_upper": float(item.get("prediction_upper", 0)) if item.get("prediction_upper") else None,
+            "features_used": item.get("features_used", []),
+            "model_path": item.get("model_path", ""),
+        }
+    
+    # Set common fields
     payload_dict.setdefault("currency", currency)
     payload_dict.setdefault("league", league_value)
     payload_dict.setdefault("horizon", horizon)
     payload_dict["source"] = "cache"
+    payload_dict["prediction_timestamp"] = item.get("prediction_timestamp", item.get("created_at", ""))
+    
     return payload_dict
 
 

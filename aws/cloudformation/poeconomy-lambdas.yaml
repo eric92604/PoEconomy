@@ -96,11 +96,33 @@ Resources:
           AttributeType: S
         - AttributeName: timestamp
           AttributeType: N
+        - AttributeName: currency
+          AttributeType: S
+        - AttributeName: horizon
+          AttributeType: S
       KeySchema:
         - AttributeName: currency_league
           KeyType: HASH
         - AttributeName: timestamp
           KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: currency-horizon-index
+          KeySchema:
+            - AttributeName: currency
+              KeyType: HASH
+            - AttributeName: horizon
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - league
+              - predicted_price
+              - price_change_percent
+              - confidence_score
+              - prediction_timestamp
+              - current_price
+              - prediction_lower
+              - prediction_upper
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true

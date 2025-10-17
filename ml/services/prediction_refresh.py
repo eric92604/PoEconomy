@@ -375,7 +375,7 @@ def _load_options(event: Optional[dict]) -> RefreshOptions:
     event = event or {}
     currencies = event.get("currencies")
     horizons = event.get("horizons", DEFAULT_HORIZONS)
-    ttl_hours = int(event.get("ttl_hours", os.getenv("PREDICTION_TTL_HOURS", 12)))
+    ttl_hours = int(event.get("ttl_hours", os.getenv("PREDICTION_CACHE_TTL_HOURS", 2)))
     return RefreshOptions(
         currencies=currencies,
         pay_currency="Chaos Orb",  # Always use Chaos Orb as pay currency
@@ -772,7 +772,7 @@ def _parse_cli_args(argv: Sequence[str]) -> dict:
     parser.add_argument("--currencies", nargs="*", help="Specific currencies to refresh")
     parser.add_argument("--pay-currency", default="Chaos Orb", help="Quote currency")
     parser.add_argument("--horizons", nargs="*", default=list(DEFAULT_HORIZONS), help="Prediction horizons (e.g. 1d 3d)")
-    parser.add_argument("--ttl-hours", type=int, default=int(os.getenv("PREDICTION_TTL_HOURS", 12)), help="Cache TTL in hours")
+    parser.add_argument("--ttl-hours", type=int, default=int(os.getenv("PREDICTION_CACHE_TTL_HOURS", 2)), help="Cache TTL in hours")
     parser.add_argument("--log-level", default=os.getenv("LOG_LEVEL", "INFO"), help="Logger level")
     args = parser.parse_args(argv)
     os.environ.setdefault("LOG_LEVEL", args.log_level.upper())
