@@ -1,0 +1,245 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: PoEconomy feature engineering infrastructure (Fargate Spot) - uploads to base data lake
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+    Description: Environment identifier
+  TaskTimeoutMinutes:
+    Type: Number
+    Default: 60
+    Description: Task timeout in minutes
+  DataLakeBucketName:
+    Type: String
+    Description: Name of the S3 data lake bucket for storing processed data
+  BaseStackName:
+    Type: String
+    Description: Name of the base stack to import ECR repository from
+  FeatureEngineeringImageUri:
+    Type: String
+    Description: Full ECR image URI for feature engineering (including tag)
+
+Resources:
+  FeatureEngineeringVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'poeconomy-${EnvironmentName}-feature-engineering-vpc'
+        - Key: App
+          Value: PoEconomy
+
+  FeatureEngineeringPublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref FeatureEngineeringVpc
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'poeconomy-${EnvironmentName}-feature-engineering-public-subnet-a'
+        - Key: App
+          Value: PoEconomy
+
+  FeatureEngineeringPublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref FeatureEngineeringVpc
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'poeconomy-${EnvironmentName}-feature-engineering-public-subnet-b'
+        - Key: App
+          Value: PoEconomy
+
+  FeatureEngineeringInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub 'poeconomy-${EnvironmentName}-feature-engineering-igw'
+        - Key: App
+          Value: PoEconomy
+
+  FeatureEngineeringInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref FeatureEngineeringInternetGateway
+      VpcId: !Ref FeatureEngineeringVpc
+
+  FeatureEngineeringPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref FeatureEngineeringVpc
+      Tags:
+        - Key: Name
+          Value: !Sub 'poeconomy-${EnvironmentName}-feature-engineering-public-rt'
+        - Key: App
+          Value: PoEconomy
+
+  FeatureEngineeringPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: FeatureEngineeringInternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref FeatureEngineeringPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref FeatureEngineeringInternetGateway
+
+  FeatureEngineeringPublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref FeatureEngineeringPublicRouteTable
+      SubnetId: !Ref FeatureEngineeringPublicSubnetA
+
+  FeatureEngineeringPublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref FeatureEngineeringPublicRouteTable
+      SubnetId: !Ref FeatureEngineeringPublicSubnetB
+
+  FeatureEngineeringSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PoEconomy feature engineering tasks
+      VpcId: !Ref FeatureEngineeringVpc
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  FeatureEngineeringLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ecs/poeconomy/${EnvironmentName}/feature-engineering'
+      RetentionInDays: 14
+      Tags:
+        - Key: App
+          Value: PoEconomy
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  FeatureEngineeringCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub 'poeconomy-${EnvironmentName}-feature-engineering'
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  FeatureEngineeringTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-feature-engineering-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/ecs/poeconomy/${EnvironmentName}/feature-engineering:*'
+        - PolicyName: DataLakeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub
+                    - 'arn:aws:s3:::${DataLakeBucketName}'
+                    - DataLakeBucketName: !Ref DataLakeBucketName
+                  - !Sub
+                    - 'arn:aws:s3:::${DataLakeBucketName}/*'
+                    - DataLakeBucketName: !Ref DataLakeBucketName
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  FeatureEngineeringTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub 'poeconomy-${EnvironmentName}-feature-engineering'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 1024
+      Memory: 2048
+      ExecutionRoleArn: !GetAtt FeatureEngineeringTaskRole.Arn
+      TaskRoleArn: !GetAtt FeatureEngineeringTaskRole.Arn
+      ContainerDefinitions:
+        - Name: feature-engineering
+          Image: !Ref FeatureEngineeringImageUri
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref FeatureEngineeringLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: AWS_DEFAULT_REGION
+              Value: !Ref AWS::Region
+            - Name: ENVIRONMENT
+              Value: !Ref EnvironmentName
+            - Name: MODE
+              Value: !Ref EnvironmentName
+            - Name: DATA_LAKE_BUCKET
+              Value: !Ref DataLakeBucketName
+            - Name: TASK_TIMEOUT_MINUTES
+              Value: !Ref TaskTimeoutMinutes
+          StopTimeout: !Ref TaskTimeoutMinutes
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+
+
+Outputs:
+  FeatureEngineeringClusterName:
+    Description: Name of the feature engineering ECS cluster
+    Value: !Ref FeatureEngineeringCluster
+    Export:
+      Name: !Sub '${AWS::StackName}-FeatureEngineeringCluster'
+
+  FeatureEngineeringTaskDefinitionArn:
+    Description: ARN of the feature engineering task definition
+    Value: !Ref FeatureEngineeringTaskDefinition
+    Export:
+      Name: !Sub '${AWS::StackName}-FeatureEngineeringTaskDefinition'
+
+  FeatureEngineeringVpcId:
+    Description: VPC ID for feature engineering
+    Value: !Ref FeatureEngineeringVpc
+    Export:
+      Name: !Sub '${AWS::StackName}-FeatureEngineeringVpc'

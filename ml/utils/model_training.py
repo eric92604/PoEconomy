@@ -1,0 +1,1139 @@
+"""
+Model training utilities optimized for multi-core systems.
+"""
+
+import numpy as np
+import pandas as pd
+from typing import Dict, List, Tuple, Optional, Any, Union
+from dataclasses import dataclass, asdict
+from pathlib import Path
+import joblib
+import json
+import time
+from abc import ABC, abstractmethod
+from datetime import datetime
+
+# ML imports
+import lightgbm as lgb
+import xgboost as xgb
+from sklearn.preprocessing import RobustScaler, StandardScaler
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.ensemble import RandomForestRegressor
+import optuna
+from optuna.samplers import TPESampler
+from optuna.pruners import MedianPruner
+
+from ml.config.training_config import ModelConfig, ProcessingConfig
+from ml.utils.common_utils import MLLogger
+
+
+@dataclass
+class ModelMetrics:
+    """Container for model evaluation metrics."""
+    mae: Union[float, Dict[str, float]]
+    rmse: Union[float, Dict[str, float]]
+    mape: Union[float, Dict[str, float]]
+    r2: Union[float, Dict[str, float]]
+    directional_accuracy: Union[float, Dict[str, float]]
+    
+    def to_dict(self) -> Dict[str, Union[float, Dict[str, float]]]:
+        """Convert to dictionary."""
+        return asdict(self)
+    
+    @classmethod
+    def from_predictions(cls, y_true: np.ndarray, y_pred: np.ndarray, 
+                        target_names: Optional[List[str]] = None) -> 'ModelMetrics':
+        """Calculate metrics from predictions."""
+        # Handle multi-output case
+        if y_true.ndim > 1 and y_true.shape[1] > 1 and target_names is not None:
+            return cls._from_multi_output_predictions(y_true, y_pred, target_names)
+        
+        # Single output case - flatten if needed
+        if y_true.ndim > 1:
+            y_true = y_true.flatten()
+        if y_pred.ndim > 1:
+            y_pred = y_pred.flatten()
+        
+        # Basic metrics
+        mae = mean_absolute_error(y_true, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+        r2 = r2_score(y_true, y_pred)
+        
+        # MAPE with robust calculation
+        epsilon = 1e-8
+        mape_values = []
+        for true, pred in zip(y_true, y_pred):
+            if abs(true) > epsilon:
+                denominator = (abs(true) + abs(pred)) / 2 + epsilon
+                mape_val = abs(true - pred) / denominator * 100
+                mape_values.append(mape_val)
+        mape = np.mean(mape_values) if mape_values else float('inf')
+        
+        # Directional accuracy
+        if len(y_true) > 1:
+            true_direction = np.diff(y_true) > 0
+            pred_direction = np.diff(y_pred) > 0
+            directional_accuracy = np.mean(true_direction == pred_direction) * 100
+        else:
+            directional_accuracy = 0.0
+        
+        return cls(
+            mae=mae,
+            rmse=rmse,
+            mape=mape,
+            r2=max(r2, -1.0),  # Cap at -1 for very bad predictions
+            directional_accuracy=directional_accuracy
+        )
+    
+    @classmethod
+    def _from_multi_output_predictions(cls, y_true: np.ndarray, y_pred: np.ndarray, 
+                                     target_names: List[str]) -> 'ModelMetrics':
+        """Calculate metrics for multi-output predictions."""
+        n_outputs = y_true.shape[1]
+        
+        mae_dict = {}
+        rmse_dict = {}
+        mape_dict = {}
+        r2_dict = {}
+        directional_accuracy_dict = {}
+        
+        for i, target_name in enumerate(target_names):
+            y_true_single = y_true[:, i]
+            y_pred_single = y_pred[:, i]
+            
+            # Skip if all values are NaN
+            valid_mask = ~(np.isnan(y_true_single) | np.isnan(y_pred_single))
+            if not np.any(valid_mask):
+                mae_dict[target_name] = float('inf')
+                rmse_dict[target_name] = float('inf')
+                mape_dict[target_name] = float('inf')
+                r2_dict[target_name] = -1.0
+                directional_accuracy_dict[target_name] = 0.0
+                continue
+            
+            y_true_valid = y_true_single[valid_mask]
+            y_pred_valid = y_pred_single[valid_mask]
+            
+            # Basic metrics
+            mae_dict[target_name] = mean_absolute_error(y_true_valid, y_pred_valid)
+            rmse_dict[target_name] = np.sqrt(mean_squared_error(y_true_valid, y_pred_valid))
+            r2_dict[target_name] = max(r2_score(y_true_valid, y_pred_valid), -1.0)
+            
+            # MAPE with robust calculation
+            epsilon = 1e-8
+            mape_values = []
+            for true, pred in zip(y_true_valid, y_pred_valid):
+                if abs(true) > epsilon:
+                    denominator = (abs(true) + abs(pred)) / 2 + epsilon
+                    mape_val = abs(true - pred) / denominator * 100
+                    mape_values.append(mape_val)
+            mape_dict[target_name] = np.mean(mape_values) if mape_values else float('inf')
+            
+            # Directional accuracy
+            if len(y_true_valid) > 1:
+                true_direction = np.diff(y_true_valid) > 0
+                pred_direction = np.diff(y_pred_valid) > 0
+                directional_accuracy_dict[target_name] = np.mean(true_direction == pred_direction) * 100
+            else:
+                directional_accuracy_dict[target_name] = 0.0
+        
+        return cls(
+            mae=mae_dict,
+            rmse=rmse_dict,
+            mape=mape_dict,
+            r2=r2_dict,
+            directional_accuracy=directional_accuracy_dict
+        )
+
+
+@dataclass
+class TrainingResult:
+    """Result of model training process."""
+    model: Any
+    scaler: Optional[Any]
+    metrics: ModelMetrics
+    training_time: float
+    hyperparameters: Dict[str, Any]
+    feature_importance: Optional[Dict[str, float]]
+    cross_validation_scores: Optional[List[float]]
+    model_type: str
+    currency: str
+
+
+class BaseModel(ABC):
+    """Abstract base class for ML models."""
+    
+    def __init__(self, config: ModelConfig, logger: Optional[MLLogger] = None):
+        self.config = config
+        self.logger = logger
+        self.model: Any = None
+        
+        if self.logger:
+            self.logger.info(f"Initializing {self.get_model_type()} model")
+    
+    @abstractmethod
+    def _create_model(self, trial: Optional[optuna.Trial] = None) -> Any:
+        """Create the underlying model with optional hyperparameter optimization."""
+        pass
+    
+    def _create_model_with_params(self, params: Dict[str, Any]) -> Any:
+        """Create model instance with specific parameters."""
+        # Create a mock trial with the given parameters
+        class MockTrial:
+            def __init__(self, params: Dict[str, Any]):
+                self.params = params
+            
+            def suggest_float(self, name: str, low: float, high: float, **kwargs) -> float:
+                # Try exact match first, then try with prefix stripped
+                if name in self.params:
+                    return self.params[name]
+                # For parameters like 'learning_rate', try 'xgb_learning_rate' or 'lgb_learning_rate'
+                for key, value in self.params.items():
+                    if key.endswith(f"_{name}"):
+                        return value
+                return (low + high) / 2
+            
+            def suggest_int(self, name: str, low: int, high: int, **kwargs) -> int:
+                # Try exact match first, then try with prefix stripped
+                if name in self.params:
+                    return self.params[name]
+                # For parameters like 'n_estimators', try 'xgb_n_estimators' or 'lgb_n_estimators'
+                for key, value in self.params.items():
+                    if key.endswith(f"_{name}"):
+                        return value
+                return (low + high) // 2
+            
+            def suggest_categorical(self, name: str, choices: List[Any], **kwargs) -> Any:
+                # Try exact match first, then try with prefix stripped
+                if name in self.params:
+                    return self.params[name]
+                # For parameters like 'boosting_type', try 'xgb_boosting_type' or 'lgb_boosting_type'
+                for key, value in self.params.items():
+                    if key.endswith(f"_{name}"):
+                        return value
+                return choices[0]
+        
+        return self._create_model(MockTrial(params))
+    
+    @abstractmethod
+    def get_model_type(self) -> str:
+        """Return the model type identifier."""
+        pass
+    
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        X_val: Optional[np.ndarray] = None,
+        y_val: Optional[np.ndarray] = None
+    ) -> None:
+        """Fit the model to training data."""
+        start_time = time.time()
+        
+        if X_val is not None and y_val is not None:
+            # Handle early stopping for different model types
+            if isinstance(self.model, lgb.LGBMRegressor):
+                # LightGBM early stopping
+                self.model.fit(
+                    X, y,
+                    eval_set=[(X_val, y_val)],
+                    callbacks=[lgb.early_stopping(self.config.early_stopping_rounds, verbose=False)]
+                )
+            elif isinstance(self.model, xgb.XGBRegressor):
+                # XGBoost - disable early stopping for version compatibility
+                # Note: Early stopping API varies between XGBoost versions
+                self.model.fit(
+                    X, y,
+                    eval_set=[(X_val, y_val)],
+                    verbose=False
+                )
+            else:
+                # Other models without early stopping
+                self.model.fit(X, y)
+        else:
+            # No validation data - train without early stopping
+            self.model.fit(X, y)
+        
+        training_time = time.time() - start_time
+        
+        # Log training completion with key statistics
+        if self.logger:
+            # Get best iteration for LightGBM models
+            best_iteration = getattr(self.model, 'best_iteration', None)
+            if best_iteration is not None:
+                self.logger.info(f"{self.get_model_type()} training completed in {training_time:.2f}s (best iteration: {best_iteration})")
+            else:
+                self.logger.info(f"{self.get_model_type()} training completed in {training_time:.2f}s")
+    
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Make predictions using the trained model."""
+        if self.model is None:
+            raise ValueError("Model has not been trained yet")
+        
+        predictions = self.model.predict(X)
+        
+        # Handle potential shape issues
+        if predictions.ndim == 1:
+            predictions = predictions.reshape(-1, 1)
+        
+        return predictions  # type: ignore[no-any-return]
+    
+    def get_feature_importance(self, feature_names: Optional[List[str]] = None) -> Optional[Dict[str, float]]:
+        """Get feature importance from the trained model."""
+        if self.model is None:
+            return None
+        
+        if hasattr(self.model, 'feature_importances_'):
+            importance = self.model.feature_importances_
+            
+            # Use provided feature names, then model's names, then fallback to generic names
+            if feature_names is not None:
+                names = feature_names
+            elif hasattr(self.model, 'feature_names_in_'):
+                names = self.model.feature_names_in_
+            else:
+                names = [f'feature_{i}' for i in range(len(importance))]
+            
+            return dict(zip(names, importance))
+        
+        return None
+
+
+class LightGBMModel(BaseModel):
+    """LightGBM model implementation with optimal threading."""
+    
+    def _create_model(self, trial: Optional[optuna.Trial] = None) -> lgb.LGBMRegressor:
+        """Create LightGBM model with optimal parameters."""
+        if trial is not None:
+            # Hyperparameter optimization - refined ranges for better convergence
+            params = {
+                'n_estimators': trial.suggest_int('lgb_n_estimators', 200, 800),
+                'max_depth': trial.suggest_int('lgb_max_depth', 4, 12),
+                'learning_rate': trial.suggest_float('lgb_learning_rate', 0.01, 0.2),
+                'num_leaves': trial.suggest_int('lgb_num_leaves', 20, 200),
+                'min_child_samples': trial.suggest_int('lgb_min_child_samples', 10, 50),
+                'subsample': trial.suggest_float('lgb_subsample', 0.7, 1.0),
+                'colsample_bytree': trial.suggest_float('lgb_colsample_bytree', 0.7, 1.0),
+                'reg_alpha': trial.suggest_float('lgb_reg_alpha', 0.0, 5.0),
+                'reg_lambda': trial.suggest_float('lgb_reg_lambda', 0.0, 5.0),
+            }
+        else:
+            # Default parameters
+            params = {
+                'n_estimators': 500,
+                'max_depth': 8,
+                'learning_rate': 0.1,
+                'num_leaves': 100,
+                'min_child_samples': 20,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'reg_alpha': 0.1,
+                'reg_lambda': 0.1,
+            }
+        
+        # Optimal threading configuration - adjust for parallel Optuna trials
+        optimal_n_jobs = max(1, self.config.model_n_jobs // self.config.max_optuna_workers)
+        params.update({
+            'random_state': self.config.random_state,
+            'n_jobs': optimal_n_jobs,
+            'force_row_wise': True,  # Better for multi-threading
+            'verbose': -1
+        })
+        
+        return lgb.LGBMRegressor(**params)  # type: ignore[arg-type]
+    
+    def get_model_type(self) -> str:
+        """Get model type identifier."""
+        return "lightgbm"
+
+
+class XGBoostModel(BaseModel):
+    """XGBoost model implementation with optimal threading."""
+    
+    def _create_model(self, trial: Optional[optuna.Trial] = None) -> xgb.XGBRegressor:
+        """Create XGBoost model with optimal parameters."""
+        if trial is not None:
+            # Hyperparameter optimization - refined ranges for better convergence
+            params = {
+                'n_estimators': trial.suggest_int('xgb_n_estimators', 200, 800),
+                'max_depth': trial.suggest_int('xgb_max_depth', 4, 12),
+                'learning_rate': trial.suggest_float('xgb_learning_rate', 0.01, 0.2),
+                'min_child_weight': trial.suggest_int('xgb_min_child_weight', 1, 8),
+                'subsample': trial.suggest_float('xgb_subsample', 0.7, 1.0),
+                'colsample_bytree': trial.suggest_float('xgb_colsample_bytree', 0.7, 1.0),
+                'reg_alpha': trial.suggest_float('xgb_reg_alpha', 0.0, 5.0),
+                'reg_lambda': trial.suggest_float('xgb_reg_lambda', 0.0, 5.0),
+            }
+        else:
+            # Default parameters
+            params = {
+                'n_estimators': 500,
+                'max_depth': 8,
+                'learning_rate': 0.1,
+                'min_child_weight': 3,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'reg_alpha': 0.1,
+                'reg_lambda': 0.1,
+            }
+        
+        # Optimal threading configuration - adjust for parallel Optuna trials
+        optimal_n_jobs = max(1, self.config.model_n_jobs // self.config.max_optuna_workers)
+        params.update({
+            'random_state': self.config.random_state,
+            'n_jobs': optimal_n_jobs,
+            'tree_method': 'hist',  # type: ignore[dict-item]  # Optimal for multi-core
+            'verbosity': 0
+        })
+        
+        return xgb.XGBRegressor(**params)
+    
+    def get_model_type(self) -> str:
+        """Get model type identifier."""
+        return "xgboost"
+
+
+class RandomForestModel(BaseModel):
+    """Random Forest model implementation."""
+    
+    def _create_model(self, trial: Optional[optuna.Trial] = None) -> RandomForestRegressor:
+        """Create Random Forest model."""
+        if trial is not None:
+            # Hyperparameter optimization
+            params = {
+                'n_estimators': trial.suggest_int('rf_n_estimators', 100, 500),
+                'max_depth': trial.suggest_int('rf_max_depth', 5, 20),
+                'min_samples_split': trial.suggest_int('rf_min_samples_split', 2, 20),
+                'min_samples_leaf': trial.suggest_int('rf_min_samples_leaf', 1, 10),
+                'max_features': trial.suggest_categorical('rf_max_features', ['sqrt', 'log2', None]),
+            }
+        else:
+            # Default parameters
+            params = {
+                'n_estimators': 200,
+                'max_depth': 10,
+                'min_samples_split': 5,
+                'min_samples_leaf': 2,
+                'max_features': 'sqrt',
+            }
+        
+        # Threading configuration - adjust for parallel Optuna trials
+        optimal_n_jobs = max(1, self.config.model_n_jobs // self.config.max_optuna_workers)
+        params.update({
+            'random_state': self.config.random_state,
+            'n_jobs': optimal_n_jobs,
+        })
+        
+        return RandomForestRegressor(**params)
+    
+    def get_model_type(self) -> str:
+        """Get model type identifier."""
+        return "random_forest"
+
+
+class EnsembleModel:
+    """Ensemble model combining multiple base models."""
+    
+    def __init__(
+        self,
+        models: List[BaseModel],
+        weights: Optional[List[float]] = None,
+        logger: Optional[MLLogger] = None
+    ):
+        self.models = models
+        self.weights = weights if weights is not None else [1.0] * len(models)
+        self.logger = logger
+        
+        if len(self.weights) != len(self.models):
+            raise ValueError("Number of weights must match number of models")
+        
+        # Normalize weights
+        total_weight = sum(self.weights)
+        self.weights = [w / total_weight for w in self.weights]
+        
+        if self.logger:
+            self.logger.info(f"Initialized ensemble with {len(models)} models")
+    
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        X_val: Optional[np.ndarray] = None,
+        y_val: Optional[np.ndarray] = None
+    ) -> None:
+        """Fit all models in the ensemble."""
+        for i, model in enumerate(self.models):
+            if self.logger:
+                self.logger.info(f"Training ensemble model {i+1}/{len(self.models)}: {model.get_model_type()}")
+            
+            model.model = model._create_model()
+            model.fit(X, y, X_val, y_val)
+    
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Make ensemble predictions."""
+        if not self.models or any(model.model is None for model in self.models):
+            raise ValueError("All models must be trained before making predictions")
+        
+        predictions = []
+        for model in self.models:
+            pred = model.predict(X)
+            predictions.append(pred)
+        
+        # Weighted average of predictions
+        weighted_pred = np.zeros_like(predictions[0])
+        for pred, weight in zip(predictions, self.weights):
+            weighted_pred += weight * pred
+        
+        return weighted_pred
+    
+    def get_feature_importance(self, feature_names: Optional[List[str]] = None) -> Optional[Dict[str, float]]:
+        """Get aggregated feature importance from all models."""
+        importance_dicts = []
+        
+        for model in self.models:
+            importance = model.get_feature_importance(feature_names=feature_names)
+            if importance is not None:
+                importance_dicts.append(importance)
+        
+        if not importance_dicts:
+            return None
+        
+        # Aggregate importance across models
+        all_features: set[str] = set()
+        for imp_dict in importance_dicts:
+            all_features.update(imp_dict.keys())
+        
+        aggregated_importance = {}
+        for feature in all_features:
+            importances = [imp_dict.get(feature, 0.0) for imp_dict in importance_dicts]
+            aggregated_importance[feature] = np.mean(importances)
+        
+        return aggregated_importance  # type: ignore[return-value]
+    
+    def get_model_type(self) -> str:
+        """Get model type identifier."""
+        return "ensemble"
+
+
+class HyperparameterOptimizer:
+    """Hyperparameter optimizer using Optuna with agnostic optimization."""
+    
+    def __init__(
+        self,
+        config: ModelConfig,
+        logger: Optional[MLLogger] = None
+    ):
+        self.config = config
+        self.logger = logger
+        
+        # Configure Optuna to be less verbose
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        
+        # Cache for optimized hyperparameters
+        self._optimized_params: Dict[str, Dict[str, Any]] = {}
+        self._optimization_completed: Dict[str, bool] = {}
+    
+    def optimize(
+        self,
+        model_class: type,
+        X: np.ndarray,
+        y: np.ndarray,
+        currency: str,
+        cv_folds: int = 5
+    ) -> Tuple[BaseModel, Dict[str, Any]]:
+        """Optimize hyperparameters for a model."""
+        if self.logger:
+            self.logger.info(f"Starting hyperparameter optimization for {model_class.__name__}")
+            self.logger.info(f"Using {self.config.max_optuna_workers} parallel workers for {self.config.n_trials} trials")
+        
+        def objective(trial: Any) -> float:
+            # Create model with trial parameters
+            model = model_class(self.config, self.logger)
+            model.model = model._create_model(trial)
+            
+            # Time series cross-validation
+            tscv = TimeSeriesSplit(n_splits=cv_folds)
+            scores = []
+            
+            for train_idx, val_idx in tscv.split(X):
+                X_train_fold, X_val_fold = X[train_idx], X[val_idx]
+                y_train_fold, y_val_fold = y[train_idx], y[val_idx]
+                
+                # Train and evaluate
+                model.model.fit(X_train_fold, y_train_fold)
+                y_pred = model.predict(X_val_fold)
+                
+                # Calculate MAE as objective
+                mae = mean_absolute_error(y_val_fold, y_pred)
+                scores.append(mae)
+            
+            return float(np.mean(scores))
+        
+        # Create study with proper storage for parallelization
+        if self.config.max_optuna_workers > 1:
+            # Use JournalStorage for multi-threaded parallelization
+            import tempfile
+            import os
+            temp_dir = tempfile.gettempdir()
+            storage_file = os.path.join(temp_dir, f"optuna_{model_class.__name__}_{self.config.random_state}.log")
+            storage = optuna.storages.JournalStorage(
+                optuna.storages.journal.JournalFileBackend(storage_file)
+            )
+            study = optuna.create_study(
+                direction='minimize',
+                sampler=TPESampler(seed=self.config.random_state),
+                pruner=MedianPruner(),
+                storage=storage,
+                study_name=f"single_{model_class.__name__}_{self.config.random_state}"
+            )
+            if self.logger:
+                self.logger.info(f"Using JournalStorage for parallel optimization: {storage_file}")
+        else:
+            # Use in-memory storage for single-threaded optimization
+            study = optuna.create_study(
+                direction='minimize',
+                sampler=TPESampler(seed=self.config.random_state),
+                pruner=MedianPruner()
+            )
+            if self.logger:
+                self.logger.info("Using in-memory storage for single-threaded optimization")
+        
+        # Optimize with parallelization
+        study.optimize(objective, n_trials=self.config.n_trials, n_jobs=self.config.max_optuna_workers)
+        
+        # Create best model
+        best_model = model_class(self.config, self.logger)
+        best_model.model = best_model._create_model(study.best_trial)
+        
+        if self.logger:
+            self.logger.info(f"Optimization completed. Best MAE: {study.best_value:.4f}")
+        
+        return best_model, study.best_params
+    
+    def optimize_agnostic(
+        self,
+        model_class: type,
+        sample_data: List[Tuple[np.ndarray, np.ndarray]],
+        model_name: str,
+        cv_folds: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Optimize hyperparameters agnostically using representative sample data.
+        
+        Args:
+            model_class: Model class to optimize
+            sample_data: List of (X, y) tuples from representative currencies
+            model_name: Name identifier for caching
+            cv_folds: Number of CV folds
+            
+        Returns:
+            Optimized hyperparameters
+        """
+        # Check if already optimized
+        if model_name in self._optimized_params:
+            if self.logger:
+                self.logger.info(f"Using cached hyperparameters for {model_name}")
+            return self._optimized_params[model_name]
+        
+        if self.logger:
+            self.logger.info(f"Starting agnostic hyperparameter optimization for {model_name} using {len(sample_data)} sample datasets")
+            self.logger.info(f"Using {self.config.max_optuna_workers} parallel workers for {self.config.n_trials} trials")
+        
+        def objective(trial: Any) -> float:
+            # Log trial execution for parallelization verification
+            import multiprocessing
+            import threading
+            if self.logger:
+                self.logger.info(f"Trial {trial.number} started on process {multiprocessing.current_process().name} thread {threading.current_thread().name}")
+            
+            # Create model with trial parameters
+            model = model_class(self.config, self.logger)
+            model.model = model._create_model(trial)
+            
+            all_scores = []
+            
+            # Optimize across multiple representative datasets
+            for X, y, currency_name in sample_data:
+                # Validate data format
+                if not isinstance(X, np.ndarray) or not isinstance(y, np.ndarray):
+                    if self.logger:
+                        self.logger.warning(f"Invalid data format for {currency_name}: X={type(X)}, y={type(y)}")
+                    continue
+                
+                if y.ndim != 1:
+                    if self.logger:
+                        self.logger.warning(f"Target variable not 1D for {currency_name}: y.shape={y.shape}")
+                    continue
+                
+                # Time series cross-validation
+                tscv = TimeSeriesSplit(n_splits=cv_folds)
+                scores = []
+                
+                for train_idx, val_idx in tscv.split(X):
+                    X_train_fold, X_val_fold = X[train_idx], X[val_idx]
+                    y_train_fold, y_val_fold = y[train_idx], y[val_idx]
+                    
+                    # Train and evaluate
+                    model.model.fit(X_train_fold, y_train_fold)
+                    y_pred = model.predict(X_val_fold)
+                    
+                    # Calculate MAE as objective
+                    mae = mean_absolute_error(y_val_fold, y_pred)
+                    scores.append(mae)
+                
+                all_scores.extend(scores)
+            
+            result = float(np.mean(all_scores))
+            if self.logger:
+                self.logger.info(f"Trial {trial.number} completed with MAE: {result:.4f}")
+            return result
+        
+        # Create study with proper storage for parallelization
+        if self.config.max_optuna_workers > 1:
+            # Use JournalStorage for multi-threaded parallelization
+            import tempfile
+            import os
+            temp_dir = tempfile.gettempdir()
+            storage_file = os.path.join(temp_dir, f"optuna_{model_name}_{self.config.random_state}.log")
+            storage = optuna.storages.JournalStorage(
+                optuna.storages.journal.JournalFileBackend(storage_file)
+            )
+            study = optuna.create_study(
+                direction='minimize',
+                sampler=TPESampler(seed=self.config.random_state),
+                pruner=MedianPruner(),
+                storage=storage,
+                study_name=f"agnostic_{model_name}_{self.config.random_state}"
+            )
+            if self.logger:
+                self.logger.info(f"Using JournalStorage for parallel optimization: {storage_file}")
+        else:
+            # Use in-memory storage for single-threaded optimization
+            study = optuna.create_study(
+                direction='minimize',
+                sampler=TPESampler(seed=self.config.random_state),
+                pruner=MedianPruner()
+            )
+            if self.logger:
+                self.logger.info("Using in-memory storage for single-threaded optimization")
+        
+        # Optimize with parallelization
+        study.optimize(objective, n_trials=self.config.n_trials, n_jobs=self.config.max_optuna_workers)
+        
+        # Cache the results
+        self._optimized_params[model_name] = study.best_params
+        self._optimization_completed[model_name] = True
+        
+        if self.logger:
+            self.logger.info(f"Agnostic optimization completed for {model_name}. Best MAE: {study.best_value:.4f}")
+            self.logger.info(f"Optimized parameters: {study.best_params}")
+            
+            # Verify parallelization worked
+            completed_trials = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+            failed_trials = len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])
+            self.logger.info(f"Parallelization verification: {completed_trials} completed trials, {failed_trials} failed trials")
+            
+            # Log trial execution times to verify parallelization
+            if len(study.trials) > 1:
+                trial_times = []
+                for trial in study.trials:
+                    if trial.state == optuna.trial.TrialState.COMPLETE and hasattr(trial, 'datetime_start') and hasattr(trial, 'datetime_complete'):
+                        duration = (trial.datetime_complete - trial.datetime_start).total_seconds()
+                        trial_times.append(duration)
+                
+                if trial_times:
+                    avg_time = sum(trial_times) / len(trial_times)
+                    self.logger.info(f"Average trial duration: {avg_time:.2f} seconds")
+        
+        return study.best_params
+    
+    def get_optimized_params(self, model_name: str) -> Optional[Dict[str, Any]]:
+        """Get cached optimized parameters for a model type."""
+        return self._optimized_params.get(model_name)
+    
+    def is_optimized(self, model_name: str) -> bool:
+        """Check if model type has been optimized."""
+        return self._optimization_completed.get(model_name, False)
+
+
+class ModelTrainer:
+    """Main model trainer with optimized multi-core performance."""
+    
+    def __init__(
+        self,
+        config: ModelConfig,
+        processing_config: ProcessingConfig,
+        logger: Optional[MLLogger] = None
+    ):
+        self.config = config
+        self.processing_config = processing_config
+        self.logger = logger
+        
+        if self.logger:
+            self.logger.info("ModelTrainer initialized")
+        
+        # Initialize hyperparameter optimizer
+        self.hyperparameter_optimizer = HyperparameterOptimizer(self.config, self.logger)
+    
+    def optimize_hyperparameters_agnostic(
+        self,
+        sample_currencies_data: List[Tuple[np.ndarray, np.ndarray, str]]
+    ) -> None:
+        """
+        Perform agnostic hyperparameter optimization using representative currency data.
+        
+        This method optimizes hyperparameters once using sample data from multiple currencies,
+        then applies the optimized parameters to all subsequent training.
+        
+        Args:
+            sample_currencies_data: List of (X, y, currency_name) tuples from representative currencies
+        """
+        if self.config.n_trials <= 1:
+            if self.logger:
+                self.logger.info("Hyperparameter optimization disabled (n_trials <= 1)")
+            return
+        
+        if self.logger:
+            self.logger.info(f"Starting agnostic hyperparameter optimization using {len(sample_currencies_data)} sample currencies")
+        
+        # Extract sample data for each model type (keep currency_name for debugging)
+        sample_data = sample_currencies_data
+        
+        # Log sample data structure for debugging
+        if self.logger and sample_data:
+            first_sample = sample_data[0]
+            self.logger.info(f"Sample data structure: {len(first_sample)} elements per sample")
+            if len(first_sample) >= 3:
+                X, y, currency_name = first_sample
+                self.logger.info(f"First sample - Currency: {currency_name}, X shape: {X.shape}, y shape: {y.shape}")
+        
+        # Optimize LightGBM if enabled
+        if self.config.use_lightgbm:
+            if self.logger:
+                self.logger.info("Optimizing LightGBM hyperparameters agnostically...")
+            self.hyperparameter_optimizer.optimize_agnostic(
+                LightGBMModel, sample_data, "lightgbm", self.config.cv_folds
+            )
+        
+        # Optimize XGBoost if enabled
+        if self.config.use_xgboost:
+            if self.logger:
+                self.logger.info("Optimizing XGBoost hyperparameters agnostically...")
+            self.hyperparameter_optimizer.optimize_agnostic(
+                XGBoostModel, sample_data, "xgboost", self.config.cv_folds
+            )
+        
+        # Optimize RandomForest if needed (for single model training)
+        if self.logger:
+            self.logger.info("Agnostic hyperparameter optimization completed for all model types")
+    
+    def train_single_model(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        currency: str,
+        model_type: str = "ensemble",
+        target_names: Optional[List[str]] = None,
+        feature_names: Optional[List[str]] = None
+    ) -> TrainingResult:
+        """Train a single model with optimal performance."""
+        start_time = time.time()
+        
+        if self.logger:
+            self.logger.info(f"Training {model_type} model for {currency}")
+        
+        # Split data
+        split_idx = int(len(X) * (1 - self.config.test_size))
+        X_train, X_test = X[:split_idx], X[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
+        
+        # Further split training data for validation (only if we have enough data)
+        min_val_samples = 20
+        if len(X_train) > min_val_samples * 2:
+            val_split_idx = int(len(X_train) * 0.8)
+            X_train_split, X_val = X_train[:val_split_idx], X_train[val_split_idx:]
+            y_train_split, y_val = y_train[:val_split_idx], y_train[val_split_idx:]
+        else:
+            # Not enough data for validation split, use all training data
+            X_train_split, X_val = X_train, None
+            y_train_split, y_val = y_train, None
+            if self.logger:
+                self.logger.warning(f"Insufficient data for validation split: {len(X_train)} samples")
+        
+        # Scale features if needed
+        scaler = None
+        if self.processing_config.robust_scaling:
+            scaler = RobustScaler()
+            X_train_split = scaler.fit_transform(X_train_split)
+            X_val = scaler.transform(X_val)
+            X_test = scaler.transform(X_test)
+        
+        # Train model
+        if model_type == "ensemble":
+            model: Any = self._train_ensemble_model(X_train_split, y_train_split, X_val if X_val is not None else X_train_split, y_val if y_val is not None else y_train_split, currency)
+        else:
+            model = self._train_single_base_model(X_train_split, y_train_split, X_val if X_val is not None else X_train_split, y_val if y_val is not None else y_train_split, currency, model_type)
+        
+        # Make predictions and calculate metrics
+        y_pred = model.predict(X_test)
+        metrics = ModelMetrics.from_predictions(y_test, y_pred, target_names)
+        
+        # Get feature importance with feature names
+        feature_importance = model.get_feature_importance(feature_names=feature_names)
+        
+        # Calculate cross-validation scores
+        cv_scores = self._calculate_cv_scores(model, X_train, y_train)
+        print(f"CV scores: {cv_scores}")
+        training_time = time.time() - start_time
+        
+        # Get hyperparameters
+        if hasattr(model, 'model') and hasattr(model.model, 'get_params'):
+            hyperparameters = model.model.get_params()
+        elif hasattr(model, 'models'):
+            hyperparameters = {f"model_{i}": m.model.get_params() if m.model else {} for i, m in enumerate(model.models)}
+        else:
+            hyperparameters = {}
+        
+        return TrainingResult(
+            model=model,
+            scaler=scaler,
+            metrics=metrics,
+            training_time=training_time,
+            hyperparameters=hyperparameters,
+            feature_importance=feature_importance,
+            cross_validation_scores=cv_scores,
+            model_type=model_type,
+            currency=currency
+        )
+    
+    def _train_ensemble_model(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
+        currency: str
+    ) -> EnsembleModel:
+        """Train ensemble model using agnostic hyperparameter optimization."""
+        models = []
+        
+        # Use agnostic hyperparameter optimization if enabled
+        if self.config.n_trials > 1:
+            if self.config.use_lightgbm:
+                lgb_model = LightGBMModel(self.config, self.logger)
+                
+                # Get optimized parameters if available
+                if self.hyperparameter_optimizer.is_optimized("lightgbm"):
+                    optimized_params = self.hyperparameter_optimizer.get_optimized_params("lightgbm")
+                    lgb_model.model = lgb_model._create_model_with_params(optimized_params)
+                    if self.logger:
+                        self.logger.info(f"Using agnostic LightGBM params for {currency}")
+                else:
+                    # Fallback to default parameters
+                    lgb_model.model = lgb_model._create_model()
+                    if self.logger:
+                        self.logger.warning(f"No agnostic LightGBM params found, using defaults for {currency}")
+                
+                models.append(lgb_model)
+            
+            if self.config.use_xgboost:
+                xgb_model = XGBoostModel(self.config, self.logger)
+                
+                # Get optimized parameters if available
+                if self.hyperparameter_optimizer.is_optimized("xgboost"):
+                    optimized_params = self.hyperparameter_optimizer.get_optimized_params("xgboost")
+                    xgb_model.model = xgb_model._create_model_with_params(optimized_params)
+                    if self.logger:
+                        self.logger.info(f"Using agnostic XGBoost params for {currency}")
+                else:
+                    # Fallback to default parameters
+                    xgb_model.model = xgb_model._create_model()
+                    if self.logger:
+                        self.logger.warning(f"No agnostic XGBoost params found, using defaults for {currency}")
+                
+                models.append(xgb_model)  # type: ignore[arg-type]
+        else:
+            # Use default parameters for fast training
+            if self.config.use_lightgbm:
+                lgb_model = LightGBMModel(self.config, self.logger)
+                lgb_model.model = lgb_model._create_model()
+                models.append(lgb_model)
+            
+            if self.config.use_xgboost:
+                xgb_model = XGBoostModel(self.config, self.logger)
+                xgb_model.model = xgb_model._create_model()
+                models.append(xgb_model)  # type: ignore[arg-type]
+        
+        ensemble = EnsembleModel(models, logger=self.logger)  # type: ignore[arg-type]
+        ensemble.fit(X_train, y_train, X_val, y_val)
+        
+        return ensemble
+    
+    def _train_single_base_model(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
+        currency: str,
+        model_type: str
+    ) -> BaseModel:
+        """Train a single base model with optional hyperparameter optimization."""
+        # Use hyperparameter optimization if enabled
+        if self.config.n_trials > 1:
+            optimizer = HyperparameterOptimizer(self.config, self.logger)
+            
+            if model_type == "lightgbm":
+                model, params = optimizer.optimize(
+                    LightGBMModel, X_train, y_train, currency, self.config.cv_folds
+                )
+            elif model_type == "xgboost":
+                model, params = optimizer.optimize(
+                    XGBoostModel, X_train, y_train, currency, self.config.cv_folds
+                )
+            elif model_type == "random_forest":
+                model, params = optimizer.optimize(
+                    RandomForestModel, X_train, y_train, currency, self.config.cv_folds
+                )
+            else:
+                raise ValueError(f"Unknown model type: {model_type}")
+            
+            if self.logger:
+                self.logger.info(f"{model_type} optimized params: {params}")
+        else:
+            # Use default parameters for fast training
+            if model_type == "lightgbm":
+                model: BaseModel = LightGBMModel(self.config, self.logger)
+            elif model_type == "xgboost":
+                model = XGBoostModel(self.config, self.logger)
+            elif model_type == "random_forest":
+                model = RandomForestModel(self.config, self.logger)
+            else:
+                raise ValueError(f"Unknown model type: {model_type}")
+            
+            model.model = model._create_model()
+        
+        model.fit(X_train, y_train, X_val, y_val)
+        return model
+    
+    def _calculate_cv_scores(self, model: Any, X: np.ndarray, y: np.ndarray) -> List[float]:
+        """Calculate cross-validation scores."""
+        try:
+            # Ensure we have enough data for cross-validation
+            min_samples_per_fold = 10
+            max_folds = max(2, len(X) // min_samples_per_fold)  # At least 2 folds
+            n_splits = min(self.config.cv_folds, max_folds)
+            
+            if n_splits < 2:
+                if self.logger:
+                    self.logger.warning(f"Insufficient data for cross-validation: {len(X)} samples, need at least {min_samples_per_fold * 2}")
+                return []
+            
+            tscv = TimeSeriesSplit(n_splits=n_splits)
+            
+            if hasattr(model, 'model'):
+                # Single model
+                scores = cross_val_score(
+                    model.model, X, y,
+                    cv=tscv,
+                    scoring='neg_mean_absolute_error',
+                    n_jobs=1  # Use single job for CV to avoid conflicts
+                )
+            else:
+                # Ensemble - manual CV
+                scores = []
+                for train_idx, val_idx in tscv.split(X):
+                    X_train_cv, X_val_cv = X[train_idx], X[val_idx]
+                    y_train_cv, y_val_cv = y[train_idx], y[val_idx]
+                    
+                    # Create temporary model
+                    temp_ensemble = EnsembleModel([
+                        LightGBMModel(self.config),
+                        XGBoostModel(self.config)
+                    ])
+                    temp_ensemble.fit(X_train_cv, y_train_cv)
+                    
+                    y_pred_cv = temp_ensemble.predict(X_val_cv)
+                    mae = mean_absolute_error(y_val_cv, y_pred_cv)
+                    scores.append(-mae)  # Negative for consistency
+            
+            return scores  # type: ignore[no-any-return]
+            
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Cross-validation failed: {e}")
+            return []
+
+
+def save_model_artifacts(
+    result: TrainingResult,
+    output_dir: Path,
+    currency: str
+) -> Dict[str, str]:
+    """Save model artifacts to disk."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    saved_files = {}
+    
+    # Check if model exists
+    if result.model is None:
+        raise ValueError(f"Model is None for currency {currency}")
+    
+    # Save model with standard name expected by model inference utility
+    model_path = output_dir / "ensemble_model.pkl"
+    try:
+        joblib.dump(result.model, model_path)
+        saved_files['model'] = str(model_path)
+        
+        # Calculate model size
+        model_size_bytes = model_path.stat().st_size
+        model_size_mb = model_size_bytes / (1024 * 1024)
+        saved_files['model_size_mb'] = model_size_mb
+        saved_files['model_path'] = str(model_path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to save model for {currency}: {e}")
+    
+    # Save scaler if exists
+    if result.scaler is not None:
+        scaler_path = output_dir / "scaler.pkl"
+        joblib.dump(result.scaler, scaler_path)
+        saved_files['scaler'] = str(scaler_path)
+    
+    # Save model metadata with comprehensive information
+    metadata = {
+        'model_type': result.model_type,
+        'currency': currency,
+        'training_timestamp': datetime.now().isoformat(),
+        'training_time': result.training_time,
+        'metrics': result.metrics.to_dict(),
+        'hyperparameters': result.hyperparameters,
+        'feature_importance': result.feature_importance,
+        'cross_validation_scores': result.cross_validation_scores
+    }
+    
+    metadata_path = output_dir / "model_metadata.json"
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2, default=str)
+    saved_files['metadata'] = str(metadata_path)
+    
+    # Save individual metrics file
+    metrics_path = output_dir / f"{currency}_metrics.json"
+    with open(metrics_path, 'w') as f:
+        json.dump(result.metrics.to_dict(), f, indent=2)
+    saved_files['metrics'] = str(metrics_path)
+    
+    # Save feature importance if exists
+    if result.feature_importance is not None:
+        importance_path = output_dir / f"{currency}_feature_importance.json"
+        with open(importance_path, 'w') as f:
+            json.dump(result.feature_importance, f, indent=2)
+        saved_files['feature_importance'] = str(importance_path)
+    
+    # Save hyperparameters
+    params_path = output_dir / f"{currency}_hyperparameters.json"
+    with open(params_path, 'w') as f:
+        json.dump(result.hyperparameters, f, indent=2, default=str)
+    saved_files['hyperparameters'] = str(params_path)
+    
+    return saved_files 

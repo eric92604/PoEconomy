@@ -1,0 +1,825 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: PoEconomy Lambda functions, DynamoDB tables, and API Gateway
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[a-zA-Z0-9-]+'
+    Description: Environment identifier (e.g. dev, staging, production)
+  IngestionScheduleExpression:
+    Type: String
+    Default: cron(0 * * * ? *)
+    Description: EventBridge schedule expression for POE Watch ingestion
+  LeagueMetadataScheduleExpression:
+    Type: String
+    Default: cron(0 0 * * ? *)
+    Description: EventBridge schedule expression for league metadata ingestion (daily at midnight)
+  ApiGatewayStageName:
+    Type: String
+    Default: api
+    AllowedPattern: '[a-zA-Z0-9-]+'
+    Description: Stage name for the API Gateway deployment
+  BaseStackName:
+    Type: String
+    Description: Name of the base stack to import data lake bucket from
+  LambdaImageUri:
+    Type: String
+    Description: Full ECR image URI for Lambda functions (including tag)
+
+Resources:
+  # DynamoDB Tables
+  CurrencyMetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'poeconomy-${EnvironmentName}-currency-metadata'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: currency
+          AttributeType: S
+      KeySchema:
+        - AttributeName: currency
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  LivePricesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'poeconomy-${EnvironmentName}-live-prices'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: currency_league
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+        - AttributeName: currency
+          AttributeType: S
+      KeySchema:
+        - AttributeName: currency_league
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: currency-timestamp-index
+          KeySchema:
+            - AttributeName: currency
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - league
+              - pay_currency
+              - price
+              - confidence
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  PredictionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'poeconomy-${EnvironmentName}-predictions'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: currency_league
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: currency_league
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  LeagueMetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'poeconomy-${EnvironmentName}-league-metadata'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: league
+          AttributeType: S
+      KeySchema:
+        - AttributeName: league
+          KeyType: HASH
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+
+  # Ingestion Lambda
+  IngestionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/poeconomy-${EnvironmentName}-ingestion'
+      RetentionInDays: 14
+      Tags:
+        - Key: App
+          Value: PoEconomy
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  IngestionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-ingestion-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt LivePricesTable.Arn
+                  - !GetAtt CurrencyMetadataTable.Arn
+                  - !GetAtt LeagueMetadataTable.Arn
+        - PolicyName: IngestionLambdaInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt PredictionRefreshLambdaFunction.Arn
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub
+                    - 'arn:aws:s3:::${DataLakeBucket}'
+                    - DataLakeBucket: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${BaseStackName}-DataLakeBucket'
+                  - !Sub
+                    - 'arn:aws:s3:::${DataLakeBucket}/models/*'
+                    - DataLakeBucket: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${BaseStackName}-DataLakeBucket'
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  IngestionLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'poeconomy-${EnvironmentName}-ingestion'
+      Description: Ingest currency data from POE Watch API and store in DynamoDB
+      PackageType: Image
+      Role: !GetAtt IngestionLambdaRole.Arn
+      Code:
+        ImageUri: !Ref LambdaImageUri
+      ImageConfig:
+        Command: ["lambda.ingestion_handler.lambda_handler"]
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          MODELS_BUCKET: 
+            Fn::ImportValue:
+              Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          MODELS_S3_PREFIX: models/currency
+          MODELS_DIR: /var/task/models
+          DYNAMO_CURRENCY_METADATA_TABLE: !Ref CurrencyMetadataTable
+          DYNAMO_CURRENCY_PRICES_TABLE: !Ref LivePricesTable
+          DYNAMO_PREDICTIONS_TABLE: !Ref PredictionsTable
+          DYNAMO_LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
+          PREDICTION_REFRESH_FUNCTION_NAME: !Ref PredictionRefreshLambdaFunction
+          LOG_LEVEL: INFO
+          # Inference configuration
+          MAX_LEAGUE_DAYS: "200"
+          MIN_LEAGUE_DAYS: "0"
+          MIN_RECORDS_THRESHOLD: "1"
+          MAX_LAG_FEATURES: "15"
+          OUTLIER_THRESHOLD: "4.0"
+          MISSING_VALUE_THRESHOLD: "0.9"
+          OUTLIER_REMOVAL: "false"
+          PREDICTION_TIMEOUT_SECONDS: "30"
+          MAX_CONCURRENT_PREDICTIONS: "10"
+          ENABLE_PREDICTION_CACHING: "true"
+          PREDICTION_CACHE_TTL_HOURS: "2"
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  IngestionScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'poeconomy-${EnvironmentName}-ingestion-schedule'
+      ScheduleExpression: !Ref IngestionScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt IngestionLambdaFunction.Arn
+          Id: IngestionTarget
+
+  IngestionLambdaPermissionSchedule:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestionLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt IngestionScheduleRule.Arn
+
+  # Permission for ingestion Lambda to invoke prediction refresh Lambda
+  PredictionRefreshLambdaPermissionIngestion:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PredictionRefreshLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: lambda.amazonaws.com
+      SourceArn: !GetAtt IngestionLambdaFunction.Arn
+
+  # League Metadata Lambda
+  LeagueMetadataLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/poeconomy-${EnvironmentName}-league-metadata'
+      RetentionInDays: 14
+      Tags:
+        - Key: App
+          Value: PoEconomy
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  LeagueMetadataLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-league-metadata-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt LeagueMetadataTable.Arn
+                  - !GetAtt CurrencyMetadataTable.Arn
+                  - !GetAtt LivePricesTable.Arn
+                  - !GetAtt PredictionsTable.Arn
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  LeagueMetadataLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'poeconomy-${EnvironmentName}-league-metadata'
+      Description: Ingest league metadata from POE API
+      PackageType: Image
+      Role: !GetAtt LeagueMetadataLambdaRole.Arn
+      Code:
+        ImageUri: !Ref LambdaImageUri
+      ImageConfig:
+        Command: ["lambda.league_metadata_handler.lambda_handler"]
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          DYNAMO_LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
+          DYNAMO_CURRENCY_METADATA_TABLE: !Ref CurrencyMetadataTable
+          DYNAMO_CURRENCY_PRICES_TABLE: !Ref LivePricesTable
+          DYNAMO_PREDICTIONS_TABLE: !Ref PredictionsTable
+          LOG_LEVEL: INFO
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  LeagueMetadataScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'poeconomy-${EnvironmentName}-league-metadata-schedule'
+      ScheduleExpression: !Ref LeagueMetadataScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt LeagueMetadataLambdaFunction.Arn
+          Id: LeagueMetadataTarget
+
+  LeagueMetadataLambdaPermissionSchedule:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LeagueMetadataLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt LeagueMetadataScheduleRule.Arn
+
+  # Custom resource to trigger league metadata Lambda immediately after stack creation
+  LeagueMetadataTriggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'poeconomy-${EnvironmentName}-league-metadata-trigger'
+      Description: Trigger function to run league metadata Lambda immediately after stack creation
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LeagueMetadataTriggerRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          
+          def lambda_handler(event, context):
+              try:
+                  if event['RequestType'] == 'Create':
+                      # Trigger the league metadata Lambda
+                      lambda_client = boto3.client('lambda')
+                      function_name = event['ResourceProperties']['TargetFunctionName']
+                      
+                      response = lambda_client.invoke(
+                          FunctionName=function_name,
+                          InvocationType='Event',  # Async invocation
+                          Payload=json.dumps({})
+                      )
+                      print(f"Triggered {function_name}: {response}")
+                      
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+      Timeout: 60
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  LeagueMetadataTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-league-metadata-trigger-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: InvokeLeagueMetadataLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt LeagueMetadataLambdaFunction.Arn
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  LeagueMetadataInitialTrigger:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt LeagueMetadataTriggerFunction.Arn
+      TargetFunctionName: !Ref LeagueMetadataLambdaFunction
+    DependsOn:
+      - LeagueMetadataLambdaFunction
+      - LeagueMetadataLambdaPermissionSchedule
+
+  # Prediction Refresh Lambda (conditional)
+  PredictionRefreshLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/poeconomy-${EnvironmentName}-prediction-refresh'
+      RetentionInDays: 14
+      Tags:
+        - Key: App
+          Value: PoEconomy
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  PredictionRefreshLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-prediction-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt LivePricesTable.Arn
+                  - !GetAtt PredictionsTable.Arn
+                  - !GetAtt CurrencyMetadataTable.Arn
+                  - !GetAtt LeagueMetadataTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource:
+                  - !GetAtt LivePricesTable.StreamArn
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub
+                    - 'arn:aws:s3:::${DataLakeBucket}'
+                    - DataLakeBucket: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${BaseStackName}-DataLakeBucket'
+                  - !Sub
+                    - 'arn:aws:s3:::${DataLakeBucket}/models/*'
+                    - DataLakeBucket: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${BaseStackName}-DataLakeBucket'
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt PredictionRefreshDLQ.Arn
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  PredictionRefreshLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'poeconomy-${EnvironmentName}-prediction-refresh'
+      Description: Refresh cached predictions using trained models.
+      PackageType: Image
+      Role: !GetAtt PredictionRefreshLambdaRole.Arn
+      Code:
+        ImageUri: !Ref LambdaImageUri
+      ImageConfig:
+        Command: ["lambda.prediction_refresh_handler.lambda_handler"]
+      Timeout: 300
+      MemorySize: 1024
+      DeadLetterConfig:
+        TargetArn: !GetAtt PredictionRefreshDLQ.Arn
+      Environment:
+        Variables:
+          MODELS_BUCKET: 
+            Fn::ImportValue:
+              Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          MODELS_S3_PREFIX: models/currency
+          MODELS_DIR: /var/task/models
+          DYNAMO_CURRENCY_METADATA_TABLE: !Ref CurrencyMetadataTable
+          DYNAMO_CURRENCY_PRICES_TABLE: !Ref LivePricesTable
+          DYNAMO_PREDICTIONS_TABLE: !Ref PredictionsTable
+          DYNAMO_LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
+          PREDICTION_CACHE_TTL_HOURS: '2'
+          # Inference configuration
+          MAX_LEAGUE_DAYS: "200"
+          MIN_LEAGUE_DAYS: "0"
+          MIN_RECORDS_THRESHOLD: "1"
+          MAX_LAG_FEATURES: "15"
+          OUTLIER_THRESHOLD: "4.0"
+          MISSING_VALUE_THRESHOLD: "0.9"
+          OUTLIER_REMOVAL: "false"
+          PREDICTION_TIMEOUT_SECONDS: "30"
+          MAX_CONCURRENT_PREDICTIONS: "10"
+          ENABLE_PREDICTION_CACHING: "true"
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+
+  # Dead Letter Queue for Prediction Refresh Lambda
+  PredictionRefreshDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'poeconomy-${EnvironmentName}-prediction-refresh-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: App
+          Value: PoEconomy
+        - Key: Purpose
+          Value: DeadLetterQueue
+
+  # DynamoDB Streams trigger disabled - prediction refresh is now triggered by ingestion Lambda
+  # PredictionRefreshStreamMapping:
+  #   Type: AWS::Lambda::EventSourceMapping
+  #   Properties:
+  #     BatchSize: 100
+  #     EventSourceArn: !GetAtt LivePricesTable.StreamArn
+  #     FunctionName: !Ref PredictionRefreshLambdaFunction
+  #     StartingPosition: LATEST
+  #     Enabled: false
+
+  # API Lambda (conditional)
+  ApiLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/poeconomy-${EnvironmentName}-api'
+      RetentionInDays: 14
+      Tags:
+        - Key: App
+          Value: PoEconomy
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  ApiLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-api-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !GetAtt PredictionsTable.Arn
+                  - !GetAtt CurrencyMetadataTable.Arn
+                  - !GetAtt LeagueMetadataTable.Arn
+                  - !GetAtt LivePricesTable.Arn
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub
+                    - 'arn:aws:s3:::${DataLakeBucket}'
+                    - DataLakeBucket: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${BaseStackName}-DataLakeBucket'
+                  - !Sub
+                    - 'arn:aws:s3:::${DataLakeBucket}/models/*'
+                    - DataLakeBucket: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${BaseStackName}-DataLakeBucket'
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  ApiLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'poeconomy-${EnvironmentName}-api'
+      Description: Serve cached predictions and metadata via API Gateway.
+      PackageType: Image
+      Role: !GetAtt ApiLambdaRole.Arn
+      Code:
+        ImageUri: !Ref LambdaImageUri
+      ImageConfig:
+        Command: ["lambda.prediction_api_handler.lambda_handler"]
+      Timeout: 30
+      MemorySize: 1024
+      Environment:
+        Variables:
+          MODELS_BUCKET: 
+            Fn::ImportValue:
+              Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          MODELS_S3_PREFIX: models/currency
+          MODELS_DIR: /var/task/models
+          DYNAMO_CURRENCY_METADATA_TABLE: !Ref CurrencyMetadataTable
+          DYNAMO_PREDICTIONS_TABLE: !Ref PredictionsTable
+          DYNAMO_LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
+          PREDICTION_CACHE_TTL_HOURS: '2'
+          # Inference configuration
+          MAX_LEAGUE_DAYS: "200"
+          MIN_LEAGUE_DAYS: "0"
+          MIN_RECORDS_THRESHOLD: "1"
+          MAX_LAG_FEATURES: "15"
+          OUTLIER_THRESHOLD: "4.0"
+          MISSING_VALUE_THRESHOLD: "0.9"
+          OUTLIER_REMOVAL: "false"
+          PREDICTION_TIMEOUT_SECONDS: "30"
+          MAX_CONCURRENT_PREDICTIONS: "10"
+          ENABLE_PREDICTION_CACHING: "true"
+          # API Gateway configuration
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # API Gateway (conditional)
+  PredictionApiRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub 'poeconomy-${EnvironmentName}-api'
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  PredictionApiResourceProxy:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ParentId: !GetAtt PredictionApiRestApi.RootResourceId
+      PathPart: '{proxy+}'
+
+  PredictionApiMethodProxy:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !Ref PredictionApiResourceProxy
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub >-
+          arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambdaFunction.Arn}/invocations
+
+  PredictionApiMethodRoot:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !GetAtt PredictionApiRestApi.RootResourceId
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub >-
+          arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambdaFunction.Arn}/invocations
+
+  PredictionApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - PredictionApiMethodProxy
+      - PredictionApiMethodRoot
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      Description: !Sub 'Deployment for ${EnvironmentName}'
+
+  PredictionApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      StageName: !Ref ApiGatewayStageName
+      DeploymentId: !Ref PredictionApiDeployment
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  ApiLambdaPermissionApiGateway:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub >-
+        arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${PredictionApiRestApi}/*/*/*
+
+Outputs:
+  # Note: Models are now stored in the data lake bucket under /models/currency/ prefix
+  # with experiment-based directory structure: models/currency/currency_xp_{experiment_id}/
+  # Each currency has its own directory with model artifacts:
+  # - ensemble_model.pkl (trained model)
+  # - scaler.pkl (feature scaler)
+  # - model_metadata.json (model metadata)
+  # - {currency}_metrics.json (performance metrics)
+  # - {currency}_feature_importance.json (feature importance)
+  # Access via: s3://{DataLakeBucket}/models/currency/currency_xp_{experiment_id}/
+
+  CurrencyMetadataTableName:
+    Description: DynamoDB table for currency metadata
+    Value: !Ref CurrencyMetadataTable
+    Export:
+      Name: !Sub '${AWS::StackName}-CurrencyMetadataTable'
+
+  LivePricesTableName:
+    Description: DynamoDB table for live prices
+    Value: !Ref LivePricesTable
+    Export:
+      Name: !Sub '${AWS::StackName}-LivePricesTable'
+
+  PredictionsTableName:
+    Description: DynamoDB table for predictions
+    Value: !Ref PredictionsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-PredictionsTable'
+
+  LeagueMetadataTableName:
+    Description: DynamoDB table for league metadata
+    Value: !Ref LeagueMetadataTable
+    Export:
+      Name: !Sub '${AWS::StackName}-LeagueMetadataTable'
+
+  IngestionLambdaName:
+    Description: Name of the ingestion Lambda function
+    Value: !Ref IngestionLambdaFunction
+
+  LeagueMetadataLambdaName:
+    Description: Name of the league metadata ingestion Lambda function
+    Value: !Ref LeagueMetadataLambdaFunction
+
+  PredictionRefreshLambdaName:
+    Description: Name of the prediction refresh Lambda function
+    Value: !Ref PredictionRefreshLambdaFunction
+
+  PredictionApiLambdaName:
+    Description: Name of the API Gateway Lambda function
+    Value: !Ref ApiLambdaFunction
+
+  ApiInvokeUrl:
+    Description: Invoke URL for the public API Gateway stage
+    Value: !Sub 'https://${PredictionApiRestApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiGatewayStageName}'
+
+  LambdaInferenceImage:
+    Description: ECR image URI for the container-based inference Lambdas
+    Value: !Ref LambdaImageUri
+
+  PredictionRefreshDLQ:
+    Description: Dead Letter Queue for failed prediction refresh Lambda invocations
+    Value: !Ref PredictionRefreshDLQ

@@ -1,0 +1,93 @@
+# Feature Engineering Container .dockerignore
+# This file controls what gets included in the Docker build context for feature engineering
+
+# Exclude large model files (not needed for feature engineering)
+models_context/
+training_data/
+s3_backup/
+models/
+
+# Exclude other AWS containers (keep only feature engineering)
+aws/lambda/
+aws/training/
+aws/cloudformation/
+aws/scripts/
+
+# Exclude cloudflare and other non-essential directories
+cloudflare/
+.github/
+.cursor/
+
+# Exclude temporary and utility files
+clear_tables.ps1
+deployment.log
+docker-compose.training.yml
+mypy.ini
+response.json
+temp_live_prices.json
+
+# Python cache and virtual environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+
+# Testing and coverage
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.mypy_cache
+.pytest_cache
+.hypothesis
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Version control
+.git/
+.gitignore
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# AWS and deployment files
+awscliv2.zip
+delete_markers.json
+versions.json
+Items.zip
+
+# Environment files (may contain sensitive data)
+.env
+.env.*
+aws/.env
+
+# Documentation
+docs/
+README.md
+*.md
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# OS files
+Thumbs.db
+.DS_Store

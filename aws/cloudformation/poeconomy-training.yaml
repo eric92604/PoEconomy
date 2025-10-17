@@ -1,0 +1,289 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: PoEconomy training infrastructure (ECS Fargate Spot) - reads from base data lake, writes to models bucket
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    Description: Environment identifier
+  TrainingMode:
+    Type: String
+    Default: production
+    AllowedValues: [production, development, test]
+    Description: Training mode (production, development, test)
+  TaskCpu:
+    Type: Number
+    Default: 8192
+    Description: CPU units for the training task (1024 = 1 vCPU)
+  TaskMemory:
+    Type: Number
+    Default: 16384
+    Description: Memory in MB for the training task
+  MinRecordsThreshold:
+    Type: Number
+    Default: 50
+    Description: Minimum number of records required for training
+  TaskTimeoutMinutes:
+    Type: Number
+    Default: 60
+    Description: Task timeout in minutes
+  MaxCurrenciesToTrain:
+    Type: Number
+    Default: 0
+    Description: Maximum number of currencies to train (0 = no limit)
+  BaseStackName:
+    Type: String
+    Default: poeconomy-production-base
+    Description: Name of the base infrastructure stack
+  DataLakeBucketName:
+    Type: String
+    Description: Name of the data lake bucket from base stack
+  TrainingImageUri:
+    Type: String
+    Description: Full ECR image URI for training (including tag)
+
+Resources:
+  # VPC for training tasks
+  TrainingVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'poeconomy-${EnvironmentName}-training-vpc'
+
+  # Internet Gateway
+  TrainingInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub 'poeconomy-${EnvironmentName}-training-igw'
+
+  # Attach Internet Gateway to VPC
+  TrainingInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref TrainingInternetGateway
+      VpcId: !Ref TrainingVPC
+
+  # Public Subnet A
+  TrainingPublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref TrainingVPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'poeconomy-${EnvironmentName}-training-public-subnet-a'
+
+  # Public Subnet B
+  TrainingPublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref TrainingVPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'poeconomy-${EnvironmentName}-training-public-subnet-b'
+
+  # Route Table
+  TrainingPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref TrainingVPC
+      Tags:
+        - Key: Name
+          Value: !Sub 'poeconomy-${EnvironmentName}-training-public-routes'
+
+  # Default Route
+  TrainingDefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: TrainingInternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref TrainingPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref TrainingInternetGateway
+
+  # Associate Subnet A with Route Table
+  TrainingPublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref TrainingPublicRouteTable
+      SubnetId: !Ref TrainingPublicSubnetA
+
+  # Associate Subnet B with Route Table
+  TrainingPublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref TrainingPublicRouteTable
+      SubnetId: !Ref TrainingPublicSubnetB
+
+  # Security Group
+  TrainingSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub 'poeconomy-${EnvironmentName}-training-sg'
+      GroupDescription: Security group for PoEconomy training tasks
+      VpcId: !Ref TrainingVPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub 'poeconomy-${EnvironmentName}-training-sg'
+
+  # ECS Cluster
+  TrainingCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub 'poeconomy-${EnvironmentName}-training'
+      CapacityProviders:
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+      Tags:
+        - Key: Name
+          Value: !Sub 'poeconomy-${EnvironmentName}-training-cluster'
+
+  # CloudWatch Log Group
+  TrainingLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ecs/poeconomy/${EnvironmentName}/training'
+      RetentionInDays: 14
+      Tags:
+        - Key: App
+          Value: PoEconomy
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  # Task Definition
+  TrainingTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub 'poeconomy-${EnvironmentName}-training'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt TrainingExecutionRole.Arn
+      TaskRoleArn: !GetAtt TrainingTaskRole.Arn
+      ContainerDefinitions:
+        - Name: training
+          Image: !Ref TrainingImageUri
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TrainingLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: ENVIRONMENT
+              Value: !Ref EnvironmentName
+            - Name: TRAINING_MODE
+              Value: !Ref TrainingMode
+            - Name: MIN_RECORDS
+              Value: !Ref MinRecordsThreshold
+            - Name: TASK_TIMEOUT_MINUTES
+              Value: !Ref TaskTimeoutMinutes
+            - Name: MAX_CURRENCIES_TO_TRAIN
+              Value: !Ref MaxCurrenciesToTrain
+            - Name: DATA_LAKE_BUCKET
+              Value: !Ref DataLakeBucketName
+            - Name: MODELS_BUCKET
+              Value: !Ref DataLakeBucketName
+
+
+  # IAM Role for ECS Task Execution
+  TrainingExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-training-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Tags:
+        - Key: Name
+          Value: !Sub 'poeconomy-${EnvironmentName}-training-execution-role'
+
+  # IAM Role for ECS Task
+  TrainingTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-training-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DataLakeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DataLakeBucketName}'
+                  - !Sub 'arn:aws:s3:::${DataLakeBucketName}/*'
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub 'poeconomy-${EnvironmentName}-training-task-role'
+
+Outputs:
+  TrainingClusterName:
+    Description: ECS cluster name for training tasks
+    Value: !Ref TrainingCluster
+    Export:
+      Name: !Sub '${AWS::StackName}-TrainingClusterName'
+
+  TrainingTaskDefinitionArn:
+    Description: ECS task definition ARN for training tasks
+    Value: !Ref TrainingTaskDefinition
+    Export:
+      Name: !Sub '${AWS::StackName}-TrainingTaskDefinitionArn'
+
+  TrainingVpcId:
+    Description: VPC ID for training infrastructure
+    Value: !Ref TrainingVPC
+    Export:
+      Name: !Sub '${AWS::StackName}-TrainingVpcId'
+
+  TrainingSecurityGroupId:
+    Description: Security group ID for training tasks
+    Value: !Ref TrainingSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-TrainingSecurityGroupId'

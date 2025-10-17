@@ -1,0 +1,221 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: PoEconomy base infrastructure (shared S3 bucket and cross-stack IAM roles)
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[a-zA-Z0-9-]+'
+    Description: Environment identifier (e.g. dev, staging, production)
+  DataLakeStorageClass:
+    Type: String
+    Default: STANDARD
+    AllowedValues:
+      - STANDARD
+      - STANDARD_IA
+    Description: Default storage class for data lake bucket
+  DataLakeBucketName:
+    Type: String
+    Description: Name for data lake bucket
+
+Resources:
+  DataLakeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref DataLakeBucketName
+      VersioningConfiguration:
+        Status: Suspended
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+              - StorageClass: GLACIER
+                TransitionInDays: 180
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # Cross-stack IAM role for feature engineering to write to data lake
+  FeatureEngineeringDataLakeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-feature-engineering-datalake-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DataLakeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt DataLakeBucket.Arn
+                  - !Sub '${DataLakeBucket.Arn}/*'
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # Cross-stack IAM role for training to read from data lake
+  TrainingDataLakeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-training-datalake-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DataLakeReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt DataLakeBucket.Arn
+                  - !Sub '${DataLakeBucket.Arn}/*'
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # ECR Repository for Lambda Images
+  LambdaRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub 'poeconomy-${EnvironmentName}-lambdas'
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep only the latest 5 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 5
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # ECR Repository for Feature Engineering Images
+  FeatureEngineeringRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub 'poeconomy-${EnvironmentName}-feature-engineering'
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep only the latest 3 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 3
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # ECR Repository for Training Images
+  TrainingRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub 'poeconomy-${EnvironmentName}-training'
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep only the latest 2 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 2
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+Outputs:
+  DataLakeBucketName:
+    Description: Name of the data lake S3 bucket
+    Value: !Ref DataLakeBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-DataLakeBucket'
+
+  DataLakeBucketArn:
+    Description: ARN of the data lake S3 bucket
+    Value: !GetAtt DataLakeBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-DataLakeBucketArn'
+
+  FeatureEngineeringDataLakeRoleArn:
+    Description: ARN of the IAM role for feature engineering to access data lake
+    Value: !GetAtt FeatureEngineeringDataLakeRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-FeatureEngineeringDataLakeRoleArn'
+
+  TrainingDataLakeRoleArn:
+    Description: ARN of the IAM role for training to access data lake
+    Value: !GetAtt TrainingDataLakeRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TrainingDataLakeRoleArn'
+
+  LambdaRepositoryUri:
+    Description: URI of the ECR repository for lambda images
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${LambdaRepository}'
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaRepositoryUri'
+
+  FeatureEngineeringRepositoryUri:
+    Description: URI of the ECR repository for feature engineering images
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${FeatureEngineeringRepository}'
+    Export:
+      Name: !Sub '${AWS::StackName}-FeatureEngineeringRepositoryUri'
+
+  TrainingRepositoryUri:
+    Description: URI of the ECR repository for training images
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${TrainingRepository}'
+    Export:
+      Name: !Sub '${AWS::StackName}-TrainingRepositoryUri'
