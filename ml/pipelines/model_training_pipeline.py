@@ -954,7 +954,7 @@ class ModelTrainingPipeline:
             self.logger.info(f"💾 MODEL ARTIFACTS:")
             model_size = model_info.get('model_size_mb', 0)
             self.logger.info(f"   • Model size: {model_size:.2f} MB")
-            self.logger.info(f"   • Saved to: {model_info.get('model_path', 'N/A')}")
+            self.logger.info(f"   • Saved to: {model_info.get('model_dir', 'N/A')}")
         
         # Processing metadata
         processing_metadata = result.get('processing_metadata', {})

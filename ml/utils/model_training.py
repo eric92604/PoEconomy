@@ -1071,7 +1071,7 @@ def save_model_artifacts(
     output_dir: Path,
     currency: str
 ) -> Dict[str, str]:
-    """Save model artifacts to disk."""
+    """Save model artifacts to disk"""
     output_dir.mkdir(parents=True, exist_ok=True)
     
     saved_files = {}
@@ -1080,36 +1080,35 @@ def save_model_artifacts(
     if result.model is None:
         raise ValueError(f"Model is None for currency {currency}")
     
-    # Save model with standard name expected by model inference utility
+    # Save model with compression (Level 3: 40-50% size reduction, minimal performance impact)
     model_path = output_dir / "ensemble_model.pkl"
     try:
-        joblib.dump(result.model, model_path)
+        joblib.dump(result.model, model_path, compress=3)
         saved_files['model'] = str(model_path)
         
         # Calculate model size
         model_size_bytes = model_path.stat().st_size
         model_size_mb = model_size_bytes / (1024 * 1024)
         saved_files['model_size_mb'] = model_size_mb
-        saved_files['model_path'] = str(model_path)
+        saved_files['model_dir'] = str(output_dir)
     except Exception as e:
         raise RuntimeError(f"Failed to save model for {currency}: {e}")
     
-    # Save scaler if exists
+    # Save scaler with compression if exists
     if result.scaler is not None:
         scaler_path = output_dir / "scaler.pkl"
-        joblib.dump(result.scaler, scaler_path)
+        joblib.dump(result.scaler, scaler_path, compress=3)
         saved_files['scaler'] = str(scaler_path)
     
-    # Save model metadata with comprehensive information
+    # Save minimal metadata (only what's needed for inference)
     metadata = {
         'model_type': result.model_type,
         'currency': currency,
         'training_timestamp': datetime.now().isoformat(),
         'training_time': result.training_time,
-        'metrics': result.metrics.to_dict(),
-        'hyperparameters': result.hyperparameters,
-        'feature_importance': result.feature_importance,
-        'cross_validation_scores': result.cross_validation_scores
+        'metrics': result.metrics.to_dict(),  # Only metrics needed for RMSE extraction
+        # Removed: hyperparameters, feature_importance, cross_validation_scores
+        # These are not used by the prediction lambda
     }
     
     metadata_path = output_dir / "model_metadata.json"
@@ -1117,23 +1116,10 @@ def save_model_artifacts(
         json.dump(metadata, f, indent=2, default=str)
     saved_files['metadata'] = str(metadata_path)
     
-    # Save individual metrics file
-    metrics_path = output_dir / f"{currency}_metrics.json"
-    with open(metrics_path, 'w') as f:
-        json.dump(result.metrics.to_dict(), f, indent=2)
-    saved_files['metrics'] = str(metrics_path)
-    
-    # Save feature importance if exists
-    if result.feature_importance is not None:
-        importance_path = output_dir / f"{currency}_feature_importance.json"
-        with open(importance_path, 'w') as f:
-            json.dump(result.feature_importance, f, indent=2)
-        saved_files['feature_importance'] = str(importance_path)
-    
-    # Save hyperparameters
-    params_path = output_dir / f"{currency}_hyperparameters.json"
-    with open(params_path, 'w') as f:
-        json.dump(result.hyperparameters, f, indent=2, default=str)
-    saved_files['hyperparameters'] = str(params_path)
+    # REMOVED: Individual metrics, feature importance, and hyperparameters files
+    # These files are not used by the prediction lambda and only add storage overhead
+    # - {currency}_metrics.json
+    # - {currency}_feature_importance.json  
+    # - {currency}_hyperparameters.json
     
     return saved_files 

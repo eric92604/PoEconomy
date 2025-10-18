@@ -33,7 +33,7 @@ HORIZON_SUFFIXES = {"1d", "3d", "7d", "14d", "30d"}
 class ModelArtifact:
     """Storage for a single model artifact (model + optional scaler)."""
 
-    model_path: Path
+    model_dir: Path
     scaler_path: Optional[Path]
     metadata_path: Path
     metadata: Dict
@@ -79,7 +79,7 @@ class PredictionResult:
             "prediction_lower": self.prediction_lower,
             "prediction_upper": self.prediction_upper,
             "features_used": self.features_used,
-            "model_path": self.model_path,
+            "model_dir": str(self.model_dir),
             "metadata": self.metadata,
         }
 
@@ -147,11 +147,13 @@ class ModelPredictor:
                     if processed_df is not None and not processed_df.empty:
                         X, feature_rows = self._extract_feature_matrix(processed_df, feature_columns)
                         if len(feature_rows) > 0:
+                            # Load scaler (automatically handles compressed files)
                             scaler = joblib.load(artifact.scaler_path) if artifact.scaler_path and artifact.scaler_path.exists() else None
                             if scaler is not None:
                                 X = scaler.transform(X)
 
-                            model = joblib.load(artifact.model_path)
+                            # Load model (automatically handles compressed files from training pipeline)
+                            model = joblib.load(artifact.model_dir / "ensemble_model.pkl")
                             latest_features = X[-1].reshape(1, -1)
                             prediction = model.predict(latest_features)
                             prediction_value = float(np.asarray(prediction).ravel()[0])
@@ -198,7 +200,7 @@ class ModelPredictor:
                                 prediction_lower=lower,
                                 prediction_upper=upper,
                                 features_used=len(feature_columns),
-                                model_path=str(artifact.model_path),
+                                model_dir=str(artifact.model_dir),
                                 metadata=artifact.metadata,
                             )
 
@@ -308,14 +310,15 @@ class ModelPredictor:
             if not currency_label:
                 continue
 
-            model_path = metadata_path.parent / "ensemble_model.pkl"
+            model_dir = metadata_path.parent
+            model_path = model_dir / "ensemble_model.pkl"
             if not model_path.exists():
                 self.logger.warning(f"Model file missing for {currency_label}: {model_path}")
                 continue
 
-            scaler_path = metadata_path.parent / "scaler.pkl"
+            scaler_path = model_dir / "scaler.pkl"
             artifact = ModelArtifact(
-                model_path=model_path,
+                model_dir=model_dir,
                 scaler_path=scaler_path if scaler_path.exists() else None,
                 metadata_path=metadata_path,
                 metadata=metadata,

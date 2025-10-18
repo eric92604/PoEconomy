@@ -125,7 +125,6 @@ class DirectModelPredictor(ModelPredictor):
                         # Create direct artifact
                         artifact = DirectModelArtifact(
                             model_dir=model_dir,
-                            model_path=model_file,
                             scaler_path=scaler_file if scaler_file.exists() else None,
                             metadata_path=metadata_file,
                             metadata=metadata,
@@ -193,7 +192,7 @@ class DirectModelPredictor(ModelPredictor):
         """Load a model directly from filesystem."""
         try:
             # Load model directly from file
-            model = joblib.load(artifact.model_path)
+            model = joblib.load(artifact.model_dir / "ensemble_model.pkl")
             return model
         except Exception as e:
             self.logger.error(f"Failed to load model from filesystem: {e}")
@@ -307,7 +306,6 @@ class DirectModelPredictor(ModelPredictor):
                             prediction_lower=lower,
                             prediction_upper=upper,
                             features_used=len(feature_columns),
-                            model_path=f"{artifact.model_dir.name}:{artifact.model_path.name}",
                             metadata=artifact.metadata,
                         )
 
@@ -327,7 +325,6 @@ class DirectModelPredictor(ModelPredictor):
 class DirectModelArtifact:
     """Model artifact stored directly in filesystem."""
     model_dir: Path
-    model_path: Path
     scaler_path: Optional[Path]
     metadata_path: Path
     metadata: Dict[str, Any]
@@ -505,7 +502,6 @@ def _write_predictions(
                         "currency_league": currency_league,  # Primary key (partition key)
                         "timestamp": timestamp_epoch,  # Sort key (epoch seconds)
                         "horizon": result.horizon,  # Additional field for filtering
-                        "prediction_key": cache_key,
                         "currency": result.currency,
                         "league": result.league,
                         "pay_currency": result.pay_currency,
@@ -517,8 +513,6 @@ def _write_predictions(
                         "prediction_lower": safe_decimal(result.prediction_lower, precision=2),  # 2 decimal places for prices
                         "prediction_upper": safe_decimal(result.prediction_upper, precision=2),  # 2 decimal places for prices
                         "features_used": result.features_used,
-                        "model_path": result.model_path,
-                        "created_at": result.prediction_timestamp.isoformat() if hasattr(result.prediction_timestamp, 'isoformat') else str(result.prediction_timestamp),
                     }
                     
                     # Add TTL if specified
@@ -542,28 +536,6 @@ def _write_predictions(
                             item["metadata"] = "{}"
                     else:
                         item["metadata"] = "{}"
-                    
-                    # Store the full prediction data as JSON
-                    try:
-                        item["prediction_data"] = json.dumps(payload)
-                    except Exception as e:
-                        logger.warning(f"Failed to serialize prediction data for {result.currency}: {e}")
-                        # Create a simplified version without problematic fields
-                        simple_payload = {
-                            "currency": result.currency,
-                            "league": result.league,
-                            "horizon": result.horizon,
-                            "current_price": result.current_price,
-                            "predicted_price": result.predicted_price,
-                            "price_change_percent": result.price_change_percent,
-                            "prediction_timestamp": result.prediction_timestamp,
-                            "confidence_score": result.confidence_score,
-                            "prediction_lower": result.prediction_lower,
-                            "prediction_upper": result.prediction_upper,
-                            "features_used": result.features_used,
-                            "model_path": result.model_path,
-                        }
-                        item["prediction_data"] = json.dumps(simple_payload)
                     
                     # Filter out None values and put the item
                     clean_item = {k: v for k, v in item.items() if v is not None}

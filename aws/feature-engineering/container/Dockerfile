@@ -10,8 +10,17 @@ RUN ln -sf /usr/bin/python3.11 /usr/bin/python && \
     ln -sf /usr/bin/pip3.11 /usr/bin/pip
 
 # Install dependencies required for feature engineering
+# Use same versions as Lambda/Training containers for consistency
 COPY aws/feature-engineering/container/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir \
+    "numpy>=1.21.0,<2.0.0" \
+    "pandas>=1.5.0,<2.0.0" \
+    "python-dateutil>=2.8.0" \
+    "pytz>=2023.3" \
+    "scikit-learn>=1.3.0" \
+    "boto3>=1.28.0" \
+    "requests>=2.31.0" \
+    "pyarrow>=10.0.0"
 
 # Copy the ML training code
 COPY ml /var/task/ml

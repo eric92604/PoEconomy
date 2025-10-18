@@ -1,22 +1,20 @@
-# Lambda Container .dockerignore
-# This file controls what gets included in the Docker build context for Lambda functions
+# Training Container .dockerignore
+# This file controls what gets included in the Docker build context for training
 
-# Exclude large model files from build context (models downloaded during build)
+# Exclude large model files (models are downloaded during training)
 models_context/
-training_data/
+s3_backup/
+models/
 
-# Exclude most of s3_backup, only include specific experiment models
-s3_backup/processed_data/
-s3_backup/training-data/
-
-# Exclude other AWS containers (keep only lambda)
+# Exclude other AWS containers (keep only training)
+aws/lambda/
 aws/feature-engineering/
-aws/training/
 aws/cloudformation/
 aws/scripts/
 
-# Exclude cloudflare and other non-essential directories
+# Exclude cloudflare, frontend, and other non-essential directories
 cloudflare/
+frontend/
 .github/
 .cursor/
 

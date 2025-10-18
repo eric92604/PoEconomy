@@ -13,8 +13,9 @@ aws/training/
 aws/cloudformation/
 aws/scripts/
 
-# Exclude cloudflare and other non-essential directories
+# Exclude cloudflare, frontend, and other non-essential directories
 cloudflare/
+frontend/
 .github/
 .cursor/
 
