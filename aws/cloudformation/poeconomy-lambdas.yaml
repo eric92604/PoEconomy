@@ -145,6 +145,64 @@ Resources:
         - Key: App
           Value: PoEconomy
 
+  DailyPricesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'poeconomy-${EnvironmentName}-daily-prices'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: currency_league
+          AttributeType: S
+        - AttributeName: date
+          AttributeType: S
+        - AttributeName: currency
+          AttributeType: S
+        - AttributeName: league
+          AttributeType: S
+      KeySchema:
+        - AttributeName: currency_league
+          KeyType: HASH
+        - AttributeName: date
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: currency-date-index
+          KeySchema:
+            - AttributeName: currency
+              KeyType: HASH
+            - AttributeName: date
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - league
+              - open_price
+              - high_price
+              - low_price
+              - close_price
+              - avg_price
+              - volume
+              - price_change_percent
+        - IndexName: league-date-index
+          KeySchema:
+            - AttributeName: league
+              KeyType: HASH
+            - AttributeName: date
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - currency
+              - open_price
+              - high_price
+              - low_price
+              - close_price
+              - avg_price
+              - volume
+      # No TTL - historical data should persist
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
 
   # Ingestion Lambda
   IngestionLogGroup:
@@ -541,6 +599,43 @@ Resources:
         - Key: App
           Value: PoEconomy
 
+  DailyAggregationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-daily-aggregation-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt LivePricesTable.Arn
+                  - !GetAtt DailyPricesTable.Arn
+                  - !GetAtt CurrencyMetadataTable.Arn
+                  - !GetAtt LeagueMetadataTable.Arn
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
   PredictionRefreshLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -583,6 +678,28 @@ Resources:
         - Key: App
           Value: PoEconomy
 
+  DailyAggregationLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'poeconomy-${EnvironmentName}-daily-aggregation'
+      Description: Aggregate hourly price data into daily price data
+      PackageType: Image
+      Role: !GetAtt DailyAggregationLambdaRole.Arn
+      Code:
+        ImageUri: !Ref LambdaImageUri
+      ImageConfig:
+        Command: ["lambda.daily_aggregation_handler.lambda_handler"]
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          DYNAMO_CURRENCY_METADATA_TABLE: !Ref CurrencyMetadataTable
+          DYNAMO_CURRENCY_PRICES_TABLE: !Ref LivePricesTable
+          DYNAMO_DAILY_PRICES_TABLE: !Ref DailyPricesTable
+          LOG_LEVEL: "INFO"
+      Tags:
+        - Key: App
+          Value: PoEconomy
 
   # Dead Letter Queue for Prediction Refresh Lambda
   PredictionRefreshDLQ:
@@ -595,6 +712,31 @@ Resources:
           Value: PoEconomy
         - Key: Purpose
           Value: DeadLetterQueue
+
+  # Daily Aggregation EventBridge Rule (runs daily at 2 AM UTC)
+  DailyAggregationEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'poeconomy-${EnvironmentName}-daily-aggregation-rule'
+      Description: Trigger daily price aggregation
+      ScheduleExpression: "cron(0 2 * * ? *)"  # Daily at 2 AM UTC
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt DailyAggregationLambdaFunction.Arn
+          Id: "DailyAggregationTarget"
+          Input: '{"action": "aggregate"}'
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # Permission for EventBridge to invoke the daily aggregation Lambda
+  DailyAggregationEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DailyAggregationLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailyAggregationEventRule.Arn
 
   # DynamoDB Streams trigger disabled - prediction refresh is now triggered by ingestion Lambda
   # PredictionRefreshStreamMapping:
@@ -693,6 +835,7 @@ Resources:
           DYNAMO_CURRENCY_METADATA_TABLE: !Ref CurrencyMetadataTable
           DYNAMO_PREDICTIONS_TABLE: !Ref PredictionsTable
           DYNAMO_LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
+          DYNAMO_DAILY_PRICES_TABLE: !Ref DailyPricesTable
           PREDICTION_CACHE_TTL_HOURS: '2'
           # Inference configuration
           MAX_LEAGUE_DAYS: "200"
@@ -818,6 +961,12 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-LeagueMetadataTable'
 
+  DailyPricesTableName:
+    Description: DynamoDB table for daily price aggregations
+    Value: !Ref DailyPricesTable
+    Export:
+      Name: !Sub '${AWS::StackName}-DailyPricesTable'
+
   IngestionLambdaName:
     Description: Name of the ingestion Lambda function
     Value: !Ref IngestionLambdaFunction
@@ -829,6 +978,10 @@ Outputs:
   PredictionRefreshLambdaName:
     Description: Name of the prediction refresh Lambda function
     Value: !Ref PredictionRefreshLambdaFunction
+
+  DailyAggregationLambdaName:
+    Description: Name of the daily aggregation Lambda function
+    Value: !Ref DailyAggregationLambdaFunction
 
   PredictionApiLambdaName:
     Description: Name of the API Gateway Lambda function
