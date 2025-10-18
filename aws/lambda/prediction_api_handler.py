@@ -71,6 +71,8 @@ def lambda_handler(event: dict, _context) -> dict:
             response_body, status = _handle_latest_predictions(request.query_params)
         elif request.path == "/prices/live" and request.http_method == "GET":
             response_body, status = _handle_live_prices(request.query_params)
+        elif request.path == "/prices/historical" and request.http_method == "GET":
+            response_body, status = _handle_historical_prices(request.query_params)
         else:
             response_body = {"message": f"Unsupported route {request.http_method} {request.path}"}
             status = HTTPStatus.NOT_FOUND
@@ -159,27 +161,29 @@ class ClientFacingError(Exception):
 
 def _list_currencies() -> Dict[str, Any]:
     assert _METADATA_TABLE is not None
-    response = _METADATA_TABLE.scan(ProjectionExpression="currency_name, league, metadata_json, last_updated")
+    response = _METADATA_TABLE.scan(ProjectionExpression="currency, league, last_updated, icon_url, is_available, category")
     items = response.get("Items", [])
     while "LastEvaluatedKey" in response:
         response = _METADATA_TABLE.scan(
-            ProjectionExpression="currency_name, league, metadata_json, last_updated",
+            ProjectionExpression="currency, league, last_updated, icon_url, is_available, category",
             ExclusiveStartKey=response["LastEvaluatedKey"],
         )
         items.extend(response.get("Items", []))
 
     currencies: Dict[str, Dict[str, Any]] = {}
     for item in items:
-        currency = item.get("currency_name")
+        currency = item.get("currency")
         league = item.get("league")
         if not currency or not league:
             continue
-        metadata = {}
-        if item.get("metadata_json"):
-            try:
-                metadata = json.loads(item["metadata_json"])
-            except json.JSONDecodeError:
-                metadata = {}
+        
+        # Create metadata from available fields
+        metadata = {
+            "last_updated": item.get("last_updated"),
+            "icon_url": item.get("icon_url"),
+            "is_available": item.get("is_available"),
+            "category": item.get("category")
+        }
         currencies.setdefault(currency, {})[league] = metadata
 
     return {"currencies": currencies}
@@ -467,7 +471,7 @@ def _format_prediction_item(item: Dict[str, Any], currency: str, league: str, ho
     """
     # Handle both old and new data formats
     if "prediction_data" in item:
-        # Old format: prediction_data field contains JSON
+        # Old format: prediction_data field contains JSON (legacy support)
         payload = item.get("prediction_data")
         if isinstance(payload, str):
             try:
@@ -488,7 +492,6 @@ def _format_prediction_item(item: Dict[str, Any], currency: str, league: str, ho
             "prediction_lower": float(item.get("prediction_lower", 0)) if item.get("prediction_lower") else None,
             "prediction_upper": float(item.get("prediction_upper", 0)) if item.get("prediction_upper") else None,
             "features_used": item.get("features_used", []),
-            "model_path": item.get("model_path", ""),
         }
     
     # Set common fields
@@ -560,7 +563,6 @@ def _fetch_cached_prediction(currency: str, league: Optional[str], horizon: str)
             "prediction_lower": float(item.get("prediction_lower", 0)) if item.get("prediction_lower") else None,
             "prediction_upper": float(item.get("prediction_upper", 0)) if item.get("prediction_upper") else None,
             "features_used": item.get("features_used", []),
-            "model_path": item.get("model_path", ""),
         }
     
     # Set common fields
@@ -697,6 +699,142 @@ def _handle_live_prices(query_params: Dict[str, str]) -> Tuple[Dict[str, Any], H
     _PRICES_CACHE[cache_key] = (prices_data, current_time)
     
     return prices_data, HTTPStatus.OK
+
+
+def _handle_historical_prices(query_params: Dict[str, str]) -> Tuple[Dict[str, Any], HTTPStatus]:
+    """Handle historical daily price data endpoint.
+    
+    GET /prices/historical?currency=Divine Orb&league=Mercenaries&start_date=2024-01-01&end_date=2024-01-31&limit=100
+    
+    Args:
+        query_params: Query parameters from the request
+        
+    Returns:
+        Tuple of (response_body, status_code)
+    """
+    currency = query_params.get("currency")
+    league = query_params.get("league")
+    start_date = query_params.get("start_date")
+    end_date = query_params.get("end_date")
+    limit = int(query_params.get("limit", "100"))
+    
+    # Validate required parameters
+    if not currency:
+        raise ClientFacingError("currency parameter is required")
+    if not league:
+        raise ClientFacingError("league parameter is required")
+    if not start_date:
+        raise ClientFacingError("start_date parameter is required (YYYY-MM-DD format)")
+    
+    # Validate date format
+    try:
+        datetime.strptime(start_date, "%Y-%m-%d")
+        if end_date:
+            datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError:
+        raise ClientFacingError("Date must be in YYYY-MM-DD format")
+    
+    # Validate limit
+    if limit <= 0 or limit > 1000:
+        raise ClientFacingError("limit must be between 1 and 1000")
+    
+    # Fetch historical prices
+    historical_data = _fetch_historical_prices_from_db(
+        currency=currency,
+        league=league,
+        start_date=start_date,
+        end_date=end_date,
+        limit=limit
+    )
+    
+    return historical_data, HTTPStatus.OK
+
+
+def _fetch_historical_prices_from_db(
+    currency: str,
+    league: str,
+    start_date: str,
+    end_date: str = None,
+    limit: int = 100
+) -> Dict[str, Any]:
+    """Fetch historical daily prices from DynamoDB.
+    
+    Args:
+        currency: Currency name
+        league: League name
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format (optional)
+        limit: Maximum number of results
+        
+    Returns:
+        Dictionary containing historical price data
+    """
+    # Get the daily prices table name from environment
+    daily_prices_table_name = os.getenv("DYNAMO_DAILY_PRICES_TABLE", "poeconomy-daily-prices")
+    
+    try:
+        # Initialize DynamoDB resource
+        dynamodb = boto3.resource("dynamodb", region_name=_APP_ENV.region_name)
+        daily_prices_table = dynamodb.Table(daily_prices_table_name)
+        
+        currency_league = f"{currency}#{league}"
+        
+        # Query the daily prices table
+        if end_date:
+            response = daily_prices_table.query(
+                KeyConditionExpression=Key("currency_league").eq(currency_league) & 
+                                     Key("date").between(start_date, end_date),
+                ScanIndexForward=True,  # Oldest first
+                Limit=limit
+            )
+        else:
+            response = daily_prices_table.query(
+                KeyConditionExpression=Key("currency_league").eq(currency_league) & 
+                                     Key("date").gte(start_date),
+                ScanIndexForward=True,  # Oldest first
+                Limit=limit
+            )
+        
+        items = response.get("Items", [])
+        
+        # Format the response
+        historical_prices = []
+        for item in items:
+            price_data = {
+                "date": item.get("date"),
+                "open_price": float(item.get("open_price", 0)),
+                "high_price": float(item.get("high_price", 0)),
+                "low_price": float(item.get("low_price", 0)),
+                "close_price": float(item.get("close_price", 0)),
+                "avg_price": float(item.get("avg_price", 0)),
+                "volume": item.get("volume", 0),
+                "price_change_percent": float(item.get("price_change_percent", 0))
+            }
+            historical_prices.append(price_data)
+        
+        return {
+            "currency": currency,
+            "league": league,
+            "start_date": start_date,
+            "end_date": end_date,
+            "count": len(historical_prices),
+            "prices": historical_prices,
+            "source": "daily_aggregation",
+            "last_updated": _get_latest_price_update_time()
+        }
+        
+    except Exception as e:
+        LOGGER.error(f"Error fetching historical prices: {e}")
+        return {
+            "currency": currency,
+            "league": league,
+            "start_date": start_date,
+            "end_date": end_date,
+            "count": 0,
+            "prices": [],
+            "error": str(e),
+            "source": "daily_aggregation"
+        }
 
 
 def _fetch_live_prices_from_db(
