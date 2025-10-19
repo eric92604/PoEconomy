@@ -192,7 +192,7 @@ class BaseModel(ABC):
                 for key, value in self.params.items():
                     if key.endswith(f"_{name}"):
                         return value
-                return (low + high) / 2
+                raise ValueError(f"Parameter '{name}' not found in optimized parameters. This indicates agnostic optimization failure.")
             
             def suggest_int(self, name: str, low: int, high: int, **kwargs) -> int:
                 # Try exact match first, then try with prefix stripped
@@ -202,7 +202,7 @@ class BaseModel(ABC):
                 for key, value in self.params.items():
                     if key.endswith(f"_{name}"):
                         return value
-                return (low + high) // 2
+                raise ValueError(f"Parameter '{name}' not found in optimized parameters. This indicates agnostic optimization failure.")
             
             def suggest_categorical(self, name: str, choices: List[Any], **kwargs) -> Any:
                 # Try exact match first, then try with prefix stripped
@@ -212,7 +212,7 @@ class BaseModel(ABC):
                 for key, value in self.params.items():
                     if key.endswith(f"_{name}"):
                         return value
-                return choices[0]
+                raise ValueError(f"Parameter '{name}' not found in optimized parameters. This indicates agnostic optimization failure.")
         
         return self._create_model(MockTrial(params))
     
@@ -241,11 +241,11 @@ class BaseModel(ABC):
                     callbacks=[lgb.early_stopping(self.config.early_stopping_rounds, verbose=False)]
                 )
             elif isinstance(self.model, xgb.XGBRegressor):
-                # XGBoost - disable early stopping for version compatibility
-                # Note: Early stopping API varies between XGBoost versions
+                # XGBoost early stopping
                 self.model.fit(
                     X, y,
                     eval_set=[(X_val, y_val)],
+                    early_stopping_rounds=self.config.early_stopping_rounds,
                     verbose=False
                 )
             else:
@@ -923,47 +923,33 @@ class ModelTrainer:
             if self.config.use_lightgbm:
                 lgb_model = LightGBMModel(self.config, self.logger)
                 
-                # Get optimized parameters if available
+                # Get optimized parameters
                 if self.hyperparameter_optimizer.is_optimized("lightgbm"):
                     optimized_params = self.hyperparameter_optimizer.get_optimized_params("lightgbm")
                     lgb_model.model = lgb_model._create_model_with_params(optimized_params)
                     if self.logger:
                         self.logger.info(f"Using agnostic LightGBM params for {currency}")
                 else:
-                    # Fallback to default parameters
-                    lgb_model.model = lgb_model._create_model()
-                    if self.logger:
-                        self.logger.warning(f"No agnostic LightGBM params found, using defaults for {currency}")
+                    raise RuntimeError(f"Agnostic LightGBM optimization not completed for {currency}. This indicates a configuration or optimization failure.")
                 
                 models.append(lgb_model)
             
             if self.config.use_xgboost:
                 xgb_model = XGBoostModel(self.config, self.logger)
                 
-                # Get optimized parameters if available
+                # Get optimized parameters
                 if self.hyperparameter_optimizer.is_optimized("xgboost"):
                     optimized_params = self.hyperparameter_optimizer.get_optimized_params("xgboost")
                     xgb_model.model = xgb_model._create_model_with_params(optimized_params)
                     if self.logger:
                         self.logger.info(f"Using agnostic XGBoost params for {currency}")
                 else:
-                    # Fallback to default parameters
-                    xgb_model.model = xgb_model._create_model()
-                    if self.logger:
-                        self.logger.warning(f"No agnostic XGBoost params found, using defaults for {currency}")
+                    raise RuntimeError(f"Agnostic XGBoost optimization not completed for {currency}. This indicates a configuration or optimization failure.")
                 
                 models.append(xgb_model)  # type: ignore[arg-type]
         else:
-            # Use default parameters for fast training
-            if self.config.use_lightgbm:
-                lgb_model = LightGBMModel(self.config, self.logger)
-                lgb_model.model = lgb_model._create_model()
-                models.append(lgb_model)
-            
-            if self.config.use_xgboost:
-                xgb_model = XGBoostModel(self.config, self.logger)
-                xgb_model.model = xgb_model._create_model()
-                models.append(xgb_model)  # type: ignore[arg-type]
+            # This should not happen if agnostic optimization is properly configured
+            raise RuntimeError(f"Hyperparameter optimization is disabled (n_trials={self.config.n_trials}). This will result in poor model performance. Set n_trials > 1 to enable optimization.")
         
         ensemble = EnsembleModel(models, logger=self.logger)  # type: ignore[arg-type]
         ensemble.fit(X_train, y_train, X_val, y_val)
@@ -1080,10 +1066,10 @@ def save_model_artifacts(
     if result.model is None:
         raise ValueError(f"Model is None for currency {currency}")
     
-    # Save model with compression (Level 3: 40-50% size reduction, minimal performance impact)
+    # Save model without compression
     model_path = output_dir / "ensemble_model.pkl"
     try:
-        joblib.dump(result.model, model_path, compress=3)
+        joblib.dump(result.model, model_path, compress=0)
         saved_files['model'] = str(model_path)
         
         # Calculate model size
@@ -1094,10 +1080,10 @@ def save_model_artifacts(
     except Exception as e:
         raise RuntimeError(f"Failed to save model for {currency}: {e}")
     
-    # Save scaler with compression if exists
+    # Save scaler without compression if exists
     if result.scaler is not None:
         scaler_path = output_dir / "scaler.pkl"
-        joblib.dump(result.scaler, scaler_path, compress=3)
+        joblib.dump(result.scaler, scaler_path, compress=0)
         saved_files['scaler'] = str(scaler_path)
     
     # Save minimal metadata (only what's needed for inference)
