@@ -50,6 +50,9 @@ class ModelTrainingPipeline:
         """
         self.config = config
         
+        # Get S3 bucket configuration
+        data_lake_bucket = os.getenv('DATA_LAKE_BUCKET', '')
+        
         # Setup logging
         self.logger = setup_ml_logging(
             name="CurrencyTrainer",
@@ -66,9 +69,6 @@ class ModelTrainingPipeline:
         )
         # Initialize data source for loading processed data
         from ml.utils.data_sources import create_s3_data_source
-        
-        # Create S3 data source for processed data
-        data_lake_bucket = os.getenv('DATA_LAKE_BUCKET', '')
         s3_config = {
             'data_lake_bucket': data_lake_bucket,
             'processed_data_prefix': 'processed_data/'
@@ -82,6 +82,9 @@ class ModelTrainingPipeline:
         self.config.paths.models_dir = experiment_models_dir
         
         self.logger.info(f"Models will be saved to: {experiment_models_dir}")
+        
+        # Store S3 configuration for log uploads
+        self.data_lake_bucket = data_lake_bucket
         
         # Initialize tracking
         self.results: List[Any] = []
@@ -191,7 +194,13 @@ class ModelTrainingPipeline:
             
             # Perform agnostic hyperparameter optimization if enabled
             if self.config.model.n_trials > 1 and len(target_currencies) > 0:
+                self.logger.info(f"Starting agnostic hyperparameter optimization with n_trials={self.config.model.n_trials}")
                 self._perform_agnostic_hyperparameter_optimization(target_currencies)
+            else:
+                if self.config.model.n_trials <= 1:
+                    raise RuntimeError(f"Hyperparameter optimization is disabled (n_trials={self.config.model.n_trials}). This will result in poor model performance. Set n_trials > 1 to enable optimization.")
+                if len(target_currencies) == 0:
+                    raise RuntimeError("No target currencies found for training. This indicates a data selection or filtering issue.")
             
             # Use parallel training
             max_workers = self.config.model.max_currency_workers
@@ -221,10 +230,18 @@ class ModelTrainingPipeline:
                 }
             )
             
+            # Upload logs to S3 after training completion
+            self._upload_logs_to_s3()
+            
             return self.results
             
         except Exception as e:
             self.logger.error("Training pipeline failed", exception=e)
+            # Still try to upload logs even if training failed
+            try:
+                self._upload_logs_to_s3()
+            except Exception as upload_error:
+                self.logger.error(f"Failed to upload logs to S3: {upload_error}")
             raise
     
     def _train_currencies_parallel(self, target_currencies: List[Dict[str, Any]], 
@@ -565,14 +582,28 @@ class ModelTrainingPipeline:
             self.logger.warning("No valid sample data for agnostic optimization, skipping...")
             return
         
-        # Perform agnostic hyperparameter optimization
-        self.model_trainer.optimize_hyperparameters_agnostic(sample_data)
-        
-        # Log hyperparameter optimization results
-        self.logger.info(f"Completed agnostic hyperparameter optimization using {len(sample_data)} sample currencies")
-        
-        if self.logger:
-            self.logger.info("Agnostic hyperparameter optimization completed successfully")
+        try:
+            # Perform agnostic hyperparameter optimization
+            self.logger.info(f"Starting agnostic optimization with {len(sample_data)} sample datasets")
+            self.model_trainer.optimize_hyperparameters_agnostic(sample_data)
+            
+            # Log hyperparameter optimization results
+            self.logger.info(f"Completed agnostic hyperparameter optimization using {len(sample_data)} sample currencies")
+            
+            # Verify optimization results
+            if self.model_trainer.hyperparameter_optimizer.is_optimized("lightgbm"):
+                self.logger.info("LightGBM agnostic optimization completed successfully")
+            else:
+                self.logger.warning("LightGBM agnostic optimization failed or was skipped")
+                
+            if self.model_trainer.hyperparameter_optimizer.is_optimized("xgboost"):
+                self.logger.info("XGBoost agnostic optimization completed successfully")
+            else:
+                self.logger.warning("XGBoost agnostic optimization failed or was skipped")
+                
+        except Exception as e:
+            self.logger.error(f"Agnostic hyperparameter optimization failed: {e}")
+            self.logger.warning("Continuing with default parameters...")
     
     def _load_processed_data(self) -> Optional[pd.DataFrame]:
         """
@@ -831,7 +862,8 @@ class ModelTrainingPipeline:
                 }
                 
             else:
-                # Single-horizon training (fallback)
+                # Single-horizon training (should not happen with proper multi-horizon setup)
+                self.logger.warning(f"Using single-horizon training fallback for {currency_name}. This indicates a configuration issue.")
                 target_col = target_column if isinstance(target_column, str) else target_column[0]
                 y = processed_data[target_col].values
                 
@@ -1246,6 +1278,74 @@ class ModelTrainingPipeline:
                        max(1, self.processing_stats['total_currencies'])) * 100
         self.logger.info(f"📈 Success rate: {success_rate:.1f}%")
         self.logger.info("=" * 50)
+
+    def _upload_logs_to_s3(self) -> None:
+        """
+        Upload training logs to S3 bucket.
+        
+        This method uploads all log files generated during training to the S3 data lake bucket
+        for persistent storage and analysis.
+        """
+        if not self.config.logging.upload_logs_to_s3:
+            self.logger.info("S3 log upload disabled in configuration")
+            return
+            
+        if not self.data_lake_bucket:
+            self.logger.warning("DATA_LAKE_BUCKET not configured, skipping log upload to S3")
+            return
+        
+        try:
+            import boto3
+            from botocore.exceptions import ClientError
+            
+            # Create S3 client
+            s3_client = boto3.client('s3')
+            
+            # Get all log files from the logs directory
+            logs_dir = Path(self.config.paths.logs_dir)
+            if not logs_dir.exists():
+                self.logger.warning(f"Logs directory does not exist: {logs_dir}")
+                return
+            
+            log_files = list(logs_dir.glob("*.log"))
+            if not log_files:
+                self.logger.warning("No log files found to upload")
+                return
+            
+            # Upload each log file
+            uploaded_count = 0
+            for log_file in log_files:
+                try:
+                    # Create S3 key with experiment ID and timestamp
+                    s3_key = f"{self.config.logging.s3_logs_prefix}/{self.config.experiment.experiment_id}/{log_file.name}"
+                    
+                    # Upload file
+                    s3_client.upload_file(str(log_file), self.data_lake_bucket, s3_key)
+                    self.logger.info(f"Uploaded log file to s3://{self.data_lake_bucket}/{s3_key}")
+                    uploaded_count += 1
+                    
+                except ClientError as e:
+                    self.logger.error(f"Failed to upload {log_file.name} to S3: {e}")
+                except Exception as e:
+                    self.logger.error(f"Unexpected error uploading {log_file.name}: {e}")
+            
+            # Upload training report if it exists
+            report_file = logs_dir / f"training_report_{self.config.experiment.experiment_id}.json"
+            if report_file.exists():
+                try:
+                    s3_key = f"training_reports/{self.config.experiment.experiment_id}/training_report.json"
+                    s3_client.upload_file(str(report_file), self.data_lake_bucket, s3_key)
+                    self.logger.info(f"Uploaded training report to s3://{self.data_lake_bucket}/{s3_key}")
+                    uploaded_count += 1
+                except Exception as e:
+                    self.logger.error(f"Failed to upload training report: {e}")
+            
+            self.logger.info(f"Successfully uploaded {uploaded_count} log files to S3")
+            
+        except ImportError:
+            self.logger.error("boto3 not available, cannot upload logs to S3")
+        except Exception as e:
+            self.logger.error(f"Failed to upload logs to S3: {e}")
 
 
 def parse_arguments() -> argparse.Namespace:

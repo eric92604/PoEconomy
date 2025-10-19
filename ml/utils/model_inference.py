@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import json
 import math
 
@@ -147,15 +147,19 @@ class ModelPredictor:
                     if processed_df is not None and not processed_df.empty:
                         X, feature_rows = self._extract_feature_matrix(processed_df, feature_columns)
                         if len(feature_rows) > 0:
-                            # Load scaler (automatically handles compressed files)
+                            # Load scaler
                             scaler = joblib.load(artifact.scaler_path) if artifact.scaler_path and artifact.scaler_path.exists() else None
                             if scaler is not None:
                                 X = scaler.transform(X)
 
-                            # Load model (automatically handles compressed files from training pipeline)
+                            # Load model
                             model = joblib.load(artifact.model_dir / "ensemble_model.pkl")
+                            
                             latest_features = X[-1].reshape(1, -1)
+                            
+                            # Make prediction
                             prediction = model.predict(latest_features)
+                            
                             prediction_value = float(np.asarray(prediction).ravel()[0])
                             
                             # Validate prediction value
@@ -234,8 +238,8 @@ class ModelPredictor:
         except Exception:
             pass
         
-        # Default league
-        return "Mercenaries"
+        # No fallback - this should not happen in production
+        raise RuntimeError("Could not determine current league from data source. This indicates a data source configuration issue.")
 
     def _calculate_league_day(self, league: str) -> int:
         """Calculate the current league day for the given league."""
@@ -250,7 +254,8 @@ class ModelPredictor:
         except Exception as e:
             self.logger.warning(f"Could not calculate league day for {league}: {e}")
         
-        return 1  # Default to day 1
+        # No fallback - this should not happen in production
+        raise RuntimeError(f"Could not calculate league day for {league}. This indicates a league metadata configuration issue.")
 
     def _get_current_price(self, currency: str, league: str) -> Optional[float]:
         """Get the most recent price for a currency using primary key query."""
@@ -259,7 +264,8 @@ class ModelPredictor:
             from boto3.dynamodb.conditions import Key
             # For now, return a default price since we don't have direct table access
             # This could be enhanced to use the data source's query methods
-            return 1.0  # Default price
+            # No fallback - this should not happen in production
+            raise RuntimeError(f"Could not get current price for {currency} in {league}. This indicates a data source configuration issue.")
         except Exception as e:
             self.logger.warning(f"Failed to get current price for {currency}: {e}")
         return None

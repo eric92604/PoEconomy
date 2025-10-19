@@ -178,6 +178,10 @@ class LoggingConfig:
     console_logging: bool = True
     file_logging: bool = True
     
+    # S3 log upload configuration
+    upload_logs_to_s3: bool = True
+    s3_logs_prefix: str = "training_logs"
+    
     # Suppress external library logs
     suppress_external: bool = True
     suppress_lightgbm: bool = True
@@ -368,10 +372,10 @@ def get_development_config() -> MLConfig:
     config.experiment.tags = ["development"]
     
     # Enhanced data quality settings for development
-    config.data.min_records_threshold = 5  # Reduced from 40
+    config.data.min_records_threshold = 5 
     config.processing.outlier_removal = True
     config.processing.robust_scaling = True
-    config.processing.max_missing_ratio = 0.2  # Stricter missing data threshold
+    config.processing.max_missing_ratio = 0.2
     
     return config
 
@@ -387,7 +391,7 @@ def get_production_config() -> MLConfig:
     config.experiment.tags = ["production"]
     
     # Enhanced data quality settings for production
-    config.data.min_records_threshold = 5  # Reduced from 50
+    config.data.min_records_threshold = 50  # Increased for better model quality
     config.processing.outlier_removal = True
     config.processing.robust_scaling = True
     config.processing.max_missing_ratio = 0.3  # Allow some missing data for production
@@ -416,7 +420,7 @@ def get_all_currencies_config() -> MLConfig:
     config = get_production_config()
     
     # Lower threshold for more currencies
-    config.data.min_records_threshold = 5  # Reduced from 50
+    config.data.min_records_threshold = 30  # Balanced threshold for more currencies
     
     # Adjust processing for larger scale
     
@@ -434,7 +438,7 @@ def get_high_value_config() -> MLConfig:
     config = get_production_config()
     
     # Lower threshold for rare items
-    config.data.min_records_threshold = 5  # Reduced from 50
+    config.data.min_records_threshold = 20  # Balanced threshold for rare items
     
     # Experiment settings
     import pandas as pd
