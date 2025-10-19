@@ -1,0 +1,205 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: PoEconomy Prediction Refresh Lambda function and DynamoDB table
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[a-zA-Z0-9-]+'
+    Description: Environment identifier (e.g. dev, staging, production)
+  BaseStackName:
+    Type: String
+    Description: Name of the base stack to import data lake bucket from
+  LambdaImageUri:
+    Type: String
+    Description: Full ECR image URI for Lambda functions (including tag)
+  IngestionStackName:
+    Type: String
+    Description: Name of the ingestion stack to import DynamoDB tables from
+
+Resources:
+  # DynamoDB Table for Predictions
+  PredictionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'poeconomy-${EnvironmentName}-predictions'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: currency_league
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+        - AttributeName: currency
+          AttributeType: S
+        - AttributeName: horizon
+          AttributeType: S
+      KeySchema:
+        - AttributeName: currency_league
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: currency-horizon-index
+          KeySchema:
+            - AttributeName: currency
+              KeyType: HASH
+            - AttributeName: horizon
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - league
+              - predicted_price
+              - price_change_percent
+              - confidence_score
+              - prediction_timestamp
+              - current_price
+              - prediction_lower
+              - prediction_upper
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # Dead Letter Queue for Prediction Refresh
+  PredictionRefreshDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'poeconomy-${EnvironmentName}-prediction-refresh-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # IAM Role for Prediction Refresh Lambda
+  PredictionRefreshLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-prediction-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt PredictionsTable.Arn
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/poeconomy-${EnvironmentName}-currency-metadata'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/poeconomy-${EnvironmentName}-live-prices'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub
+                    - 'arn:aws:s3:::${DataLakeBucket}'
+                    - DataLakeBucket: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${BaseStackName}-DataLakeBucket'
+                  - !Sub
+                    - 'arn:aws:s3:::${DataLakeBucket}/*'
+                    - DataLakeBucket: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${BaseStackName}-DataLakeBucket'
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt PredictionRefreshDLQ.Arn
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # CloudWatch Log Group
+  PredictionRefreshLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/poeconomy-${EnvironmentName}-prediction-refresh'
+      RetentionInDays: 14
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # Lambda Function
+  PredictionRefreshLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'poeconomy-${EnvironmentName}-prediction-refresh'
+      Description: Refresh cached predictions using trained models.
+      PackageType: Image
+      Role: !GetAtt PredictionRefreshLambdaRole.Arn
+      Code:
+        ImageUri: !Ref LambdaImageUri
+      ImageConfig:
+        Command: ["lambda.prediction_refresh_handler.lambda_handler"]
+      Timeout: 300
+      MemorySize: 1024
+      DeadLetterConfig:
+        TargetArn: !GetAtt PredictionRefreshDLQ.Arn
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref EnvironmentName
+          MODELS_BUCKET: 
+            Fn::ImportValue:
+              Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          MODELS_S3_PREFIX: models/currency
+          MODELS_DIR: /var/task/models
+          DYNAMO_CURRENCY_METADATA_TABLE: !Sub 'poeconomy-${EnvironmentName}-currency-metadata'
+          CURRENCY_METADATA_TABLE: !Sub 'poeconomy-${EnvironmentName}-currency-metadata'
+          LIVE_PRICES_TABLE: !Sub 'poeconomy-${EnvironmentName}-live-prices'
+          PREDICTIONS_TABLE: !Ref PredictionsTable
+          DATA_LAKE_BUCKET: 
+            Fn::ImportValue:
+              Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          LOG_LEVEL: INFO
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+Outputs:
+  PredictionsTableName:
+    Description: DynamoDB table for predictions
+    Value: !Ref PredictionsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-PredictionsTable'
+
+  PredictionRefreshLambdaName:
+    Description: Name of the prediction refresh Lambda function
+    Value: !Ref PredictionRefreshLambdaFunction
+
+  PredictionRefreshDLQ:
+    Description: Dead Letter Queue for failed prediction refresh Lambda invocations
+    Value: !Ref PredictionRefreshDLQ
+
+  LambdaInferenceImage:
+    Description: ECR image URI for the container-based inference Lambdas
+    Value: !Ref LambdaImageUri

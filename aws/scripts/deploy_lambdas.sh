@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Deploy PoEconomy Lambdas Infrastructure
-# This script deploys the lambdas stack containing Lambda functions, DynamoDB tables, and API Gateway
+# Deploy PoEconomy All Lambda Infrastructure
+# This script deploys all lambda stacks: ingestion, prediction, and API
 
 # Load shared configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,46 +9,33 @@ source "$SCRIPT_DIR/shared_config.sh"
 
 print_deployment_info
 
-echo "Using bucket names:"
-echo "  Data Lake: $DATA_LAKE_BUCKET_NAME"
-echo "  Models: $DATA_LAKE_BUCKET_NAME/models/"
+echo "========================================"
+echo "Deploying all Lambda infrastructure stacks"
+echo "========================================"
 
-# Ensure prerequisites
-ensure_prerequisites
-
-# Verify models in S3 for Lambda container
-verify_models_in_s3
-
-# Check for local backup and set MODELS_AVAILABLE
-echo "Checking for local model backup..."
-if verify_local_backup; then
-  echo "✅ Local models available"
-  export MODELS_AVAILABLE="true"
-else
-  echo "ℹ️  No local models found, will download from S3"
-  export MODELS_AVAILABLE="false"
+# Deploy ingestion stack first (contains DynamoDB tables)
+echo "Step 1: Deploying ingestion infrastructure..."
+if ! bash "$SCRIPT_DIR/deploy_ingestion.sh"; then
+    echo "❌ Ingestion deployment failed"
+    exit 1
 fi
 
-# Build and push Lambda container image
-echo "Building and pushing container images..."
-build_and_push_lambda_image
+# Deploy prediction stack second (depends on ingestion tables)
+echo "Step 2: Deploying prediction infrastructure..."
+if ! bash "$SCRIPT_DIR/deploy_prediction.sh"; then
+    echo "❌ Prediction deployment failed"
+    exit 1
+fi
 
-# Deploy lambdas infrastructure
-echo "Deploying lambdas infrastructure..."
-deploy_cloudformation_stack "$LAMBDAS_STACK_NAME" "$LAMBDAS_TEMPLATE" \
-  "EnvironmentName=$ENVIRONMENT" \
-  "LambdaImageUri=$INFERENCE_IMAGE_URI" \
-  "IngestionScheduleExpression=$INGESTION_CRON" \
-  "LeagueMetadataScheduleExpression=$LEAGUE_METADATA_CRON" \
-  "ApiGatewayStageName=$API_STAGE_NAME" \
-  "BaseStackName=$BASE_STACK_NAME" \
-  "ModelsAvailable=${MODELS_AVAILABLE:-false}"
+# Deploy API stack last (depends on both ingestion and prediction)
+echo "Step 3: Deploying API infrastructure..."
+if ! bash "$SCRIPT_DIR/deploy_api.sh"; then
+    echo "❌ API deployment failed"
+    exit 1
+fi
 
 echo "========================================"
-echo "Lambdas infrastructure deployment complete!"
+echo "All Lambda infrastructure deployment complete!"
 echo "========================================"
 
-# Update .env file with current stack outputs
-update_env_file
-
-echo "✅ Prediction API deployed successfully"
+echo "✅ All Lambda stacks deployed successfully"

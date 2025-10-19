@@ -13,13 +13,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # Stack names
 BASE_STACK_NAME="poeconomy-${ENVIRONMENT}-base"
-LAMBDAS_STACK_NAME="poeconomy-${ENVIRONMENT}-lambdas"
+INGESTION_STACK_NAME="poeconomy-${ENVIRONMENT}-ingestion"
+PREDICTION_STACK_NAME="poeconomy-${ENVIRONMENT}-prediction"
+API_STACK_NAME="poeconomy-${ENVIRONMENT}-api"
 FEATURE_ENGINEERING_STACK_NAME="poeconomy-${ENVIRONMENT}-feature-engineering"
 TRAINING_STACK_NAME="poeconomy-${ENVIRONMENT}-training"
 
 # Template paths
 BASE_TEMPLATE="$ROOT_DIR/aws/cloudformation/poeconomy-base.yaml"
-LAMBDAS_TEMPLATE="$ROOT_DIR/aws/cloudformation/poeconomy-lambdas.yaml"
+INGESTION_TEMPLATE="$ROOT_DIR/aws/cloudformation/poeconomy-ingestion.yaml"
+PREDICTION_TEMPLATE="$ROOT_DIR/aws/cloudformation/poeconomy-prediction.yaml"
+API_TEMPLATE="$ROOT_DIR/aws/cloudformation/poeconomy-api.yaml"
 FEATURE_ENGINEERING_TEMPLATE="$ROOT_DIR/aws/cloudformation/poeconomy-feature-engineering.yaml"
 TRAINING_TEMPLATE="$ROOT_DIR/aws/cloudformation/poeconomy-training.yaml"
 
@@ -40,6 +44,7 @@ DATA_LAKE_BUCKET_NAME="poeconomy-${ENVIRONMENT}-datalake"
 # Schedule expressions
 INGESTION_CRON="cron(0 * * * ? *)"
 LEAGUE_METADATA_CRON="cron(0 0 * * ? *)"
+DAILY_AGGREGATION_CRON="cron(0 2 * * ? *)"
 FEATURE_ENGINEERING_CRON="cron(0 2 * * ? *)"
 
 # API configuration
@@ -130,12 +135,17 @@ deploy_cloudformation_stack() {
   done
   
   # Deploy stack
-  "$AWS_CMD" cloudformation deploy \
+  if ! "$AWS_CMD" cloudformation deploy \
     --template-file "$template_file" \
     --stack-name "$stack_name" \
     --region "$REGION" \
     --capabilities CAPABILITY_NAMED_IAM \
-    --parameter-overrides "${param_overrides[@]}"
+    --parameter-overrides "${param_overrides[@]}"; then
+    echo "❌ CloudFormation deployment failed for stack: $stack_name"
+    return 1
+  fi
+  
+  echo "✅ CloudFormation stack deployed successfully: $stack_name"
 }
 
 print_deployment_info() {
@@ -293,13 +303,13 @@ build_lambda_image_with_models() {
   if [[ -f "$ROOT_DIR/.dockerignore" ]]; then
     cp "$ROOT_DIR/.dockerignore" "$ROOT_DIR/.dockerignore.backup"
   fi
-  cp "$ROOT_DIR/aws/lambda/container/.dockerignore" "$ROOT_DIR/.dockerignore"
+  cp "$ROOT_DIR/aws/lambdas/prediction/container/.dockerignore" "$ROOT_DIR/.dockerignore" 2>/dev/null || true
   
   # Build with explicit platform using standard docker build (not buildx)
   DOCKER_BUILDKIT=0 docker build \
     --platform linux/amd64 \
     --tag "poeconomy-${ENVIRONMENT}-lambda:latest" \
-    --file "$ROOT_DIR/aws/lambda/container/Dockerfile" \
+    --file "$ROOT_DIR/aws/lambdas/prediction/container/Dockerfile" \
     --no-cache \
     "$ROOT_DIR"
   
@@ -439,6 +449,127 @@ upload_training_data() {
   echo "✅ Training data uploaded successfully"
 }
 
+# Function to package and upload Lambda functions
+package_and_upload_lambda() {
+    local lambda_name=$1
+    local handler_file=$2
+    local zip_name=$3
+    
+    echo "Packaging $lambda_name Lambda function..."
+    
+    # Create temporary directory for packaging (Windows compatible)
+    if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
+        # Windows environment
+        local temp_dir=$(python -c "import tempfile; print(tempfile.mkdtemp())")
+    else
+        # Unix environment
+        local temp_dir=$(mktemp -d)
+    fi
+    local package_dir="$temp_dir/$lambda_name"
+    mkdir -p "$package_dir"
+    
+    # Determine the correct lambda directory based on function type
+    local lambda_dir
+    if [[ "$lambda_name" == "ingestion" || "$lambda_name" == "league_metadata" || "$lambda_name" == "daily_aggregation" ]]; then
+        lambda_dir="$SCRIPT_DIR/../lambdas/ingestion"
+    elif [[ "$lambda_name" == "api" ]]; then
+        lambda_dir="$SCRIPT_DIR/../lambdas/api"
+    elif [[ "$lambda_name" == "prediction_refresh" ]]; then
+        lambda_dir="$SCRIPT_DIR/../lambdas/prediction"
+    else
+        lambda_dir="$SCRIPT_DIR/../lambdas"
+    fi
+    
+    # Validate that required files exist
+    if [[ ! -f "$lambda_dir/$handler_file" ]]; then
+        echo "Error: Handler file not found: $lambda_dir/$handler_file"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    if [[ ! -f "$SCRIPT_DIR/../lambdas/config.py" ]]; then
+        echo "Error: Config file not found: $SCRIPT_DIR/../lambdas/config.py"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    if [[ ! -f "$SCRIPT_DIR/../lambdas/__init__.py" ]]; then
+        echo "Error: Init file not found: $SCRIPT_DIR/../lambdas/__init__.py"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    if [[ ! -f "$lambda_dir/requirements.txt" ]]; then
+        echo "Error: Requirements file not found: $lambda_dir/requirements.txt"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    # Copy Lambda source files
+    cp "$lambda_dir/$handler_file" "$package_dir/"
+    cp "$SCRIPT_DIR/../lambdas/config.py" "$package_dir/"
+    cp "$SCRIPT_DIR/../lambdas/__init__.py" "$package_dir/"
+    cp "$lambda_dir/requirements.txt" "$package_dir/"
+    
+    echo "Using requirements from $lambda_dir for $lambda_name"
+    
+    # Try to install dependencies, but continue if it fails
+    echo "Installing dependencies for $lambda_name..."
+    if pip install -r "$package_dir/requirements.txt" -t "$package_dir/" --quiet 2>/dev/null; then
+        echo "Dependencies installed successfully"
+    else
+        echo "Warning: Some dependencies failed to install, continuing with basic package..."
+        # Install only basic dependencies that are likely to work
+        pip install boto3 requests -t "$package_dir/" --quiet 2>/dev/null || true
+    fi
+    
+    # Create zip file using Python (cross-platform compatible)
+    echo "Creating zip file..."
+    if ! python -c "
+import zipfile
+import os
+import sys
+
+try:
+    # Use raw strings and proper path handling for Windows
+    package_dir = r'$package_dir'
+    zip_path = r'$temp_dir/$zip_name'
+    
+    # Ensure the zip file directory exists
+    os.makedirs(os.path.dirname(zip_path), exist_ok=True)
+    
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, dirs, files in os.walk(package_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, package_dir)
+                # Convert Windows backslashes to forward slashes for zip archive
+                arcname = arcname.replace(os.sep, '/')
+                zipf.write(file_path, arcname)
+    print('Zip file created successfully')
+except Exception as e:
+    print(f'Error creating zip file: {e}')
+    sys.exit(1)
+"; then
+        echo "Error: Failed to create zip file"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    # Upload to S3
+    echo "Uploading $zip_name to S3..."
+    if ! aws s3 cp "$temp_dir/$zip_name" "s3://$DATA_LAKE_BUCKET_NAME/lambda/"; then
+        echo "Error: Failed to upload $zip_name to S3"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
+    # Clean up
+    rm -rf "$temp_dir"
+    
+    echo "✅ $lambda_name packaged and uploaded successfully"
+}
+
 update_env_file() {
   echo "Updating .env file with current stack outputs..."
   
@@ -469,42 +600,62 @@ FEATURE_ENGINEERING_DATA_LAKE_ROLE_ARN=$FEATURE_ENGINEERING_DATA_LAKE_ROLE_ARN
 EOF
   fi
 
-  # Get Lambda stack outputs
-  if "$AWS_CMD" cloudformation describe-stacks --stack-name "$LAMBDAS_STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
-    echo "Getting Lambda stack outputs..."
+  # Get Ingestion stack outputs
+  if "$AWS_CMD" cloudformation describe-stacks --stack-name "$INGESTION_STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
+    echo "Getting Ingestion stack outputs..."
     
-    # DynamoDB tables
-    DYNAMO_CURRENCY_METADATA_TABLE=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$LAMBDAS_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='CurrencyMetadataTableName'].OutputValue" --output text)
-    DYNAMO_CURRENCY_PRICES_TABLE=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$LAMBDAS_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='LivePricesTableName'].OutputValue" --output text)
-    DYNAMO_PREDICTIONS_TABLE=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$LAMBDAS_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='PredictionsTableName'].OutputValue" --output text)
-    DYNAMO_LEAGUE_METADATA_TABLE=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$LAMBDAS_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='LeagueMetadataTableName'].OutputValue" --output text)
+    # DynamoDB tables from ingestion stack
+    DYNAMO_CURRENCY_METADATA_TABLE=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$INGESTION_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='CurrencyMetadataTableName'].OutputValue" --output text)
+    DYNAMO_CURRENCY_PRICES_TABLE=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$INGESTION_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='LivePricesTableName'].OutputValue" --output text)
+    DYNAMO_LEAGUE_METADATA_TABLE=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$INGESTION_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='LeagueMetadataTableName'].OutputValue" --output text)
     
-    # API URL
-    API_BASE_URL=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$LAMBDAS_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='ApiInvokeUrl'].OutputValue" --output text)
+    # Lambda function names from ingestion stack
+    INGESTION_LAMBDA_NAME=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$INGESTION_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='IngestionLambdaName'].OutputValue" --output text)
+    LEAGUE_METADATA_LAMBDA_NAME=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$INGESTION_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='LeagueMetadataLambdaName'].OutputValue" --output text)
+    DAILY_AGGREGATION_LAMBDA_NAME=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$INGESTION_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='DailyAggregationLambdaName'].OutputValue" --output text)
+  fi
+
+  # Get Prediction stack outputs
+  if "$AWS_CMD" cloudformation describe-stacks --stack-name "$PREDICTION_STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
+    echo "Getting Prediction stack outputs..."
     
-    # Lambda inference image
-    LAMBDA_INFERENCE_IMAGE=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$LAMBDAS_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='LambdaInferenceImage'].OutputValue" --output text)
+    # DynamoDB table from prediction stack
+    DYNAMO_PREDICTIONS_TABLE=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$PREDICTION_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='PredictionsTableName'].OutputValue" --output text)
     
-    # Lambda function names
-    PREDICTION_API_LAMBDA_NAME=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$LAMBDAS_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='PredictionApiLambdaName'].OutputValue" --output text)
-    INGESTION_LAMBDA_NAME=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$LAMBDAS_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='IngestionLambdaName'].OutputValue" --output text)
-    LEAGUE_METADATA_LAMBDA_NAME=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$LAMBDAS_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='LeagueMetadataLambdaName'].OutputValue" --output text)
-    PREDICTION_REFRESH_LAMBDA_NAME=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$LAMBDAS_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='PredictionRefreshLambdaName'].OutputValue" --output text)
+    # Lambda function name from prediction stack
+    PREDICTION_REFRESH_LAMBDA_NAME=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$PREDICTION_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='PredictionRefreshLambdaName'].OutputValue" --output text)
     
-    # Append Lambda outputs to .env file
+    # Lambda inference image from prediction stack
+    LAMBDA_INFERENCE_IMAGE=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$PREDICTION_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='LambdaInferenceImage'].OutputValue" --output text)
+  fi
+
+  # Get API stack outputs
+  if "$AWS_CMD" cloudformation describe-stacks --stack-name "$API_STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
+    echo "Getting API stack outputs..."
+    
+    # API URL from API stack
+    API_BASE_URL=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$API_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='ApiInvokeUrl'].OutputValue" --output text)
+    
+    # Lambda function name from API stack
+    PREDICTION_API_LAMBDA_NAME=$("$AWS_CMD" cloudformation describe-stacks --stack-name "$API_STACK_NAME" --region "$REGION" --query "Stacks[0].Outputs[?OutputKey=='PredictionApiLambdaName'].OutputValue" --output text)
+  fi
+
+  # Append Lambda outputs to .env file (only if we have values)
+  if [ -n "${DYNAMO_CURRENCY_METADATA_TABLE:-}" ] || [ -n "${DYNAMO_CURRENCY_PRICES_TABLE:-}" ] || [ -n "${DYNAMO_PREDICTIONS_TABLE:-}" ] || [ -n "${DYNAMO_LEAGUE_METADATA_TABLE:-}" ] || [ -n "${API_BASE_URL:-}" ] || [ -n "${LAMBDA_INFERENCE_IMAGE:-}" ] || [ -n "${PREDICTION_API_LAMBDA_NAME:-}" ] || [ -n "${INGESTION_LAMBDA_NAME:-}" ] || [ -n "${LEAGUE_METADATA_LAMBDA_NAME:-}" ] || [ -n "${DAILY_AGGREGATION_LAMBDA_NAME:-}" ] || [ -n "${PREDICTION_REFRESH_LAMBDA_NAME:-}" ]; then
     cat >> "$ENV_FILE" << EOF
 
-# Lambda Functions
-DYNAMO_CURRENCY_METADATA_TABLE=$DYNAMO_CURRENCY_METADATA_TABLE
-DYNAMO_CURRENCY_PRICES_TABLE=$DYNAMO_CURRENCY_PRICES_TABLE
-DYNAMO_PREDICTIONS_TABLE=$DYNAMO_PREDICTIONS_TABLE
-DYNAMO_LEAGUE_METADATA_TABLE=$DYNAMO_LEAGUE_METADATA_TABLE
-API_BASE_URL=$API_BASE_URL
-LAMBDA_INFERENCE_IMAGE=$LAMBDA_INFERENCE_IMAGE
-PREDICTION_API_LAMBDA_NAME=$PREDICTION_API_LAMBDA_NAME
-INGESTION_LAMBDA_NAME=$INGESTION_LAMBDA_NAME
-LEAGUE_METADATA_LAMBDA_NAME=$LEAGUE_METADATA_LAMBDA_NAME
-PREDICTION_REFRESH_LAMBDA_NAME=$PREDICTION_REFRESH_LAMBDA_NAME
+# Lambda Functions and DynamoDB Tables
+DYNAMO_CURRENCY_METADATA_TABLE=${DYNAMO_CURRENCY_METADATA_TABLE:-}
+DYNAMO_CURRENCY_PRICES_TABLE=${DYNAMO_CURRENCY_PRICES_TABLE:-}
+DYNAMO_PREDICTIONS_TABLE=${DYNAMO_PREDICTIONS_TABLE:-}
+DYNAMO_LEAGUE_METADATA_TABLE=${DYNAMO_LEAGUE_METADATA_TABLE:-}
+API_BASE_URL=${API_BASE_URL:-}
+LAMBDA_INFERENCE_IMAGE=${LAMBDA_INFERENCE_IMAGE:-}
+PREDICTION_API_LAMBDA_NAME=${PREDICTION_API_LAMBDA_NAME:-}
+INGESTION_LAMBDA_NAME=${INGESTION_LAMBDA_NAME:-}
+LEAGUE_METADATA_LAMBDA_NAME=${LEAGUE_METADATA_LAMBDA_NAME:-}
+DAILY_AGGREGATION_LAMBDA_NAME=${DAILY_AGGREGATION_LAMBDA_NAME:-}
+PREDICTION_REFRESH_LAMBDA_NAME=${PREDICTION_REFRESH_LAMBDA_NAME:-}
 EOF
   fi
   
@@ -581,6 +732,7 @@ EOF
   API_LAMBDA_LOG_GROUP="/aws/lambda/poeconomy-${ENVIRONMENT}-api"
   INGESTION_LAMBDA_LOG_GROUP="/aws/lambda/poeconomy-${ENVIRONMENT}-ingestion"
   LEAGUE_METADATA_LAMBDA_LOG_GROUP="/aws/lambda/poeconomy-${ENVIRONMENT}-league-metadata"
+  DAILY_AGGREGATION_LAMBDA_LOG_GROUP="/aws/lambda/poeconomy-${ENVIRONMENT}-daily-aggregation"
   PREDICTION_REFRESH_LAMBDA_LOG_GROUP="/aws/lambda/poeconomy-${ENVIRONMENT}-prediction-refresh"
 
   # Add metadata section with latest image information and schedules
@@ -599,6 +751,7 @@ TRAINING_LOG_GROUP=$TRAINING_LOG_GROUP
 API_LAMBDA_LOG_GROUP=$API_LAMBDA_LOG_GROUP
 INGESTION_LAMBDA_LOG_GROUP=$INGESTION_LAMBDA_LOG_GROUP
 LEAGUE_METADATA_LAMBDA_LOG_GROUP=$LEAGUE_METADATA_LAMBDA_LOG_GROUP
+DAILY_AGGREGATION_LAMBDA_LOG_GROUP=$DAILY_AGGREGATION_LAMBDA_LOG_GROUP
 PREDICTION_REFRESH_LAMBDA_LOG_GROUP=$PREDICTION_REFRESH_LAMBDA_LOG_GROUP
 
 # Latest Container Images (for reference)

@@ -1,0 +1,609 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: PoEconomy Ingestion Lambda functions and DynamoDB tables
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[a-zA-Z0-9-]+'
+    Description: Environment identifier (e.g. dev, staging, production)
+  IngestionScheduleExpression:
+    Type: String
+    Default: cron(0 * * * ? *)
+    Description: EventBridge schedule expression for POE Watch ingestion
+  LeagueMetadataScheduleExpression:
+    Type: String
+    Default: cron(0 0 * * ? *)
+    Description: EventBridge schedule expression for league metadata ingestion (daily at midnight)
+  DailyAggregationScheduleExpression:
+    Type: String
+    Default: cron(0 2 * * ? *)
+    Description: EventBridge schedule expression for daily price aggregation (daily at 2 AM UTC)
+  BaseStackName:
+    Type: String
+    Description: Name of the base stack to import data lake bucket from
+
+Resources:
+  # DynamoDB Tables for Ingestion
+  CurrencyMetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'poeconomy-${EnvironmentName}-currency-metadata'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: currency
+          AttributeType: S
+      KeySchema:
+        - AttributeName: currency
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  LivePricesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'poeconomy-${EnvironmentName}-live-prices'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: currency_league
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+        - AttributeName: currency
+          AttributeType: S
+      KeySchema:
+        - AttributeName: currency_league
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: currency-timestamp-index
+          KeySchema:
+            - AttributeName: currency
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - league
+              - pay_currency
+              - price
+              - confidence
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  LeagueMetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'poeconomy-${EnvironmentName}-league-metadata'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: league_name
+          AttributeType: S
+      KeySchema:
+        - AttributeName: league_name
+          KeyType: HASH
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  DailyPricesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'poeconomy-${EnvironmentName}-daily-prices'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: currency_league
+          AttributeType: S
+        - AttributeName: date
+          AttributeType: S
+        - AttributeName: currency
+          AttributeType: S
+        - AttributeName: league
+          AttributeType: S
+      KeySchema:
+        - AttributeName: currency_league
+          KeyType: HASH
+        - AttributeName: date
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: currency-date-index
+          KeySchema:
+            - AttributeName: currency
+              KeyType: HASH
+            - AttributeName: date
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - league
+              - high_price
+              - low_price
+              - avg_price
+              - price_change_percent
+        - IndexName: league-date-index
+          KeySchema:
+            - AttributeName: league
+              KeyType: HASH
+            - AttributeName: date
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - currency
+              - high_price
+              - low_price
+              - avg_price
+              - price_change_percent
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # IAM Roles
+  IngestionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-ingestion-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt CurrencyMetadataTable.Arn
+                  - !GetAtt LivePricesTable.Arn
+                  - !GetAtt LeagueMetadataTable.Arn
+                  - !GetAtt DailyPricesTable.Arn
+        - PolicyName: LambdaInvokeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:poeconomy-${EnvironmentName}-prediction-refresh'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 
+                    - 'arn:aws:s3:::${DataLakeBucket}'
+                    - DataLakeBucket: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${BaseStackName}-DataLakeBucket'
+                  - !Sub
+                    - 'arn:aws:s3:::${DataLakeBucket}/*'
+                    - DataLakeBucket: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${BaseStackName}-DataLakeBucket'
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  LeagueMetadataLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-league-metadata-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt LeagueMetadataTable.Arn
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 
+                    - 'arn:aws:s3:::${DataLakeBucket}'
+                    - DataLakeBucket: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${BaseStackName}-DataLakeBucket'
+                  - !Sub
+                    - 'arn:aws:s3:::${DataLakeBucket}/*'
+                    - DataLakeBucket: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${BaseStackName}-DataLakeBucket'
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  DailyAggregationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-daily-aggregation-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt LivePricesTable.Arn
+                  - !GetAtt DailyPricesTable.Arn
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # CloudWatch Log Groups
+  IngestionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/poeconomy-${EnvironmentName}-ingestion'
+      RetentionInDays: 14
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  LeagueMetadataLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/poeconomy-${EnvironmentName}-league-metadata'
+      RetentionInDays: 14
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  DailyAggregationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/poeconomy-${EnvironmentName}-daily-aggregation'
+      RetentionInDays: 14
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # Lambda Functions
+  IngestionLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'poeconomy-${EnvironmentName}-ingestion'
+      Description: Ingest currency data from POE Watch API and store in DynamoDB
+      Runtime: python3.11
+      Handler: lambda.ingestion_handler.lambda_handler
+      Role: !GetAtt IngestionLambdaRole.Arn
+      Code:
+        S3Bucket: 
+          Fn::ImportValue:
+            Fn::Sub: '${BaseStackName}-DataLakeBucket'
+        S3Key: lambda/ingestion.zip
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref EnvironmentName
+          MODELS_BUCKET: 
+            Fn::ImportValue:
+              Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          MODELS_S3_PREFIX: models/currency
+          MODELS_DIR: /var/task/models
+          DYNAMO_CURRENCY_METADATA_TABLE: !Ref CurrencyMetadataTable
+          CURRENCY_METADATA_TABLE: !Ref CurrencyMetadataTable
+          LIVE_PRICES_TABLE: !Ref LivePricesTable
+          LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
+          DAILY_PRICES_TABLE: !Ref DailyPricesTable
+          DATA_LAKE_BUCKET: 
+            Fn::ImportValue:
+              Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          PREDICTION_REFRESH_FUNCTION_NAME: !Sub 'poeconomy-${EnvironmentName}-prediction-refresh'
+          PREDICTION_CACHE_TTL_HOURS: '2'
+          LOG_LEVEL: INFO
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  LeagueMetadataLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'poeconomy-${EnvironmentName}-league-metadata'
+      Description: Ingest league metadata from POE API
+      Runtime: python3.11
+      Handler: lambda.league_metadata_handler.lambda_handler
+      Role: !GetAtt LeagueMetadataLambdaRole.Arn
+      Code:
+        S3Bucket: 
+          Fn::ImportValue:
+            Fn::Sub: '${BaseStackName}-DataLakeBucket'
+        S3Key: lambda/league_metadata.zip
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref EnvironmentName
+          LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
+          DATA_LAKE_BUCKET: 
+            Fn::ImportValue:
+              Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          LOG_LEVEL: INFO
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  DailyAggregationLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'poeconomy-${EnvironmentName}-daily-aggregation'
+      Description: Aggregate hourly price data into daily price data
+      Runtime: python3.11
+      Handler: lambda.daily_aggregation_handler.lambda_handler
+      Role: !GetAtt DailyAggregationLambdaRole.Arn
+      Code:
+        S3Bucket: 
+          Fn::ImportValue:
+            Fn::Sub: '${BaseStackName}-DataLakeBucket'
+        S3Key: lambda/daily_aggregation.zip
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref EnvironmentName
+          LIVE_PRICES_TABLE: !Ref LivePricesTable
+          DAILY_PRICES_TABLE: !Ref DailyPricesTable
+          LOG_LEVEL: INFO
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # EventBridge Schedules
+  IngestionSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'poeconomy-${EnvironmentName}-ingestion-schedule'
+      Description: Schedule for POE Watch ingestion
+      ScheduleExpression: !Ref IngestionScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt IngestionLambdaFunction.Arn
+          Id: IngestionTarget
+          Input: '{}'
+
+  LeagueMetadataSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'poeconomy-${EnvironmentName}-league-metadata-schedule'
+      Description: Schedule for league metadata ingestion
+      ScheduleExpression: !Ref LeagueMetadataScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt LeagueMetadataLambdaFunction.Arn
+          Id: LeagueMetadataTarget
+          Input: '{}'
+
+  DailyAggregationSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'poeconomy-${EnvironmentName}-daily-aggregation-schedule'
+      Description: Schedule for daily price aggregation
+      ScheduleExpression: !Ref DailyAggregationScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt DailyAggregationLambdaFunction.Arn
+          Id: DailyAggregationTarget
+          Input: '{"action": "aggregate"}'
+
+  # EventBridge Permissions
+  IngestionSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestionLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt IngestionSchedule.Arn
+
+  LeagueMetadataSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LeagueMetadataLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt LeagueMetadataSchedule.Arn
+
+  DailyAggregationSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DailyAggregationLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailyAggregationSchedule.Arn
+
+  # Custom resource to trigger league metadata Lambda immediately after stack creation
+  LeagueMetadataTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-league-metadata-trigger-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaInvokeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt LeagueMetadataLambdaFunction.Arn
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  LeagueMetadataTriggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'poeconomy-${EnvironmentName}-league-metadata-trigger'
+      Description: Trigger function to run league metadata Lambda immediately after stack creation
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LeagueMetadataTriggerRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          
+          def lambda_handler(event, context):
+              try:
+                  lambda_client = boto3.client('lambda')
+                  target_function = event['ResourceProperties']['TargetFunctionName']
+                  
+                  # Invoke the target function
+                  response = lambda_client.invoke(
+                      FunctionName=target_function,
+                      InvocationType='Event'  # Async invocation
+                  )
+                  
+                  print(f"Successfully triggered {target_function}")
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print(f"Error triggering function: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+      Timeout: 60
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  LeagueMetadataInitialTrigger:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt LeagueMetadataTriggerFunction.Arn
+      TargetFunctionName: !Ref LeagueMetadataLambdaFunction
+    DependsOn:
+      - LeagueMetadataLambdaFunction
+      - LeagueMetadataSchedulePermission
+
+
+Outputs:
+  CurrencyMetadataTableName:
+    Description: DynamoDB table for currency metadata
+    Value: !Ref CurrencyMetadataTable
+    Export:
+      Name: !Sub '${AWS::StackName}-CurrencyMetadataTable'
+
+  LivePricesTableName:
+    Description: DynamoDB table for live prices
+    Value: !Ref LivePricesTable
+    Export:
+      Name: !Sub '${AWS::StackName}-LivePricesTable'
+
+  LeagueMetadataTableName:
+    Description: DynamoDB table for league metadata
+    Value: !Ref LeagueMetadataTable
+    Export:
+      Name: !Sub '${AWS::StackName}-LeagueMetadataTable'
+
+  DailyPricesTableName:
+    Description: DynamoDB table for daily prices
+    Value: !Ref DailyPricesTable
+    Export:
+      Name: !Sub '${AWS::StackName}-DailyPricesTable'
+
+  IngestionLambdaName:
+    Description: Name of the ingestion Lambda function
+    Value: !Ref IngestionLambdaFunction
+
+  LeagueMetadataLambdaName:
+    Description: Name of the league metadata Lambda function
+    Value: !Ref LeagueMetadataLambdaFunction
+
+  DailyAggregationLambdaName:
+    Description: Name of the daily aggregation Lambda function
+    Value: !Ref DailyAggregationLambdaFunction
+
+  IngestionSchedule:
+    Description: EventBridge schedule for ingestion
+    Value: !Ref IngestionSchedule
+
+  LeagueMetadataSchedule:
+    Description: EventBridge schedule for league metadata
+    Value: !Ref LeagueMetadataSchedule
+
+  DailyAggregationSchedule:
+    Description: EventBridge schedule for daily aggregation
+    Value: !Ref DailyAggregationSchedule

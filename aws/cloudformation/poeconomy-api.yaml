@@ -1,0 +1,362 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: PoEconomy API Lambda function and API Gateway
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedPattern: '[a-zA-Z0-9-]+'
+    Description: Environment identifier (e.g. dev, staging, production)
+  ApiGatewayStageName:
+    Type: String
+    Default: api
+    AllowedPattern: '[a-zA-Z0-9-]+'
+    Description: Stage name for the API Gateway deployment
+  BaseStackName:
+    Type: String
+    Description: Name of the base stack to import data lake bucket from
+  IngestionStackName:
+    Type: String
+    Description: Name of the ingestion stack to import DynamoDB tables from
+  PredictionStackName:
+    Type: String
+    Description: Name of the prediction stack to import DynamoDB tables from
+
+Resources:
+  # IAM Role for API Lambda
+  ApiLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'poeconomy-${EnvironmentName}-api-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/poeconomy-${EnvironmentName}-currency-metadata'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/poeconomy-${EnvironmentName}-live-prices'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/poeconomy-${EnvironmentName}-predictions'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/poeconomy-${EnvironmentName}-league-metadata'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub
+                    - 'arn:aws:s3:::${DataLakeBucket}'
+                    - DataLakeBucket: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${BaseStackName}-DataLakeBucket'
+                  - !Sub
+                    - 'arn:aws:s3:::${DataLakeBucket}/*'
+                    - DataLakeBucket: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${BaseStackName}-DataLakeBucket'
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # CloudWatch Log Group
+  ApiLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/poeconomy-${EnvironmentName}-api'
+      RetentionInDays: 14
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # Lambda Function
+  ApiLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'poeconomy-${EnvironmentName}-api'
+      Description: Serve cached predictions and metadata via API Gateway.
+      Runtime: python3.11
+      Handler: lambda.prediction_api_handler.lambda_handler
+      Role: !GetAtt ApiLambdaRole.Arn
+      Code:
+        S3Bucket: 
+          Fn::ImportValue:
+            Fn::Sub: '${BaseStackName}-DataLakeBucket'
+        S3Key: lambda/api.zip
+      Timeout: 30
+      MemorySize: 1024
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref EnvironmentName
+          MODELS_BUCKET: 
+            Fn::ImportValue:
+              Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          MODELS_S3_PREFIX: models/currency
+          MODELS_DIR: /var/task/models
+          DYNAMO_CURRENCY_METADATA_TABLE: !Sub 'poeconomy-${EnvironmentName}-currency-metadata'
+          CURRENCY_METADATA_TABLE: !Sub 'poeconomy-${EnvironmentName}-currency-metadata'
+          LIVE_PRICES_TABLE: !Sub 'poeconomy-${EnvironmentName}-live-prices'
+          PREDICTIONS_TABLE: !Sub 'poeconomy-${EnvironmentName}-predictions'
+          LEAGUE_METADATA_TABLE: !Sub 'poeconomy-${EnvironmentName}-league-metadata'
+          DATA_LAKE_BUCKET: 
+            Fn::ImportValue:
+              Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          LOG_LEVEL: INFO
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # API Gateway
+  PredictionApiRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub 'poeconomy-${EnvironmentName}-api'
+      Description: PoEconomy Prediction API
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  # API Gateway Resources
+  HealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ParentId: !GetAtt PredictionApiRestApi.RootResourceId
+      PathPart: health
+
+  PredictResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ParentId: !GetAtt PredictionApiRestApi.RootResourceId
+      PathPart: predict
+
+  CurrenciesResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ParentId: !Ref PredictResource
+      PathPart: currencies
+
+  LeaguesResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ParentId: !Ref PredictResource
+      PathPart: leagues
+
+  SingleResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ParentId: !Ref PredictResource
+      PathPart: single
+
+  BatchResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ParentId: !Ref PredictResource
+      PathPart: batch
+
+  CurrencyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ParentId: !Ref PredictResource
+      PathPart: currency
+
+  LatestResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ParentId: !Ref PredictResource
+      PathPart: latest
+
+  PricesResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ParentId: !GetAtt PredictionApiRestApi.RootResourceId
+      PathPart: prices
+
+  LiveResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ParentId: !Ref PricesResource
+      PathPart: live
+
+  # API Gateway Methods
+  HealthGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !Ref HealthResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambdaFunction.Arn}/invocations'
+
+  RootGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !GetAtt PredictionApiRestApi.RootResourceId
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambdaFunction.Arn}/invocations'
+
+  CurrenciesGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !Ref CurrenciesResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambdaFunction.Arn}/invocations'
+
+  LeaguesGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !Ref LeaguesResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambdaFunction.Arn}/invocations'
+
+  SinglePostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !Ref SingleResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambdaFunction.Arn}/invocations'
+
+  BatchPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !Ref BatchResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambdaFunction.Arn}/invocations'
+
+  CurrencyGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !Ref CurrencyResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambdaFunction.Arn}/invocations'
+
+  LatestGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !Ref LatestResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambdaFunction.Arn}/invocations'
+
+  LiveGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !Ref LiveResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambdaFunction.Arn}/invocations'
+
+  # Lambda Permission for API Gateway
+  ApiLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${PredictionApiRestApi}/*/*'
+
+  # API Gateway Deployment
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - HealthGetMethod
+      - RootGetMethod
+      - CurrenciesGetMethod
+      - LeaguesGetMethod
+      - SinglePostMethod
+      - BatchPostMethod
+      - CurrencyGetMethod
+      - LatestGetMethod
+      - LiveGetMethod
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      StageName: !Ref ApiGatewayStageName
+
+Outputs:
+  ApiInvokeUrl:
+    Description: Invoke URL for the public API Gateway stage
+    Value: !Sub 'https://${PredictionApiRestApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiGatewayStageName}'
+
+  PredictionApiLambdaName:
+    Description: Name of the API Gateway Lambda function
+    Value: !Ref ApiLambdaFunction
+
+  PredictionApiRestApi:
+    Description: API Gateway REST API ID
+    Value: !Ref PredictionApiRestApi
