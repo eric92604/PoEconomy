@@ -261,6 +261,8 @@ class DirectModelPredictor(ModelPredictor):
 
                         model = self._load_model_from_direct(artifact)
                         latest_features = X[-1].reshape(1, -1)
+                        
+                        # Make prediction
                         prediction = model.predict(latest_features)
                         prediction_value = float(np.asarray(prediction).ravel()[0])
                         
@@ -687,7 +689,7 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
                         
                 except Exception as exc:  # pylint: disable=broad-except
                     logger.error(
-                        f"Prediction failed for {currency} horizon {horizon}",
+                        f"Failed to generate prediction for {currency} ({horizon}): {exc}",
                         exception=exc,
                         extra={"currency": currency, "horizon": horizon},
                     )
