@@ -34,15 +34,10 @@ class DailyPriceData:
     currency: str
     league: str
     date: str  # YYYY-MM-DD format
-    open_price: Decimal
     high_price: Decimal
     low_price: Decimal
-    close_price: Decimal
     avg_price: Decimal
-    volume: int  # Number of hourly data points
     price_change_percent: Decimal
-    first_timestamp: int
-    last_timestamp: int
 
 
 class DailyPriceAggregator:
@@ -195,16 +190,14 @@ class DailyPriceAggregator:
         if not prices:
             raise ValueError("No valid prices found in hourly data")
         
-        # Calculate OHLC and other statistics
-        open_price = prices[0]
-        close_price = prices[-1]
+        # Calculate price statistics
         high_price = max(prices)
         low_price = min(prices)
         avg_price = sum(prices) / len(prices)
         
-        # Calculate price change percentage
-        if open_price > 0:
-            price_change_percent = ((close_price - open_price) / open_price) * 100
+        # Calculate price change percentage (using first and last prices)
+        if len(prices) > 1 and prices[0] > 0:
+            price_change_percent = ((prices[-1] - prices[0]) / prices[0]) * 100
         else:
             price_change_percent = Decimal("0")
         
@@ -212,15 +205,10 @@ class DailyPriceAggregator:
             currency=currency,
             league=league,
             date=date,
-            open_price=open_price,
             high_price=high_price,
             low_price=low_price,
-            close_price=close_price,
             avg_price=avg_price,
-            volume=len(prices),
-            price_change_percent=price_change_percent,
-            first_timestamp=timestamps[0],
-            last_timestamp=timestamps[-1]
+            price_change_percent=price_change_percent
         )
     
     def save_daily_price(self, daily_data: DailyPriceData) -> bool:
@@ -238,15 +226,10 @@ class DailyPriceAggregator:
                 "date": daily_data.date,
                 "currency": daily_data.currency,
                 "league": daily_data.league,
-                "open_price": daily_data.open_price,
                 "high_price": daily_data.high_price,
                 "low_price": daily_data.low_price,
-                "close_price": daily_data.close_price,
                 "avg_price": daily_data.avg_price,
-                "volume": daily_data.volume,
                 "price_change_percent": daily_data.price_change_percent,
-                "first_timestamp": daily_data.first_timestamp,
-                "last_timestamp": daily_data.last_timestamp,
                 "created_at": int(time.time())
             }
             
