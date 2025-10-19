@@ -1,0 +1,320 @@
+"use client";
+
+/**
+ * Main Investment Table - Core feature displaying currencies with predictions
+ */
+
+import { useState, useMemo } from "react";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { ArrowUpDown, ArrowUp, ArrowDown, TrendingUp, TrendingDown } from "lucide-react";
+import type {
+  CurrencyWithPredictions,
+  CurrencySortField,
+  SortDirection,
+  CurrencyFilters,
+  CurrencyCategory,
+} from "@/types";
+import {
+  formatPrice,
+  formatPercentage,
+  formatConfidence,
+  sortCurrencies,
+  filterCurrencies,
+} from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { CurrencyFiltersComponent } from "@/components/filters/currency-filters";
+
+interface CurrencyTableProps {
+  currencies: CurrencyWithPredictions[];
+  onSelectCurrency?: (currency: CurrencyWithPredictions) => void;
+  selectedCurrency?: string;
+  showFilters?: boolean;
+}
+
+export function CurrencyTable({
+  currencies,
+  onSelectCurrency,
+  selectedCurrency,
+  showFilters = true,
+}: CurrencyTableProps) {
+  const [sortField, setSortField] = useState<CurrencySortField>("profit_1d");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [filters, setFilters] = useState<CurrencyFilters>({});
+
+  // Get available leagues and categories for filters
+  const availableLeagues = useMemo(() => {
+    return Array.from(new Set(currencies.map(c => c.league))).sort();
+  }, [currencies]);
+
+  const availableCategories = useMemo(() => {
+    return Array.from(new Set(currencies.map(c => c.category).filter(Boolean))) as CurrencyCategory[];
+  }, [currencies]);
+
+  // Filter and sort currencies
+  const filteredAndSortedCurrencies = useMemo(() => {
+    const filtered = filterCurrencies(currencies, filters);
+    return sortCurrencies(filtered, sortField, sortDirection);
+  }, [currencies, filters, sortField, sortDirection]);
+
+  // Handle sort
+  const handleSort = (field: CurrencySortField) => {
+    if (sortField === field) {
+      setSortDirection(sortDirection === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(field);
+      setSortDirection("desc");
+    }
+  };
+
+  // Get sort icon
+  const getSortIcon = (field: CurrencySortField) => {
+    if (sortField !== field) {
+      return <ArrowUpDown className="ml-2 h-4 w-4" />;
+    }
+    return sortDirection === "asc" ? (
+      <ArrowUp className="ml-2 h-4 w-4" />
+    ) : (
+      <ArrowDown className="ml-2 h-4 w-4" />
+    );
+  };
+
+  // Get profit color
+  const getProfitColor = (percent: number) => {
+    if (percent >= 5) return "text-green-600 dark:text-green-400";
+    if (percent >= 2) return "text-green-500 dark:text-green-500";
+    if (percent > 0) return "text-green-400 dark:text-green-600";
+    if (percent === 0) return "text-muted-foreground";
+    if (percent > -2) return "text-red-400 dark:text-red-600";
+    if (percent > -5) return "text-red-500 dark:text-red-500";
+    return "text-red-600 dark:text-red-400";
+  };
+
+  // Get confidence badge variant
+  const getConfidenceVariant = (confidence: number): "default" | "secondary" | "destructive" => {
+    if (confidence >= 0.8) return "default";
+    if (confidence >= 0.6) return "secondary";
+    return "destructive";
+  };
+
+  if (currencies.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-64 border rounded-lg">
+        <p className="text-muted-foreground">No currencies found</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Smart Filters */}
+      {showFilters && (
+        <CurrencyFiltersComponent
+          filters={filters}
+          onFiltersChange={setFilters}
+          availableLeagues={availableLeagues}
+          availableCategories={availableCategories}
+          totalCount={currencies.length}
+          filteredCount={filteredAndSortedCurrencies.length}
+        />
+      )}
+
+      {/* Currency Table */}
+      <div className="rounded-md border">
+        <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>
+              <Button
+                variant="ghost"
+                onClick={() => handleSort("currency")}
+                className="h-8 px-2"
+              >
+                Currency
+                {getSortIcon("currency")}
+              </Button>
+            </TableHead>
+            <TableHead className="text-right">
+              <Button
+                variant="ghost"
+                onClick={() => handleSort("current_price")}
+                className="h-8 px-2"
+              >
+                Current Price
+                {getSortIcon("current_price")}
+              </Button>
+            </TableHead>
+            <TableHead className="text-right">
+              <Button
+                variant="ghost"
+                onClick={() => handleSort("profit_1d")}
+                className="h-8 px-2"
+              >
+                1d Profit
+                {getSortIcon("profit_1d")}
+              </Button>
+            </TableHead>
+            <TableHead className="text-right">
+              <Button
+                variant="ghost"
+                onClick={() => handleSort("profit_3d")}
+                className="h-8 px-2"
+              >
+                3d Profit
+                {getSortIcon("profit_3d")}
+              </Button>
+            </TableHead>
+            <TableHead className="text-right">
+              <Button
+                variant="ghost"
+                onClick={() => handleSort("profit_7d")}
+                className="h-8 px-2"
+              >
+                7d Profit
+                {getSortIcon("profit_7d")}
+              </Button>
+            </TableHead>
+            <TableHead className="text-right">Price Range</TableHead>
+            <TableHead className="text-right">
+              <Button
+                variant="ghost"
+                onClick={() => handleSort("average_confidence")}
+                className="h-8 px-2"
+              >
+                Avg Confidence
+                {getSortIcon("average_confidence")}
+              </Button>
+            </TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {filteredAndSortedCurrencies.map((currency: CurrencyWithPredictions) => {
+            const pred1d = currency.predictions["1d"];
+            const pred3d = currency.predictions["3d"];
+            const pred7d = currency.predictions["7d"];
+
+            return (
+              <TableRow
+                key={`${currency.currency}-${currency.league}`}
+                className={cn(
+                  "cursor-pointer hover:bg-muted/50",
+                  selectedCurrency === currency.currency && "bg-muted"
+                )}
+                onClick={() => onSelectCurrency?.(currency)}
+              >
+                <TableCell className="font-medium">
+                  <div className="flex flex-col">
+                    <span>{currency.currency}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {currency.league}
+                    </span>
+                  </div>
+                </TableCell>
+                <TableCell className="text-right font-mono">
+                  {formatPrice(currency.current_price)}c
+                </TableCell>
+                <TableCell className="text-right">
+                  {pred1d ? (
+                    <div className="flex flex-col items-end">
+                      <span className="font-mono">
+                        {formatPrice(pred1d.predicted_price)}c
+                      </span>
+                      <span
+                        className={cn(
+                          "text-sm font-semibold flex items-center gap-1",
+                          getProfitColor(pred1d.price_change_percent)
+                        )}
+                      >
+                        {pred1d.price_change_percent > 0 ? (
+                          <TrendingUp className="h-3 w-3" />
+                        ) : pred1d.price_change_percent < 0 ? (
+                          <TrendingDown className="h-3 w-3" />
+                        ) : null}
+                        {formatPercentage(pred1d.price_change_percent)}
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="text-muted-foreground">-</span>
+                  )}
+                </TableCell>
+                <TableCell className="text-right">
+                  {pred3d ? (
+                    <div className="flex flex-col items-end">
+                      <span className="font-mono">
+                        {formatPrice(pred3d.predicted_price)}c
+                      </span>
+                      <span
+                        className={cn(
+                          "text-sm font-semibold flex items-center gap-1",
+                          getProfitColor(pred3d.price_change_percent)
+                        )}
+                      >
+                        {pred3d.price_change_percent > 0 ? (
+                          <TrendingUp className="h-3 w-3" />
+                        ) : pred3d.price_change_percent < 0 ? (
+                          <TrendingDown className="h-3 w-3" />
+                        ) : null}
+                        {formatPercentage(pred3d.price_change_percent)}
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="text-muted-foreground">-</span>
+                  )}
+                </TableCell>
+                <TableCell className="text-right">
+                  {pred7d ? (
+                    <div className="flex flex-col items-end">
+                      <span className="font-mono">
+                        {formatPrice(pred7d.predicted_price)}c
+                      </span>
+                      <span
+                        className={cn(
+                          "text-sm font-semibold flex items-center gap-1",
+                          getProfitColor(pred7d.price_change_percent)
+                        )}
+                      >
+                        {pred7d.price_change_percent > 0 ? (
+                          <TrendingUp className="h-3 w-3" />
+                        ) : pred7d.price_change_percent < 0 ? (
+                          <TrendingDown className="h-3 w-3" />
+                        ) : null}
+                        {formatPercentage(pred7d.price_change_percent)}
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="text-muted-foreground">-</span>
+                  )}
+                </TableCell>
+                <TableCell className="text-right">
+                  {pred1d?.prediction_lower && pred1d?.prediction_upper ? (
+                    <span className="text-sm text-muted-foreground font-mono">
+                      {formatPrice(pred1d.prediction_lower)} -{" "}
+                      {formatPrice(pred1d.prediction_upper)}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">-</span>
+                  )}
+                </TableCell>
+                <TableCell className="text-right">
+                  <Badge variant={getConfidenceVariant(currency.average_confidence)}>
+                    {formatConfidence(currency.average_confidence)}
+                  </Badge>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+      </div>
+    </div>
+  );
+}
+
