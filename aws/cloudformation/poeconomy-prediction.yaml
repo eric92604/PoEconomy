@@ -160,7 +160,7 @@ Resources:
       Code:
         ImageUri: !Ref LambdaImageUri
       ImageConfig:
-        Command: ["lambda.prediction_refresh_handler.lambda_handler"]
+        Command: ["lambda.prediction.prediction_refresh_handler.lambda_handler"]
       Timeout: 300
       MemorySize: 1024
       DeadLetterConfig:
