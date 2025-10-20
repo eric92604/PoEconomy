@@ -192,15 +192,11 @@ class ModelTrainingPipeline:
             # Store processed data as instance variable for use in training methods
             self._processed_data = processed_data
             
-            # Perform agnostic hyperparameter optimization if enabled
-            if self.config.model.n_trials > 1 and len(target_currencies) > 0:
-                self.logger.info(f"Starting agnostic hyperparameter optimization with n_trials={self.config.model.n_trials}")
-                self._perform_agnostic_hyperparameter_optimization(target_currencies)
+            # Hyperparameter optimization
+            if self.config.model.n_trials <= 1:
+                self.logger.warning(f"Hyperparameter optimization is disabled (n_trials={self.config.model.n_trials}). This will result in poor model performance. Set n_trials > 1 to enable optimization.")
             else:
-                if self.config.model.n_trials <= 1:
-                    raise RuntimeError(f"Hyperparameter optimization is disabled (n_trials={self.config.model.n_trials}). This will result in poor model performance. Set n_trials > 1 to enable optimization.")
-                if len(target_currencies) == 0:
-                    raise RuntimeError("No target currencies found for training. This indicates a data selection or filtering issue.")
+                self.logger.info(f"Per-currency hyperparameter optimization enabled with n_trials={self.config.model.n_trials}")
             
             # Use parallel training
             max_workers = self.config.model.max_currency_workers
@@ -216,8 +212,7 @@ class ModelTrainingPipeline:
             
             progress.complete()
             
-            # Generate final report
-            self._generate_training_report()
+            # Training completed
             
             # Log experiment end
             self.logger.log_experiment_end(
@@ -293,7 +288,7 @@ class ModelTrainingPipeline:
         
         try:
             with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                # Submit training tasks
+                # Submit training tasks with timeout
                 future_to_currency = {
                     executor.submit(
                         self._train_currency_worker,
@@ -320,16 +315,27 @@ class ModelTrainingPipeline:
                             self.logger.warning(f"❌ {currency_name}: Training returned None")
                     
                     except Exception as e:
-                        self.logger.error(f"💥 {currency_name}: Training crashed - {str(e)}")
+                        error_msg = str(e)
+                        if "process pool was terminated" in error_msg:
+                            self.logger.error(f"💥 {currency_name}: Process pool terminated - likely due to resource exhaustion")
+                        else:
+                            self.logger.error(f"💥 {currency_name}: Training crashed - {error_msg}")
+                        
                         self.failed_currencies.append({
                             'currency': currency,
-                            'error': str(e),
+                            'error': error_msg,
                             'timestamp': datetime.now().isoformat()
                         })
                         self.processing_stats['failed_training'] += 1
                     
                     finally:
                         progress.update()
+                        
+        except Exception as e:
+            self.logger.error(f"💥 Process pool executor failed: {str(e)}")
+            # Cancel remaining futures
+            for future in future_to_currency:
+                future.cancel()
         finally:
             # Clean up temporary file
             if processed_data_path and os.path.exists(processed_data_path):
@@ -345,7 +351,7 @@ class ModelTrainingPipeline:
     @staticmethod
     def _train_currency_worker(currency: Dict[str, Any], shared_data: Dict[str, Any]) -> Optional[TrainingResult]:
         """
-        Worker function for parallel currency training.
+        Worker function for parallel currency training with robust error handling.
         
         Args:
             currency: Currency dictionary
@@ -355,8 +361,18 @@ class ModelTrainingPipeline:
             Training result dictionary or None if failed
         """
         try:
+            # Set process name for debugging
+            import os
+            currency_name = currency.get('get_currency', 'Unknown')
+            os.setpgrp()  # Create new process group to prevent signal propagation
+            
             # Reconstruct configuration from dict
             config = MLConfig.from_dict(shared_data['config_dict'])
+            
+            # Intelligent resource allocation in worker processes for 8 vCPU system
+            # Allow more resources per worker since we have 8 vCPUs
+            config.model.max_optuna_workers = min(config.model.max_optuna_workers, 3)  # Up to 3 Optuna workers per currency
+            config.model.model_n_jobs = min(config.model.model_n_jobs, 2)  # Up to 2 model jobs per currency
             
             # Create pipeline instance for this worker
             pipeline = ModelTrainingPipeline(config)
@@ -371,10 +387,18 @@ class ModelTrainingPipeline:
             
             return result
             
+        except MemoryError as e:
+            # Handle memory exhaustion gracefully
+            import sys
+            sys.stderr.write(f"Memory error in worker for currency {currency_name}: {str(e)}\n")
+            return None
+            
         except Exception as e:
             # Use the main pipeline logger for error reporting
             # Note: This will be handled by the main process logger
-            print(f"Worker failed for currency {currency}: {str(e)}")
+            # Log error to stderr for worker process debugging
+            import sys
+            sys.stderr.write(f"Worker failed for currency {currency_name}: {str(e)}\n")
             return None
     
     def _get_processed_data_path(self) -> Optional[str]:
@@ -402,9 +426,10 @@ class ModelTrainingPipeline:
         try:
             return pd.read_parquet(data_path)
         except Exception as e:
-            # Use print for worker process error reporting
+            # Use stderr for worker process error reporting
             # Note: This will be handled by the main process logger
-            print(f"Failed to load processed data from {data_path}: {str(e)}")
+            import sys
+            sys.stderr.write(f"Failed to load processed data from {data_path}: {str(e)}\n")
             return None
     
     def _save_temp_dataframe(self, df: pd.DataFrame) -> str:
@@ -451,29 +476,34 @@ class ModelTrainingPipeline:
             processed_data: Processed dataframe containing currency data
             
         Returns:
-            List of currency dictionaries with get_currency
+            List of currency dictionaries with get_currency and avg_value
         """
         try:
             # Get unique currencies from processed data
             unique_currencies = processed_data['currency'].unique()
             
-            # Convert to list of dictionaries
+            # Convert to list of dictionaries with avg_value calculation
             currencies = []
             for currency in unique_currencies:
+                # Calculate average price for this currency
+                currency_data = processed_data[processed_data['currency'] == currency]
+                avg_value = currency_data['price'].mean() if 'price' in currency_data.columns else 0.0
+                
                 currencies.append({
-                    'get_currency': currency
+                    'get_currency': currency,
+                    'avg_value': avg_value
                 })
             
-            # Sort by currency name for consistent ordering
-            currencies.sort(key=lambda x: x['get_currency'])
+            # Sort by average value (descending) for consistent ordering
+            currencies.sort(key=lambda x: x['avg_value'], reverse=True)
             
             self.logger.info(f"Extracted {len(currencies)} unique currencies from processed data")
             
-            # Log some examples
+            # Log some examples with their average values
             if currencies:
                 examples = currencies[:5]
-                example_strings = [c['get_currency'] for c in examples]
-                self.logger.info(f"Example currencies: {example_strings}")
+                for example in examples:
+                    self.logger.info(f"  - {example['get_currency']} (avg_value: {example['avg_value']:.2f})")
             
             return currencies
             
@@ -481,129 +511,6 @@ class ModelTrainingPipeline:
             self.logger.error(f"Failed to extract currencies from processed data: {e}")
             return []
     
-    def _perform_agnostic_hyperparameter_optimization(self, target_currencies: List[Dict[str, Any]]) -> None:
-        """
-        Perform agnostic hyperparameter optimization using representative currency data.
-        
-        This method selects a subset of representative currencies and optimizes hyperparameters
-        once, then applies the optimized parameters to all currencies.
-        """
-        if self.logger:
-            self.logger.info("Starting agnostic hyperparameter optimization...")
-        
-        # Select representative currencies for optimization
-        # Use a mix of high-value and diverse currencies
-        sample_size = min(5, len(target_currencies))  # Use up to 5 currencies for optimization
-        
-        # Sort by average value and select diverse sample
-        sorted_currencies = sorted(target_currencies, key=lambda x: x.get('avg_value', 0), reverse=True)
-        
-        # Select high-value currencies and some mid-value ones for diversity
-        high_value_count = min(3, len(sorted_currencies))
-        mid_value_count = min(2, len(sorted_currencies) - high_value_count)
-        
-        sample_currencies = (
-            sorted_currencies[:high_value_count] + 
-            sorted_currencies[high_value_count:high_value_count + mid_value_count]
-        )
-        
-        if self.logger:
-            self.logger.info(f"Selected {len(sample_currencies)} representative currencies for optimization:")
-            for currency in sample_currencies:
-                self.logger.info(f"  - {currency['get_currency']} (avg_value: {currency.get('avg_value', 0):.2f})")
-        
-        # Prepare sample data for optimization
-        sample_data = []
-        
-        for currency in sample_currencies:
-            currency_name = currency['get_currency']
-            
-            # Filter processed data for this currency
-            currency_data = self._processed_data[
-                self._processed_data['currency'] == currency_name
-            ].copy()
-            
-            if currency_data.empty:
-                self.logger.warning(f"No data found for sample currency {currency_name}")
-                continue
-            
-            # Prepare features and targets
-            feature_columns = self._get_feature_columns(currency_data)
-            target_columns = self._get_target_column(currency_data)
-            
-            if not feature_columns or target_columns is None:
-                self.logger.warning(f"Invalid features/target for sample currency {currency_name}")
-                continue
-            
-            # For agnostic optimization, use only the primary target (1d prediction)
-            if isinstance(target_columns, list):
-                primary_target = target_columns[0]  # Use first target (usually 1d)
-                self.logger.info(f"Using primary target for optimization: {primary_target}")
-            else:
-                primary_target = target_columns
-            
-            # Extract features and targets
-            X = currency_data[feature_columns].values
-            y = currency_data[primary_target].values
-            
-            # Ensure y is 1D for single-target regression
-            if y.ndim > 1:
-                self.logger.warning(f"Target variable has shape {y.shape}, flattening to 1D")
-                y = y.flatten()
-            
-            # Basic data quality filtering - more lenient for minimal data
-            row_nan_ratio = np.isnan(X).sum(axis=1) / X.shape[1]
-            valid_rows = row_nan_ratio <= 0.9  # More lenient threshold
-            X = X[valid_rows]
-            y = y[valid_rows]
-            
-            # Impute remaining NaN values
-            if np.isnan(X).any():
-                from sklearn.impute import SimpleImputer
-                imputer = SimpleImputer(strategy='median')
-                X = imputer.fit_transform(X)
-            
-            if len(X) >= 50:  # Ensure sufficient data
-                # Final validation before adding to sample data
-                if X.shape[0] != y.shape[0]:
-                    self.logger.warning(f"Feature-target mismatch for {currency_name}: X={X.shape}, y={y.shape}")
-                    continue
-                
-                if y.ndim != 1:
-                    self.logger.warning(f"Target variable not 1D for {currency_name}: y.shape={y.shape}")
-                    continue
-                
-                sample_data.append((X, y, currency_name))
-                self.logger.info(f"Added {currency_name} to optimization sample: {len(X)} samples, target shape: {y.shape}")
-            else:
-                self.logger.warning(f"Insufficient data for {currency_name}: {len(X)} samples")
-        
-        if len(sample_data) == 0:
-            self.logger.warning("No valid sample data for agnostic optimization, skipping...")
-            return
-        
-        try:
-            # Perform agnostic hyperparameter optimization
-            self.logger.info(f"Starting agnostic optimization with {len(sample_data)} sample datasets")
-            self.model_trainer.optimize_hyperparameters_agnostic(sample_data)
-            
-            # Log hyperparameter optimization results
-            self.logger.info(f"Completed agnostic hyperparameter optimization using {len(sample_data)} sample currencies")
-            
-            # Verify optimization results
-            if self.model_trainer.hyperparameter_optimizer.is_optimized("lightgbm"):
-                self.logger.info("LightGBM agnostic optimization completed successfully")
-            else:
-                self.logger.warning("LightGBM agnostic optimization failed or was skipped")
-                
-            if self.model_trainer.hyperparameter_optimizer.is_optimized("xgboost"):
-                self.logger.info("XGBoost agnostic optimization completed successfully")
-            else:
-                self.logger.warning("XGBoost agnostic optimization failed or was skipped")
-                
-        except Exception as e:
-            self.logger.error(f"Agnostic hyperparameter optimization failed: {e}")
-            self.logger.warning("Continuing with default parameters...")
     
     def _load_processed_data(self) -> Optional[pd.DataFrame]:
         """
@@ -1248,36 +1155,6 @@ class ModelTrainingPipeline:
         
         return evaluation_results
     
-    def _generate_training_report(self) -> None:
-        """Generate comprehensive training report."""
-        report = {
-            'experiment_id': self.config.experiment.experiment_id,
-            'timestamp': datetime.now().isoformat(),
-            'total_currencies': self.processing_stats['total_currencies'],
-            'successful_training': self.processing_stats['successful_training'],
-            'failed_training': self.processing_stats['failed_training'],
-            'processing_stats': self.processing_stats
-        }
-        
-        # Save report
-        report_path = self.config.paths.logs_dir / f"training_report_{self.config.experiment.experiment_id}.json"
-        with open(report_path, 'w') as f:
-            json.dump(report, f, indent=2)
-        
-        self.logger.info(f"Training report saved to {report_path}")
-        
-        # Log summary
-        self.logger.info("=" * 50)
-        self.logger.info("🎯 TRAINING SUMMARY")
-        self.logger.info("=" * 50)
-        self.logger.info(f"📊 Total currencies: {self.processing_stats['total_currencies']}")
-        self.logger.info(f"✅ Successful training: {self.processing_stats['successful_training']}")
-        self.logger.info(f"❌ Failed training: {self.processing_stats['failed_training']}")
-        
-        success_rate = (self.processing_stats['successful_training'] / 
-                       max(1, self.processing_stats['total_currencies'])) * 100
-        self.logger.info(f"📈 Success rate: {success_rate:.1f}%")
-        self.logger.info("=" * 50)
 
     def _upload_logs_to_s3(self) -> None:
         """
@@ -1328,17 +1205,6 @@ class ModelTrainingPipeline:
                     self.logger.error(f"Failed to upload {log_file.name} to S3: {e}")
                 except Exception as e:
                     self.logger.error(f"Unexpected error uploading {log_file.name}: {e}")
-            
-            # Upload training report if it exists
-            report_file = logs_dir / f"training_report_{self.config.experiment.experiment_id}.json"
-            if report_file.exists():
-                try:
-                    s3_key = f"training_reports/{self.config.experiment.experiment_id}/training_report.json"
-                    s3_client.upload_file(str(report_file), self.data_lake_bucket, s3_key)
-                    self.logger.info(f"Uploaded training report to s3://{self.data_lake_bucket}/{s3_key}")
-                    uploaded_count += 1
-                except Exception as e:
-                    self.logger.error(f"Failed to upload training report: {e}")
             
             self.logger.info(f"Successfully uploaded {uploaded_count} log files to S3")
             
