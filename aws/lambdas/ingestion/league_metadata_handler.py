@@ -16,14 +16,7 @@ from ml.services.league_metadata_ingestion import (
 )
 from ml.utils.common_utils import MLLogger, setup_standard_logging
 
-try:
-    from .config import AppEnvironment, load_environment
-except ImportError:
-    # Handle case when running as standalone module
-    import sys
-    import os
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from config import AppEnvironment, load_environment
+from ..config import AppEnvironment, load_environment
 
 # Set up standardized logging
 LOGGER = setup_standard_logging(

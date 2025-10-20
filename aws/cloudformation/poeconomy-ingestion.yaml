@@ -341,7 +341,7 @@ Resources:
       FunctionName: !Sub 'poeconomy-${EnvironmentName}-ingestion'
       Description: Ingest currency data from POE Watch API and store in DynamoDB
       Runtime: python3.11
-      Handler: lambda.ingestion_handler.lambda_handler
+      Handler: ingestion_handler.lambda_handler
       Role: !GetAtt IngestionLambdaRole.Arn
       Code:
         S3Bucket: 
@@ -379,7 +379,7 @@ Resources:
       FunctionName: !Sub 'poeconomy-${EnvironmentName}-league-metadata'
       Description: Ingest league metadata from POE API
       Runtime: python3.11
-      Handler: lambda.league_metadata_handler.lambda_handler
+      Handler: league_metadata_handler.lambda_handler
       Role: !GetAtt LeagueMetadataLambdaRole.Arn
       Code:
         S3Bucket: 
@@ -406,7 +406,7 @@ Resources:
       FunctionName: !Sub 'poeconomy-${EnvironmentName}-daily-aggregation'
       Description: Aggregate hourly price data into daily price data
       Runtime: python3.11
-      Handler: lambda.daily_aggregation_handler.lambda_handler
+      Handler: daily_aggregation_handler.lambda_handler
       Role: !GetAtt DailyAggregationLambdaRole.Arn
       Code:
         S3Bucket: 

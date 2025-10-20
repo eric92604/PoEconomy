@@ -196,3 +196,6 @@ if __name__ == "__main__":
     
     result = lambda_handler(test_event, None)
     print(json.dumps(result, indent=2))
+
+
+__all__ = ["lambda_handler"]
