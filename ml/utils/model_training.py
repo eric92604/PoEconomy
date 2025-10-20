@@ -169,7 +169,8 @@ class BaseModel(ABC):
         self.logger = logger
         self.model: Any = None
         
-        if self.logger:
+        # Only log initialization for final models, not during hyperparameter optimization
+        if self.logger and not hasattr(self, '_is_optuna_trial'):
             self.logger.info(f"Initializing {self.get_model_type()} model")
     
     @abstractmethod
@@ -192,7 +193,7 @@ class BaseModel(ABC):
                 for key, value in self.params.items():
                     if key.endswith(f"_{name}"):
                         return value
-                raise ValueError(f"Parameter '{name}' not found in optimized parameters. This indicates agnostic optimization failure.")
+                raise ValueError(f"Parameter '{name}' not found in optimized parameters. This indicates hyperparameter optimization failure.")
             
             def suggest_int(self, name: str, low: int, high: int, **kwargs) -> int:
                 # Try exact match first, then try with prefix stripped
@@ -202,7 +203,7 @@ class BaseModel(ABC):
                 for key, value in self.params.items():
                     if key.endswith(f"_{name}"):
                         return value
-                raise ValueError(f"Parameter '{name}' not found in optimized parameters. This indicates agnostic optimization failure.")
+                raise ValueError(f"Parameter '{name}' not found in optimized parameters. This indicates hyperparameter optimization failure.")
             
             def suggest_categorical(self, name: str, choices: List[Any], **kwargs) -> Any:
                 # Try exact match first, then try with prefix stripped
@@ -212,7 +213,7 @@ class BaseModel(ABC):
                 for key, value in self.params.items():
                     if key.endswith(f"_{name}"):
                         return value
-                raise ValueError(f"Parameter '{name}' not found in optimized parameters. This indicates agnostic optimization failure.")
+                raise ValueError(f"Parameter '{name}' not found in optimized parameters. This indicates hyperparameter optimization failure.")
         
         return self._create_model(MockTrial(params))
     
@@ -241,13 +242,33 @@ class BaseModel(ABC):
                     callbacks=[lgb.early_stopping(self.config.early_stopping_rounds, verbose=False)]
                 )
             elif isinstance(self.model, xgb.XGBRegressor):
-                # XGBoost early stopping
-                self.model.fit(
-                    X, y,
-                    eval_set=[(X_val, y_val)],
-                    early_stopping_rounds=self.config.early_stopping_rounds,
-                    verbose=False
-                )
+                # XGBoost early stopping - handle version compatibility properly
+                try:
+                    # Check XGBoost version to determine the correct approach
+                    import xgboost as xgb_module
+                    xgb_version = xgb_module.__version__
+                    
+                    # For XGBoost >= 1.6.0, use callback-based approach
+                    if hasattr(xgb_module, 'callback') and hasattr(xgb_module.callback, 'EarlyStopping'):
+                        self.model.fit(
+                            X, y,
+                            eval_set=[(X_val, y_val)],
+                            callbacks=[xgb_module.callback.EarlyStopping(rounds=self.config.early_stopping_rounds, save_best=True)],
+                            verbose=False
+                        )
+                    else:
+                        # For older versions, use parameter-based approach
+                        self.model.fit(
+                            X, y,
+                            eval_set=[(X_val, y_val)],
+                            early_stopping_rounds=self.config.early_stopping_rounds,
+                            verbose=False
+                        )
+                except (TypeError, AttributeError, ImportError) as e:
+                    # If early stopping fails, train without it
+                    if self.logger:
+                        self.logger.warning(f"XGBoost early stopping not supported in this version ({xgb_version if 'xgb_version' in locals() else 'unknown'}): {e}. Training without early stopping.")
+                    self.model.fit(X, y, verbose=False)
             else:
                 # Other models without early stopping
                 self.model.fit(X, y)
@@ -332,8 +353,17 @@ class LightGBMModel(BaseModel):
                 'reg_lambda': 0.1,
             }
         
-        # Optimal threading configuration - adjust for parallel Optuna trials
-        optimal_n_jobs = max(1, self.config.model_n_jobs // self.config.max_optuna_workers)
+        # Calculate optimal n_jobs based on system resources and parallel context
+        import os
+        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '6'))
+        
+        if max_currency_workers > 1:
+            # For 8 vCPU system: 6 currency workers × 1-2 model jobs = 6-12 processes (optimal)
+            optimal_n_jobs = max(1, min(self.config.model_n_jobs, 2))
+        else:
+            # Single currency worker: can use more resources
+            optimal_n_jobs = self.config.model_n_jobs
+            
         params.update({
             'random_state': self.config.random_state,
             'n_jobs': optimal_n_jobs,
@@ -378,8 +408,17 @@ class XGBoostModel(BaseModel):
                 'reg_lambda': 0.1,
             }
         
-        # Optimal threading configuration - adjust for parallel Optuna trials
-        optimal_n_jobs = max(1, self.config.model_n_jobs // self.config.max_optuna_workers)
+        # Calculate optimal n_jobs based on system resources and parallel context
+        import os
+        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '6'))
+        
+        if max_currency_workers > 1:
+            # For 8 vCPU system: 6 currency workers × 1-2 model jobs = 6-12 processes (optimal)
+            optimal_n_jobs = max(1, min(self.config.model_n_jobs, 2))
+        else:
+            # Single currency worker: can use more resources
+            optimal_n_jobs = self.config.model_n_jobs
+            
         params.update({
             'random_state': self.config.random_state,
             'n_jobs': optimal_n_jobs,
@@ -418,8 +457,17 @@ class RandomForestModel(BaseModel):
                 'max_features': 'sqrt',
             }
         
-        # Threading configuration - adjust for parallel Optuna trials
-        optimal_n_jobs = max(1, self.config.model_n_jobs // self.config.max_optuna_workers)
+        # Calculate optimal n_jobs based on system resources and parallel context
+        import os
+        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '6'))
+        
+        if max_currency_workers > 1:
+        # For 8 vCPU system: 6 currency workers × 1-2 model jobs = 6-12 processes (optimal)
+            optimal_n_jobs = max(1, min(self.config.model_n_jobs, 2))
+        else:
+            # Single currency worker: can use more resources
+            optimal_n_jobs = self.config.model_n_jobs
+            
         params.update({
             'random_state': self.config.random_state,
             'n_jobs': optimal_n_jobs,
@@ -517,7 +565,7 @@ class EnsembleModel:
 
 
 class HyperparameterOptimizer:
-    """Hyperparameter optimizer using Optuna with agnostic optimization."""
+    """Hyperparameter optimizer using Optuna with per-currency optimization."""
     
     def __init__(
         self,
@@ -539,9 +587,11 @@ class HyperparameterOptimizer:
         model_class: type,
         X: np.ndarray,
         y: np.ndarray,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
         currency: str,
         cv_folds: int = 5
-    ) -> Tuple[BaseModel, Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """Optimize hyperparameters for a model."""
         if self.logger:
             self.logger.info(f"Starting hyperparameter optimization for {model_class.__name__}")
@@ -550,123 +600,18 @@ class HyperparameterOptimizer:
         def objective(trial: Any) -> float:
             # Create model with trial parameters
             model = model_class(self.config, self.logger)
+            model._is_optuna_trial = True  # Mark as Optuna trial to suppress logging
             model.model = model._create_model(trial)
             
-            # Time series cross-validation
-            tscv = TimeSeriesSplit(n_splits=cv_folds)
-            scores = []
-            
-            for train_idx, val_idx in tscv.split(X):
-                X_train_fold, X_val_fold = X[train_idx], X[val_idx]
-                y_train_fold, y_val_fold = y[train_idx], y[val_idx]
-                
-                # Train and evaluate
-                model.model.fit(X_train_fold, y_train_fold)
-                y_pred = model.predict(X_val_fold)
-                
-                # Calculate MAE as objective
-                mae = mean_absolute_error(y_val_fold, y_pred)
-                scores.append(mae)
-            
-            return float(np.mean(scores))
-        
-        # Create study with proper storage for parallelization
-        if self.config.max_optuna_workers > 1:
-            # Use JournalStorage for multi-threaded parallelization
-            import tempfile
-            import os
-            temp_dir = tempfile.gettempdir()
-            storage_file = os.path.join(temp_dir, f"optuna_{model_class.__name__}_{self.config.random_state}.log")
-            storage = optuna.storages.JournalStorage(
-                optuna.storages.journal.JournalFileBackend(storage_file)
-            )
-            study = optuna.create_study(
-                direction='minimize',
-                sampler=TPESampler(seed=self.config.random_state),
-                pruner=MedianPruner(),
-                storage=storage,
-                study_name=f"single_{model_class.__name__}_{self.config.random_state}"
-            )
-            if self.logger:
-                self.logger.info(f"Using JournalStorage for parallel optimization: {storage_file}")
-        else:
-            # Use in-memory storage for single-threaded optimization
-            study = optuna.create_study(
-                direction='minimize',
-                sampler=TPESampler(seed=self.config.random_state),
-                pruner=MedianPruner()
-            )
-            if self.logger:
-                self.logger.info("Using in-memory storage for single-threaded optimization")
-        
-        # Optimize with parallelization
-        study.optimize(objective, n_trials=self.config.n_trials, n_jobs=self.config.max_optuna_workers)
-        
-        # Create best model
-        best_model = model_class(self.config, self.logger)
-        best_model.model = best_model._create_model(study.best_trial)
-        
-        if self.logger:
-            self.logger.info(f"Optimization completed. Best MAE: {study.best_value:.4f}")
-        
-        return best_model, study.best_params
-    
-    def optimize_agnostic(
-        self,
-        model_class: type,
-        sample_data: List[Tuple[np.ndarray, np.ndarray]],
-        model_name: str,
-        cv_folds: int = 5
-    ) -> Dict[str, Any]:
-        """
-        Optimize hyperparameters agnostically using representative sample data.
-        
-        Args:
-            model_class: Model class to optimize
-            sample_data: List of (X, y) tuples from representative currencies
-            model_name: Name identifier for caching
-            cv_folds: Number of CV folds
-            
-        Returns:
-            Optimized hyperparameters
-        """
-        # Check if already optimized
-        if model_name in self._optimized_params:
-            if self.logger:
-                self.logger.info(f"Using cached hyperparameters for {model_name}")
-            return self._optimized_params[model_name]
-        
-        if self.logger:
-            self.logger.info(f"Starting agnostic hyperparameter optimization for {model_name} using {len(sample_data)} sample datasets")
-            self.logger.info(f"Using {self.config.max_optuna_workers} parallel workers for {self.config.n_trials} trials")
-        
-        def objective(trial: Any) -> float:
-            # Log trial execution for parallelization verification
-            import multiprocessing
-            import threading
-            if self.logger:
-                self.logger.info(f"Trial {trial.number} started on process {multiprocessing.current_process().name} thread {threading.current_thread().name}")
-            
-            # Create model with trial parameters
-            model = model_class(self.config, self.logger)
-            model.model = model._create_model(trial)
-            
-            all_scores = []
-            
-            # Optimize across multiple representative datasets
-            for X, y, currency_name in sample_data:
-                # Validate data format
-                if not isinstance(X, np.ndarray) or not isinstance(y, np.ndarray):
-                    if self.logger:
-                        self.logger.warning(f"Invalid data format for {currency_name}: X={type(X)}, y={type(y)}")
-                    continue
-                
-                if y.ndim != 1:
-                    if self.logger:
-                        self.logger.warning(f"Target variable not 1D for {currency_name}: y.shape={y.shape}")
-                    continue
-                
-                # Time series cross-validation
+            # Use provided validation data if available, otherwise use cross-validation
+            if X_val is not None and y_val is not None:
+                # Use provided validation data
+                model.model.fit(X, y)
+                y_pred = model.predict(X_val)
+                mae = mean_absolute_error(y_val, y_pred)
+                return float(mae)
+            else:
+                # Fall back to time series cross-validation
                 tscv = TimeSeriesSplit(n_splits=cv_folds)
                 scores = []
                 
@@ -682,20 +627,18 @@ class HyperparameterOptimizer:
                     mae = mean_absolute_error(y_val_fold, y_pred)
                     scores.append(mae)
                 
-                all_scores.extend(scores)
-            
-            result = float(np.mean(all_scores))
-            if self.logger:
-                self.logger.info(f"Trial {trial.number} completed with MAE: {result:.4f}")
-            return result
+                return float(np.mean(scores))
         
         # Create study with proper storage for parallelization
+        # Make study name unique per currency and model type to avoid conflicts
+        study_name = f"{model_class.__name__}_{currency}_{self.config.random_state}"
+        
         if self.config.max_optuna_workers > 1:
             # Use JournalStorage for multi-threaded parallelization
             import tempfile
             import os
             temp_dir = tempfile.gettempdir()
-            storage_file = os.path.join(temp_dir, f"optuna_{model_name}_{self.config.random_state}.log")
+            storage_file = os.path.join(temp_dir, f"optuna_{study_name}.log")
             storage = optuna.storages.JournalStorage(
                 optuna.storages.journal.JournalFileBackend(storage_file)
             )
@@ -704,7 +647,8 @@ class HyperparameterOptimizer:
                 sampler=TPESampler(seed=self.config.random_state),
                 pruner=MedianPruner(),
                 storage=storage,
-                study_name=f"agnostic_{model_name}_{self.config.random_state}"
+                study_name=study_name,
+                load_if_exists=True  # Load existing study if it exists
             )
             if self.logger:
                 self.logger.info(f"Using JournalStorage for parallel optimization: {storage_file}")
@@ -713,40 +657,34 @@ class HyperparameterOptimizer:
             study = optuna.create_study(
                 direction='minimize',
                 sampler=TPESampler(seed=self.config.random_state),
-                pruner=MedianPruner()
+                pruner=MedianPruner(),
+                study_name=study_name,
+                load_if_exists=True  # Load existing study if it exists
             )
             if self.logger:
                 self.logger.info("Using in-memory storage for single-threaded optimization")
         
-        # Optimize with parallelization
-        study.optimize(objective, n_trials=self.config.n_trials, n_jobs=self.config.max_optuna_workers)
-        
-        # Cache the results
-        self._optimized_params[model_name] = study.best_params
-        self._optimization_completed[model_name] = True
+        # Check if we're likely running in a parallel context (multiple currency workers)
+        import os
+        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '6'))
+        if max_currency_workers > 1:
+            # For 8 vCPU: 6 currency workers × 2-3 Optuna workers = 12-18 processes (optimal)
+            optuna_workers = max(1, min(self.config.max_optuna_workers, 3))
+            if self.logger:
+                self.logger.info(f"Allocating {optuna_workers} Optuna workers for parallel currency training (8 vCPU optimized)")
+        else:
+            # Single currency worker: can use full Optuna parallelism
+            optuna_workers = self.config.max_optuna_workers
+            if self.logger:
+                self.logger.info(f"Using full Optuna parallelism: {optuna_workers} workers")
+            
+        study.optimize(objective, n_trials=self.config.n_trials, n_jobs=optuna_workers)
         
         if self.logger:
-            self.logger.info(f"Agnostic optimization completed for {model_name}. Best MAE: {study.best_value:.4f}")
-            self.logger.info(f"Optimized parameters: {study.best_params}")
-            
-            # Verify parallelization worked
-            completed_trials = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
-            failed_trials = len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])
-            self.logger.info(f"Parallelization verification: {completed_trials} completed trials, {failed_trials} failed trials")
-            
-            # Log trial execution times to verify parallelization
-            if len(study.trials) > 1:
-                trial_times = []
-                for trial in study.trials:
-                    if trial.state == optuna.trial.TrialState.COMPLETE and hasattr(trial, 'datetime_start') and hasattr(trial, 'datetime_complete'):
-                        duration = (trial.datetime_complete - trial.datetime_start).total_seconds()
-                        trial_times.append(duration)
-                
-                if trial_times:
-                    avg_time = sum(trial_times) / len(trial_times)
-                    self.logger.info(f"Average trial duration: {avg_time:.2f} seconds")
+            self.logger.info(f"Optimization completed. Best MAE: {study.best_value:.4f}")
         
         return study.best_params
+    
     
     def get_optimized_params(self, model_name: str) -> Optional[Dict[str, Any]]:
         """Get cached optimized parameters for a model type."""
@@ -776,57 +714,6 @@ class ModelTrainer:
         # Initialize hyperparameter optimizer
         self.hyperparameter_optimizer = HyperparameterOptimizer(self.config, self.logger)
     
-    def optimize_hyperparameters_agnostic(
-        self,
-        sample_currencies_data: List[Tuple[np.ndarray, np.ndarray, str]]
-    ) -> None:
-        """
-        Perform agnostic hyperparameter optimization using representative currency data.
-        
-        This method optimizes hyperparameters once using sample data from multiple currencies,
-        then applies the optimized parameters to all subsequent training.
-        
-        Args:
-            sample_currencies_data: List of (X, y, currency_name) tuples from representative currencies
-        """
-        if self.config.n_trials <= 1:
-            if self.logger:
-                self.logger.info("Hyperparameter optimization disabled (n_trials <= 1)")
-            return
-        
-        if self.logger:
-            self.logger.info(f"Starting agnostic hyperparameter optimization using {len(sample_currencies_data)} sample currencies")
-        
-        # Extract sample data for each model type (keep currency_name for debugging)
-        sample_data = sample_currencies_data
-        
-        # Log sample data structure for debugging
-        if self.logger and sample_data:
-            first_sample = sample_data[0]
-            self.logger.info(f"Sample data structure: {len(first_sample)} elements per sample")
-            if len(first_sample) >= 3:
-                X, y, currency_name = first_sample
-                self.logger.info(f"First sample - Currency: {currency_name}, X shape: {X.shape}, y shape: {y.shape}")
-        
-        # Optimize LightGBM if enabled
-        if self.config.use_lightgbm:
-            if self.logger:
-                self.logger.info("Optimizing LightGBM hyperparameters agnostically...")
-            self.hyperparameter_optimizer.optimize_agnostic(
-                LightGBMModel, sample_data, "lightgbm", self.config.cv_folds
-            )
-        
-        # Optimize XGBoost if enabled
-        if self.config.use_xgboost:
-            if self.logger:
-                self.logger.info("Optimizing XGBoost hyperparameters agnostically...")
-            self.hyperparameter_optimizer.optimize_agnostic(
-                XGBoostModel, sample_data, "xgboost", self.config.cv_folds
-            )
-        
-        # Optimize RandomForest if needed (for single model training)
-        if self.logger:
-            self.logger.info("Agnostic hyperparameter optimization completed for all model types")
     
     def train_single_model(
         self,
@@ -884,7 +771,6 @@ class ModelTrainer:
         
         # Calculate cross-validation scores
         cv_scores = self._calculate_cv_scores(model, X_train, y_train)
-        print(f"CV scores: {cv_scores}")
         training_time = time.time() - start_time
         
         # Get hyperparameters
@@ -915,41 +801,68 @@ class ModelTrainer:
         y_val: np.ndarray,
         currency: str
     ) -> EnsembleModel:
-        """Train ensemble model using agnostic hyperparameter optimization."""
+        """Train ensemble model using per-currency hyperparameter optimization."""
         models = []
         
-        # Use agnostic hyperparameter optimization if enabled
+        # Perform per-currency hyperparameter optimization if enabled
         if self.config.n_trials > 1:
             if self.config.use_lightgbm:
                 lgb_model = LightGBMModel(self.config, self.logger)
                 
-                # Get optimized parameters
-                if self.hyperparameter_optimizer.is_optimized("lightgbm"):
-                    optimized_params = self.hyperparameter_optimizer.get_optimized_params("lightgbm")
+                # Perform individual optimization for this currency
+                if self.logger:
+                    self.logger.info(f"Optimizing LightGBM hyperparameters for {currency}")
+                
+                try:
+                    optimized_params = self.hyperparameter_optimizer.optimize(
+                        LightGBMModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
+                    )
                     lgb_model.model = lgb_model._create_model_with_params(optimized_params)
+                except Exception as e:
                     if self.logger:
-                        self.logger.info(f"Using agnostic LightGBM params for {currency}")
-                else:
-                    raise RuntimeError(f"Agnostic LightGBM optimization not completed for {currency}. This indicates a configuration or optimization failure.")
+                        self.logger.warning(f"LightGBM optimization failed for {currency}: {e}. Using default parameters.")
+                    lgb_model.model = lgb_model._create_model()
+                
+                if self.logger:
+                    self.logger.info(f"Using optimized LightGBM params for {currency}")
                 
                 models.append(lgb_model)
             
             if self.config.use_xgboost:
                 xgb_model = XGBoostModel(self.config, self.logger)
                 
-                # Get optimized parameters
-                if self.hyperparameter_optimizer.is_optimized("xgboost"):
-                    optimized_params = self.hyperparameter_optimizer.get_optimized_params("xgboost")
+                # Perform individual optimization for this currency
+                if self.logger:
+                    self.logger.info(f"Optimizing XGBoost hyperparameters for {currency}")
+                
+                try:
+                    optimized_params = self.hyperparameter_optimizer.optimize(
+                        XGBoostModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
+                    )
                     xgb_model.model = xgb_model._create_model_with_params(optimized_params)
+                except Exception as e:
                     if self.logger:
-                        self.logger.info(f"Using agnostic XGBoost params for {currency}")
-                else:
-                    raise RuntimeError(f"Agnostic XGBoost optimization not completed for {currency}. This indicates a configuration or optimization failure.")
+                        self.logger.warning(f"XGBoost optimization failed for {currency}: {e}. Using default parameters.")
+                    xgb_model.model = xgb_model._create_model()
+                
+                if self.logger:
+                    self.logger.info(f"Using optimized XGBoost params for {currency}")
                 
                 models.append(xgb_model)  # type: ignore[arg-type]
         else:
-            # This should not happen if agnostic optimization is properly configured
-            raise RuntimeError(f"Hyperparameter optimization is disabled (n_trials={self.config.n_trials}). This will result in poor model performance. Set n_trials > 1 to enable optimization.")
+            # Use default parameters if optimization is disabled
+            if self.logger:
+                self.logger.warning(f"Hyperparameter optimization disabled for {currency}. Using default parameters.")
+            
+            if self.config.use_lightgbm:
+                lgb_model = LightGBMModel(self.config, self.logger)
+                lgb_model.model = lgb_model._create_model()
+                models.append(lgb_model)
+            
+            if self.config.use_xgboost:
+                xgb_model = XGBoostModel(self.config, self.logger)
+                xgb_model.model = xgb_model._create_model()
+                models.append(xgb_model)  # type: ignore[arg-type]
         
         ensemble = EnsembleModel(models, logger=self.logger)  # type: ignore[arg-type]
         ensemble.fit(X_train, y_train, X_val, y_val)
@@ -971,17 +884,23 @@ class ModelTrainer:
             optimizer = HyperparameterOptimizer(self.config, self.logger)
             
             if model_type == "lightgbm":
-                model, params = optimizer.optimize(
-                    LightGBMModel, X_train, y_train, currency, self.config.cv_folds
+                params = optimizer.optimize(
+                    LightGBMModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
                 )
+                model = LightGBMModel(self.config, self.logger)
+                model.model = model._create_model_with_params(params)
             elif model_type == "xgboost":
-                model, params = optimizer.optimize(
-                    XGBoostModel, X_train, y_train, currency, self.config.cv_folds
+                params = optimizer.optimize(
+                    XGBoostModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
                 )
+                model = XGBoostModel(self.config, self.logger)
+                model.model = model._create_model_with_params(params)
             elif model_type == "random_forest":
-                model, params = optimizer.optimize(
-                    RandomForestModel, X_train, y_train, currency, self.config.cv_folds
+                params = optimizer.optimize(
+                    RandomForestModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
                 )
+                model = RandomForestModel(self.config, self.logger)
+                model.model = model._create_model_with_params(params)
             else:
                 raise ValueError(f"Unknown model type: {model_type}")
             
