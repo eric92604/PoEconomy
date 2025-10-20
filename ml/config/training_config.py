@@ -19,9 +19,9 @@ class ModelConfig:
     use_xgboost: bool = True
     use_ensemble: bool = True
     
-    max_currency_workers: int = field(default_factory=lambda: int(os.getenv('MAX_CURRENCY_WORKERS', '8')))
-    max_optuna_workers: int = 8
-    model_n_jobs: int = 8
+    max_currency_workers: int = field(default_factory=lambda: int(os.getenv('MAX_CURRENCY_WORKERS', '6')))
+    max_optuna_workers: int = 4
+    model_n_jobs: int = 4
     
     # Training Parameters
     test_size: float = 0.2
@@ -31,7 +31,7 @@ class ModelConfig:
     
     
     # Hyperparameter Optimization
-    n_trials: int = 100
+    n_trials: int = 50  # Optimal for 8 vCPU system - balances thoroughness with efficiency
     
     # Model Performance
     max_depth: int = 8
@@ -207,8 +207,8 @@ class ExperimentConfig:
     
     def __post_init__(self) -> None:
         if self.experiment_id is None:
-            from datetime import datetime
-            self.experiment_id = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            # Use consistent ID for production training
+            self.experiment_id = "production_training"
 
 
 @dataclass
@@ -242,8 +242,8 @@ class TrainingPipelineConfig:
     
     def __post_init__(self) -> None:
         if self.experiment_id is None:
-            from datetime import datetime
-            self.experiment_id = f"parallel_exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            # Use consistent ID for production training
+            self.experiment_id = "production_training"
 
 
 @dataclass
@@ -425,8 +425,7 @@ def get_all_currencies_config() -> MLConfig:
     # Adjust processing for larger scale
     
     # Experiment settings
-    import pandas as pd
-    config.experiment.experiment_id = f"all_currencies_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"
+    config.experiment.experiment_id = "production_training"
     config.experiment.description = "Training models for all currencies with sufficient historical data"
     config.experiment.tags = ["production", "all_currencies", "comprehensive"]
     
@@ -441,8 +440,7 @@ def get_high_value_config() -> MLConfig:
     config.data.min_records_threshold = 20  # Balanced threshold for rare items
     
     # Experiment settings
-    import pandas as pd
-    config.experiment.experiment_id = f"high_value_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"
+    config.experiment.experiment_id = "production_training"
     config.experiment.description = "Training models for high-value currencies including Mirror items"
     config.experiment.tags = ["production", "high_value", "comprehensive"]
     
