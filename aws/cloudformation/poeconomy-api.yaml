@@ -99,7 +99,7 @@ Resources:
       FunctionName: !Sub 'poeconomy-${EnvironmentName}-api'
       Description: Serve cached predictions and metadata via API Gateway.
       Runtime: python3.11
-      Handler: lambda.prediction_api_handler.lambda_handler
+      Handler: prediction_api_handler.lambda_handler
       Role: !GetAtt ApiLambdaRole.Arn
       Code:
         S3Bucket: 

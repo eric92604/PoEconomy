@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 from boto3.dynamodb.conditions import Key
 
-from .config import AppEnvironment, load_environment
+from ..config import AppEnvironment, load_environment
 
 # Set up standardized logging
 from ml.utils.common_utils import setup_standard_logging
