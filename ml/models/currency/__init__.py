@@ -1,0 +1,1 @@
+"""Currency models package."""
