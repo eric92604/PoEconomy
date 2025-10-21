@@ -111,6 +111,7 @@ Resources:
       Environment:
         Variables:
           ENVIRONMENT: !Ref EnvironmentName
+          AWS_REGION: !Ref AWS::Region
           MODELS_BUCKET: 
             Fn::ImportValue:
               Fn::Sub: '${BaseStackName}-DataLakeBucket'
@@ -119,19 +120,13 @@ Resources:
           DYNAMO_CURRENCY_METADATA_TABLE: 
             Fn::ImportValue:
               Fn::Sub: '${IngestionStackName}-CurrencyMetadataTableName'
-          CURRENCY_METADATA_TABLE: 
-            Fn::ImportValue:
-              Fn::Sub: '${IngestionStackName}-CurrencyMetadataTableName'
-          LIVE_PRICES_TABLE: 
-            Fn::ImportValue:
-              Fn::Sub: '${IngestionStackName}-LivePricesTableName'
           DYNAMO_CURRENCY_PRICES_TABLE: 
             Fn::ImportValue:
               Fn::Sub: '${IngestionStackName}-LivePricesTableName'
-          PREDICTIONS_TABLE: 
+          DYNAMO_PREDICTIONS_TABLE: 
             Fn::ImportValue:
               Fn::Sub: '${PredictionStackName}-PredictionsTableName'
-          LEAGUE_METADATA_TABLE: 
+          DYNAMO_LEAGUE_METADATA_TABLE: 
             Fn::ImportValue:
               Fn::Sub: '${IngestionStackName}-LeagueMetadataTableName'
           DAILY_PRICES_TABLE: 
