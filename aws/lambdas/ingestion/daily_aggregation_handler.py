@@ -8,16 +8,23 @@ It can be triggered by EventBridge (daily) or manually via API.
 
 import json
 import os
-import sys
+import time
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
-# Add the ml directory to the path
-sys.path.append("/var/task/ml")
+import boto3
 
 from ml.services.daily_price_aggregation import DailyPriceAggregator
-from ml.utils.logging_config import MLLogger
-from ml.config.training_config import MLConfig
+from ml.utils.common_utils import MLLogger, setup_standard_logging
+from ..config import AppEnvironment, load_environment
+
+# Set up standardized logging
+LOGGER = setup_standard_logging(
+    name="DailyAggregationHandler",
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    console_output=True,
+    suppress_external=True
+)
 
 
 def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
@@ -34,6 +41,12 @@ def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
     Returns:
         Dictionary with aggregation results
     """
+    LOGGER.debug("Received event: %s", json.dumps(event or {}))
+    
+    app_env = load_environment()
+    session = boto3.session.Session(region_name=app_env.region_name)
+    dynamodb = session.resource("dynamodb")
+    
     logger = MLLogger("DailyAggregationLambda", level=os.getenv("LOG_LEVEL", "INFO"))
     
     try:
@@ -52,12 +65,12 @@ def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
         logger.info(f"Event: {json.dumps(event)}")
         
         # Initialize aggregator
-        aggregator = DailyPriceAggregator(logger=logger)
+        aggregator = DailyPriceAggregator(region_name=app_env.region_name, logger=logger)
         
         if action == "aggregate":
             # Get currencies and leagues to process
             if not currencies or not leagues:
-                currencies, leagues = _get_default_currencies_and_leagues(logger)
+                currencies, leagues = _get_default_currencies_and_leagues(app_env, dynamodb, logger)
             
             logger.info(f"Processing {len(currencies)} currencies across {len(leagues)} leagues")
             
@@ -129,22 +142,20 @@ def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
         }
 
 
-def _get_default_currencies_and_leagues(logger: MLLogger) -> tuple[List[str], List[str]]:
+def _get_default_currencies_and_leagues(app_env: AppEnvironment, dynamodb, logger: MLLogger) -> tuple[List[str], List[str]]:
     """Get default currencies and leagues from configuration.
     
     Args:
+        app_env: Application environment configuration
+        dynamodb: DynamoDB resource
         logger: Logger instance
         
     Returns:
         Tuple of (currencies, leagues)
     """
     try:
-        config = MLConfig()
-        
         # Get currencies from metadata table
-        import boto3
-        dynamodb = boto3.resource("dynamodb", region_name=config.dynamo.region_name)
-        metadata_table = dynamodb.Table(config.dynamo.currency_metadata_table)
+        metadata_table = dynamodb.Table(app_env.currency_metadata_table)
         
         # Get unique currencies and leagues
         response = metadata_table.scan(

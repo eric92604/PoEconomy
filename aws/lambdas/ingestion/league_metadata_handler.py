@@ -96,14 +96,14 @@ def lambda_handler(event: Optional[dict], _context) -> Dict[str, object]:
 
         # Update results
         results["total_league_items"] = len(league_items)
-        results["processed_leagues"] = [item["league"] for item in league_items]
+        results["processed_leagues"] = [item["league_name"] for item in league_items]
         
         # Categorize leagues by update type
         for item in league_items:
             if item.get("is_new_league", False):
-                results["new_leagues"].append(item["league"])
+                results["new_leagues"].append(item["league_name"])
             else:
-                results["updated_leagues"].append(item["league"])
+                results["updated_leagues"].append(item["league_name"])
 
         logger.info("POE Watch league metadata ingestion complete.")
         logger.info(f"Processed {len(league_items)} leagues: {len(results['new_leagues'])} new, {len(results['updated_leagues'])} updated")
