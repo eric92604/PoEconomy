@@ -1,4 +1,10 @@
-"""Lambda handler that exposes the prediction API over API Gateway."""
+"""Lambda handler that exposes the prediction API over API Gateway.
+
+- Read from DynamoDB tables
+- Return JSON responses
+- Handle HTTP requests
+
+"""
 
 from __future__ import annotations
 
@@ -14,30 +20,37 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 from boto3.dynamodb.conditions import Key
 
-from ..config import AppEnvironment, load_environment
+class AppEnvironment:
+    def __init__(self):
+        self.region_name = os.getenv("AWS_DEFAULT_REGION", "us-west-2")
+        self.currency_metadata_table = os.getenv("DYNAMO_CURRENCY_METADATA_TABLE")
+        self.live_prices_table = os.getenv("DYNAMO_CURRENCY_PRICES_TABLE")
+        self.predictions_table = os.getenv("DYNAMO_PREDICTIONS_TABLE")
+        self.league_metadata_table = os.getenv("DYNAMO_LEAGUE_METADATA_TABLE")
+        self.daily_prices_table = os.getenv("DAILY_PRICES_TABLE")
 
-# Set up standardized logging
-from ml.utils.common_utils import setup_standard_logging
-LOGGER = setup_standard_logging(
-    name="PredictionAPIHandler",
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    console_output=True,
-    suppress_external=True
-)
+def load_environment() -> AppEnvironment:
+    return AppEnvironment()
+
+# Simple logging setup
+LOGGER = logging.getLogger("MinimalAPIHandler")
+LOGGER.setLevel(logging.INFO)
+if not LOGGER.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    LOGGER.addHandler(handler)
 
 _APP_ENV: Optional[AppEnvironment] = None
 _DYNAMO_RESOURCE = None
 _METADATA_TABLE = None
 _PREDICTIONS_TABLE = None
-_PRICES_TABLE = None
+_PRICING_TABLE = None
 
-# In-memory cache for live prices (since data only changes every hour)
-_PRICES_CACHE: Dict[str, Tuple[Dict[str, Any], float]] = {}
-_CACHE_TTL: int = 55 * 60  # 55 minutes (5 minutes before next ingestion)
 
 def lambda_handler(event: dict, _context) -> dict:
     """Handle API Gateway proxy events."""
-    global _APP_ENV, _DYNAMO_RESOURCE, _METADATA_TABLE, _PREDICTIONS_TABLE, _PRICES_TABLE
+    global _APP_ENV, _DYNAMO_RESOURCE, _METADATA_TABLE, _PREDICTIONS_TABLE, _PRICING_TABLE
 
     if _APP_ENV is None:
         _APP_ENV = load_environment()
@@ -49,7 +62,7 @@ def lambda_handler(event: dict, _context) -> dict:
             _PREDICTIONS_TABLE = _DYNAMO_RESOURCE.Table(_APP_ENV.predictions_table)
         else:
             raise RuntimeError("DYNAMO_PREDICTIONS_TABLE environment variable is required for the API handler")
-        _PRICES_TABLE = _DYNAMO_RESOURCE.Table(_APP_ENV.live_prices_table)
+        _PRICING_TABLE = _DYNAMO_RESOURCE.Table(_APP_ENV.live_prices_table)
 
     request = ApiRequest.from_event(event)
     LOGGER.debug("Handling %s %s", request.http_method, request.path)
@@ -88,18 +101,7 @@ def lambda_handler(event: dict, _context) -> dict:
         response_body = {"message": "Internal server error", "detail": str(exc)}
         status = HTTPStatus.INTERNAL_SERVER_ERROR
 
-    # Add cache headers for specific endpoints
     headers = _cors_headers()
-    if request.path == "/prices/live" and status == HTTPStatus.OK:
-        headers.update({
-            "Cache-Control": "public, max-age=300",  # 5 minutes browser cache
-            "ETag": f'"{hash(str(response_body))}"',  # Simple ETag for conditional requests
-        })
-    elif request.path == "/predict/latest" and status == HTTPStatus.OK:
-        headers.update({
-            "Cache-Control": "public, max-age=600",  # 10 minutes browser cache (optimal for fresh data)
-            "ETag": f'"{hash(str(response_body))}"',  # Simple ETag for conditional requests
-        })
     
     return {
         "statusCode": status.value,
@@ -163,6 +165,7 @@ class ClientFacingError(Exception):
 
 
 def _list_currencies() -> Dict[str, Any]:
+    """List all available currencies from metadata table."""
     assert _METADATA_TABLE is not None
     response = _METADATA_TABLE.scan(ProjectionExpression="currency, league, last_updated, icon_url, is_available, category")
     items = response.get("Items", [])
@@ -193,6 +196,7 @@ def _list_currencies() -> Dict[str, Any]:
 
 
 def _list_leagues() -> Dict[str, Any]:
+    """List all available leagues from metadata table."""
     assert _METADATA_TABLE is not None
     response = _METADATA_TABLE.scan(ProjectionExpression="league, last_updated")
     leagues: Dict[str, Any] = {}
@@ -217,6 +221,7 @@ def _list_leagues() -> Dict[str, Any]:
 
 
 def _handle_single_prediction(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], HTTPStatus]:
+    """Handle single prediction request."""
     currency = _require_string(payload, "currency")
     league = payload.get("league")
     horizon = payload.get("horizon", "1d")
@@ -232,6 +237,7 @@ def _handle_single_prediction(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], 
 
 
 def _handle_batch_prediction(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], HTTPStatus]:
+    """Handle batch prediction request."""
     requests = payload.get("requests")
     if not isinstance(requests, list) or not requests:
         raise ClientFacingError("requests must be a non-empty list.")
@@ -251,16 +257,7 @@ def _handle_batch_prediction(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], H
 
 
 def _handle_currency_predictions(query_params: Dict[str, str]) -> Tuple[Dict[str, Any], HTTPStatus]:
-    """Handle currency predictions endpoint using the new GSI for efficient queries.
-    
-    GET /predict/currency?currency=Divine Orb&league=Mercenaries&horizons=1d,3d,7d
-    
-    Args:
-        query_params: Query parameters from the request
-        
-    Returns:
-        Tuple of (response_body, status_code)
-    """
+    """Handle currency predictions endpoint using the new GSI for efficient queries."""
     currency = query_params.get("currency")
     if not currency:
         raise ClientFacingError("currency parameter is required")
@@ -293,19 +290,7 @@ def _handle_currency_predictions(query_params: Dict[str, str]) -> Tuple[Dict[str
 
 
 def _handle_latest_predictions(query_params: Dict[str, str]) -> Tuple[Dict[str, Any], HTTPStatus]:
-    """Handle latest predictions endpoint for frontend dashboard.
-    
-    This endpoint is optimized for frontend applications that need to load
-    all currency predictions across all horizons for the latest prediction time.
-    
-    GET /predict/latest?league=Mercenaries&horizons=1d,3d,7d&limit=50
-    
-    Args:
-        query_params: Query parameters from the request
-        
-    Returns:
-        Tuple of (response_body, status_code)
-    """
+    """Handle latest predictions endpoint for frontend dashboard."""
     league = query_params.get("league")
     horizons_param = query_params.get("horizons", "1d,3d,7d")
     horizons = [h.strip() for h in horizons_param.split(",") if h.strip()]
@@ -318,7 +303,6 @@ def _handle_latest_predictions(query_params: Dict[str, str]) -> Tuple[Dict[str, 
         raise ClientFacingError("at least one horizon must be specified")
     
     # Fetch fresh data from DynamoDB using efficient GSI queries
-    # Note: Caching is handled by Cloudflare Worker for better performance
     predictions_data = _fetch_latest_predictions_from_db(league, horizons, limit)
     
     return predictions_data, HTTPStatus.OK
@@ -329,19 +313,7 @@ def _fetch_latest_predictions_from_db(
     horizons: List[str], 
     limit: int
 ) -> Dict[str, Any]:
-    """Fetch latest predictions for all currencies across specified horizons.
-    
-    This function uses the currency-horizon-index GSI for optimal performance
-    and aggregates results by currency and horizon.
-    
-    Args:
-        league: League name (optional, will auto-detect if not provided)
-        horizons: List of prediction horizons to fetch
-        limit: Maximum number of currencies to return per horizon
-        
-    Returns:
-        Dictionary containing organized prediction data
-    """
+    """Fetch latest predictions for all currencies across specified horizons."""
     assert _PREDICTIONS_TABLE is not None
     
     # Auto-detect league if not provided
@@ -415,14 +387,7 @@ def _fetch_latest_predictions_from_db(
 
 
 def _get_available_currencies(league: str) -> List[str]:
-    """Get list of available currencies for a specific league.
-    
-    Args:
-        league: League name
-        
-    Returns:
-        List of currency names, sorted by popularity/importance
-    """
+    """Get list of available currencies for a specific league."""
     assert _METADATA_TABLE is not None
     
     try:
@@ -461,17 +426,7 @@ def _get_available_currencies(league: str) -> List[str]:
 
 
 def _format_prediction_item(item: Dict[str, Any], currency: str, league: str, horizon: str) -> Dict[str, Any]:
-    """Format a prediction item for consistent API response.
-    
-    Args:
-        item: Raw prediction item from DynamoDB
-        currency: Currency name
-        league: League name
-        horizon: Prediction horizon
-        
-    Returns:
-        Formatted prediction data
-    """
+    """Format a prediction item for consistent API response."""
     # Handle both old and new data formats
     if "prediction_data" in item:
         # Old format: prediction_data field contains JSON (legacy support)
@@ -511,13 +466,13 @@ def _format_prediction_item(item: Dict[str, Any], currency: str, league: str, ho
 
 
 def _fetch_cached_prediction(currency: str, league: Optional[str], horizon: str) -> Optional[Dict[str, Any]]:
+    """Fetch a cached prediction from DynamoDB."""
     assert _PREDICTIONS_TABLE is not None
     league_value = league or _infer_latest_league(currency)
     if not league_value:
         return None
     
     # Use the new currency-horizon-index GSI for much more efficient queries
-    # This avoids the need for FilterExpression and provides direct access by currency + horizon
     try:
         response = _PREDICTIONS_TABLE.query(
             IndexName='currency-horizon-index',
@@ -579,77 +534,34 @@ def _fetch_cached_prediction(currency: str, league: Optional[str], horizon: str)
 
 
 def _infer_latest_league(currency: str) -> Optional[str]:
-    # First try to get current active seasonal league from POE Watch API
-    try:
-        from ml.utils.data_sources import create_data_source, DataSourceConfig
-        from ml.config.training_config import DynamoConfig
-        
-        # Create data source to get current active seasonal league
-        dynamo_config = DynamoConfig(
-            region_name=os.getenv("AWS_DEFAULT_REGION", "us-west-2"),
-            currency_metadata_table=os.getenv("DYNAMO_CURRENCY_METADATA_TABLE"),
-            currency_prices_table=os.getenv("DYNAMO_CURRENCY_PRICES_TABLE"),
-            league_metadata_table=os.getenv("DYNAMO_LEAGUE_METADATA_TABLE")
-        )
-        data_source_config = DataSourceConfig.from_dynamo_config(dynamo_config)
-        data_source = create_data_source(data_source_config)
-        current_league = data_source.get_most_recent_league()
-        if current_league:
-            return current_league
-    except Exception as e:
-        LOGGER.warning("Failed to get current active seasonal league: %s", e)
-    
-    # Fallback: try to get league from metadata table
-    try:
-        from ml.config.training_config import DynamoConfig
-        
-        # Create DynamoDB configuration
-        dynamo_config = DynamoConfig(
-            currency_metadata_table=_METADATA_TABLE.table_name if _METADATA_TABLE else None,
-            currency_prices_table=_PRICES_TABLE.table_name if _PRICES_TABLE else None,
-            league_metadata_table=_METADATA_TABLE.table_name if _METADATA_TABLE else None,  # Assuming same table for now
-            region_name=os.getenv("AWS_REGION", "us-west-2")
-        )
-        
-        data_source_config = DataSourceConfig.from_dynamo_config(dynamo_config)
-        data_source = create_data_source(data_source_config)
-        most_recent_league = data_source.get_most_recent_league()
-        if most_recent_league:
-            return most_recent_league
-            
-    except Exception as e:
-        LOGGER.warning("Failed to get league from metadata table: %s", e)
-    
-    # Final fallback: check cached predictions
+    """Simple league inference without ML dependencies."""
+    # Try to get league from cached predictions
     assert _PREDICTIONS_TABLE is not None
-    response = _PREDICTIONS_TABLE.query(
-        IndexName="currency-timestamp-index",
-        KeyConditionExpression=Key("currency").eq(currency),
-        ScanIndexForward=False,
-        Limit=1,
-    )
-    items = response.get("Items")
-    if not items:
-        return None
-    prediction_key = items[0].get("prediction_key", "")
-    if "#" in prediction_key:
-        try:
-            _, league, _ = prediction_key.split("#", 2)
-            return league
-        except ValueError:
+    try:
+        response = _PREDICTIONS_TABLE.query(
+            IndexName="currency-timestamp-index",
+            KeyConditionExpression=Key("currency").eq(currency),
+            ScanIndexForward=False,
+            Limit=1,
+        )
+        items = response.get("Items")
+        if not items:
             return None
-    return items[0].get("league")
-
-
-
-
-
-
-
-
+        prediction_key = items[0].get("prediction_key", "")
+        if "#" in prediction_key:
+            try:
+                _, league, _ = prediction_key.split("#", 2)
+                return league
+            except ValueError:
+                return None
+        return items[0].get("league")
+    except Exception as e:
+        LOGGER.warning(f"Failed to infer league: {e}")
+        return None
 
 
 def _require_string(payload: Dict[str, Any], key: str) -> str:
+    """Require a non-empty string from payload."""
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ClientFacingError(f"{key} must be a non-empty string.")
@@ -657,6 +569,7 @@ def _require_string(payload: Dict[str, Any], key: str) -> str:
 
 
 def _cors_headers() -> Dict[str, str]:
+    """Return CORS headers."""
     return {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Headers": "Content-Type, Authorization",
@@ -665,14 +578,7 @@ def _cors_headers() -> Dict[str, str]:
 
 
 def _handle_live_prices(query_params: Dict[str, str]) -> Tuple[Dict[str, Any], HTTPStatus]:
-    """Handle live currency prices endpoint with caching.
-    
-    Args:
-        query_params: Query parameters from the request
-        
-    Returns:
-        Tuple of (response_body, status_code)
-    """
+    """Handle live currency prices endpoint."""
     currency = query_params.get("currency")
     league = query_params.get("league")
     limit = int(query_params.get("limit", "100"))
@@ -684,37 +590,13 @@ def _handle_live_prices(query_params: Dict[str, str]) -> Tuple[Dict[str, Any], H
     if hours <= 0 or hours > 168:  # Max 1 week
         raise ClientFacingError("hours must be between 1 and 168")
     
-    # Create cache key
-    cache_key = f"prices:{currency or 'all'}:{league or 'all'}:{limit}:{hours}"
-    
-    # Check in-memory cache first
-    current_time = time.time()
-    if cache_key in _PRICES_CACHE:
-        cached_data, cache_time = _PRICES_CACHE[cache_key]
-        if current_time - cache_time < _CACHE_TTL:
-            LOGGER.debug("Returning cached live prices data")
-            return cached_data, HTTPStatus.OK
-    
-    # Fetch from DynamoDB
     prices_data = _fetch_live_prices_from_db(currency, league, limit, hours)
-    
-    # Cache the result
-    _PRICES_CACHE[cache_key] = (prices_data, current_time)
     
     return prices_data, HTTPStatus.OK
 
 
 def _handle_historical_prices(query_params: Dict[str, str]) -> Tuple[Dict[str, Any], HTTPStatus]:
-    """Handle historical daily price data endpoint.
-    
-    GET /prices/historical?currency=Divine Orb&league=Mercenaries&start_date=2024-01-01&end_date=2024-01-31&limit=100
-    
-    Args:
-        query_params: Query parameters from the request
-        
-    Returns:
-        Tuple of (response_body, status_code)
-    """
+    """Handle historical daily price data endpoint."""
     currency = query_params.get("currency")
     league = query_params.get("league")
     start_date = query_params.get("start_date")
@@ -731,6 +613,7 @@ def _handle_historical_prices(query_params: Dict[str, str]) -> Tuple[Dict[str, A
     
     # Validate date format
     try:
+        from datetime import datetime
         datetime.strptime(start_date, "%Y-%m-%d")
         if end_date:
             datetime.strptime(end_date, "%Y-%m-%d")
@@ -760,20 +643,9 @@ def _fetch_historical_prices_from_db(
     end_date: str = None,
     limit: int = 100
 ) -> Dict[str, Any]:
-    """Fetch historical daily prices from DynamoDB.
-    
-    Args:
-        currency: Currency name
-        league: League name
-        start_date: Start date in YYYY-MM-DD format
-        end_date: End date in YYYY-MM-DD format (optional)
-        limit: Maximum number of results
-        
-    Returns:
-        Dictionary containing historical price data
-    """
+    """Fetch historical daily prices from DynamoDB."""
     # Get the daily prices table name from environment
-    daily_prices_table_name = os.getenv("DYNAMO_DAILY_PRICES_TABLE", "poeconomy-daily-prices")
+    daily_prices_table_name = os.getenv("DAILY_PRICES_TABLE", "poeconomy-daily-prices")
     
     try:
         # Initialize DynamoDB resource
@@ -846,18 +718,8 @@ def _fetch_live_prices_from_db(
     limit: int, 
     hours: int
 ) -> Dict[str, Any]:
-    """Fetch live prices from DynamoDB with efficient queries.
-    
-    Args:
-        currency: Optional currency filter
-        league: Optional league filter  
-        limit: Maximum number of results
-        hours: Hours back to look for data
-        
-    Returns:
-        Dictionary containing prices and metadata
-    """
-    assert _PRICES_TABLE is not None
+    """Fetch live prices from DynamoDB with efficient queries."""
+    assert _PRICING_TABLE is not None
     
     # Calculate timestamp threshold (hours ago)
     current_time = int(time.time())
@@ -869,7 +731,7 @@ def _fetch_live_prices_from_db(
     try:
         if currency and league:
             # Query specific currency in specific league using GSI
-            response = _PRICES_TABLE.query(
+            response = _PRICING_TABLE.query(
                 IndexName="currency-timestamp-index",
                 KeyConditionExpression=Key("currency").eq(currency) & Key("timestamp").gte(hours_ago),
                 FilterExpression=Key("league").eq(league),
@@ -881,7 +743,7 @@ def _fetch_live_prices_from_db(
             
         elif currency:
             # Query specific currency across all leagues using GSI
-            response = _PRICES_TABLE.query(
+            response = _PRICING_TABLE.query(
                 IndexName="currency-timestamp-index", 
                 KeyConditionExpression=Key("currency").eq(currency) & Key("timestamp").gte(hours_ago),
                 ScanIndexForward=False,
@@ -892,7 +754,7 @@ def _fetch_live_prices_from_db(
             
         elif league:
             # Query specific league using GSI
-            response = _PRICES_TABLE.query(
+            response = _PRICING_TABLE.query(
                 IndexName="league-timestamp-index",
                 KeyConditionExpression=Key("league").eq(league) & Key("timestamp").gte(hours_ago),
                 ScanIndexForward=False,
@@ -903,7 +765,7 @@ def _fetch_live_prices_from_db(
             
         else:
             # Scan for all recent prices (less efficient, but works for small datasets)
-            response = _PRICES_TABLE.scan(
+            response = _PRICING_TABLE.scan(
                 FilterExpression=Key("timestamp").gte(hours_ago),
                 Limit=limit
             )
@@ -940,8 +802,8 @@ def _fetch_live_prices_from_db(
             },
             "last_updated": latest_update,
             "cache_info": {
-                "cached": True,
-                "cache_ttl_minutes": _CACHE_TTL // 60
+                "cached": False,
+                "cache_handled_by": "Cloudflare Worker"
             }
         }
     }
@@ -950,9 +812,9 @@ def _fetch_live_prices_from_db(
 def _get_latest_price_update_time() -> str:
     """Get the timestamp of the most recent price update."""
     try:
-        assert _PRICES_TABLE is not None
+        assert _PRICING_TABLE is not None
         # Get the most recent item to determine last update time
-        response = _PRICES_TABLE.scan(
+        response = _PRICING_TABLE.scan(
             Limit=1,
             ScanIndexForward=False
         )
@@ -968,6 +830,7 @@ def _get_latest_price_update_time() -> str:
 
 
 def _dynamodb_encoder(value: Any) -> Any:
+    """Encode DynamoDB types for JSON serialization."""
     if isinstance(value, Decimal):
         if value % 1 == 0:
             return int(value)

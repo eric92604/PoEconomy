@@ -21,6 +21,13 @@ Parameters:
   PredictionStackName:
     Type: String
     Description: Name of the prediction stack to import DynamoDB tables from
+  LambdaS3Bucket:
+    Type: String
+    Description: S3 bucket for Lambda deployment packages
+  LambdaVersion:
+    Type: String
+    Description: Version/timestamp for Lambda deployment package
+    Default: "latest"
 
 Resources:
   # IAM Role for API Lambda
@@ -98,20 +105,18 @@ Resources:
     Properties:
       FunctionName: !Sub 'poeconomy-${EnvironmentName}-api'
       Description: Serve cached predictions and metadata via API Gateway.
-      Runtime: python3.11
-      Handler: prediction_api_handler.lambda_handler
+      PackageType: Zip
+      Runtime: python3.12
       Role: !GetAtt ApiLambdaRole.Arn
       Code:
-        S3Bucket: 
-          Fn::ImportValue:
-            Fn::Sub: '${BaseStackName}-DataLakeBucket'
-        S3Key: lambda/api.zip
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Sub 'lambda/${EnvironmentName}-api-${LambdaVersion}.zip'
+      Handler: api.prediction_api_handler.lambda_handler
       Timeout: 30
       MemorySize: 1024
       Environment:
         Variables:
           ENVIRONMENT: !Ref EnvironmentName
-          AWS_REGION: !Ref AWS::Region
           MODELS_BUCKET: 
             Fn::ImportValue:
               Fn::Sub: '${BaseStackName}-DataLakeBucket'
@@ -119,19 +124,19 @@ Resources:
           MODELS_DIR: /var/task/models
           DYNAMO_CURRENCY_METADATA_TABLE: 
             Fn::ImportValue:
-              Fn::Sub: '${IngestionStackName}-CurrencyMetadataTableName'
+              Fn::Sub: '${IngestionStackName}-CurrencyMetadataTable'
           DYNAMO_CURRENCY_PRICES_TABLE: 
             Fn::ImportValue:
-              Fn::Sub: '${IngestionStackName}-LivePricesTableName'
+              Fn::Sub: '${IngestionStackName}-LivePricesTable'
           DYNAMO_PREDICTIONS_TABLE: 
             Fn::ImportValue:
-              Fn::Sub: '${PredictionStackName}-PredictionsTableName'
+              Fn::Sub: '${PredictionStackName}-PredictionsTable'
           DYNAMO_LEAGUE_METADATA_TABLE: 
             Fn::ImportValue:
-              Fn::Sub: '${IngestionStackName}-LeagueMetadataTableName'
+              Fn::Sub: '${IngestionStackName}-LeagueMetadataTable'
           DAILY_PRICES_TABLE: 
             Fn::ImportValue:
-              Fn::Sub: '${IngestionStackName}-DailyPricesTableName'
+              Fn::Sub: '${IngestionStackName}-DailyPricesTable'
           DATA_LAKE_BUCKET: 
             Fn::ImportValue:
               Fn::Sub: '${BaseStackName}-DataLakeBucket'

@@ -10,6 +10,7 @@ ENVIRONMENT=${1:-production}
 REGION=${AWS_DEFAULT_REGION:-us-west-2}
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Stack names
 BASE_STACK_NAME="poeconomy-${ENVIRONMENT}-base"
