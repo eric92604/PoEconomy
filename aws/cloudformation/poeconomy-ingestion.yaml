@@ -22,10 +22,6 @@ Parameters:
   BaseStackName:
     Type: String
     Description: Name of the base stack to import data lake bucket from
-  LambdaCodeVersion:
-    Type: String
-    Default: "1.0.0"
-    Description: Version identifier for Lambda function code to force updates
   IngestionContainerImageUri:
     Type: String
     Description: URI of the ingestion container image for Lambda functions
@@ -307,7 +303,9 @@ Resources:
                   - dynamodb:Query
                   - dynamodb:Scan
                 Resource:
+                  - !GetAtt CurrencyMetadataTable.Arn
                   - !GetAtt LivePricesTable.Arn
+                  - !GetAtt LeagueMetadataTable.Arn
                   - !GetAtt DailyPricesTable.Arn
       Tags:
         - Key: App
@@ -347,7 +345,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub 'poeconomy-${EnvironmentName}-ingestion'
-      Description: !Sub 'Ingest currency data from POE Watch API and store in DynamoDB (Version: ${LambdaCodeVersion})'
+      Description: 'Ingest currency data from POE Watch API and store in DynamoDB'
       PackageType: Image
       Code:
         ImageUri: !Ref IngestionContainerImageUri
@@ -386,7 +384,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub 'poeconomy-${EnvironmentName}-league-metadata'
-      Description: !Sub 'Ingest league metadata from POE API (Version: ${LambdaCodeVersion})'
+      Description: 'Ingest league metadata from POE API'
       PackageType: Image
       Code:
         ImageUri: !Ref IngestionContainerImageUri
@@ -425,7 +423,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub 'poeconomy-${EnvironmentName}-daily-aggregation'
-      Description: !Sub 'Aggregate hourly price data into daily price data (Version: ${LambdaCodeVersion})'
+      Description: 'Aggregate hourly price data into daily price data'
       PackageType: Image
       Code:
         ImageUri: !Ref IngestionContainerImageUri
