@@ -33,6 +33,8 @@ Resources:
           AttributeType: S
         - AttributeName: horizon
           AttributeType: S
+        - AttributeName: ttl
+          AttributeType: N
       KeySchema:
         - AttributeName: currency_league
           KeyType: HASH
@@ -46,16 +48,7 @@ Resources:
             - AttributeName: horizon
               KeyType: RANGE
           Projection:
-            ProjectionType: INCLUDE
-            NonKeyAttributes:
-              - league
-              - predicted_price
-              - price_change_percent
-              - confidence_score
-              - prediction_timestamp
-              - current_price
-              - prediction_lower
-              - prediction_upper
+            ProjectionType: ALL
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true
@@ -104,8 +97,21 @@ Resources:
                   - dynamodb:Scan
                 Resource:
                   - !GetAtt PredictionsTable.Arn
-                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/poeconomy-${EnvironmentName}-currency-metadata'
-                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/poeconomy-${EnvironmentName}-live-prices'
+                  - !Sub 
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${CurrencyMetadataTable}'
+                    - CurrencyMetadataTable: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-CurrencyMetadataTable'
+                  - !Sub 
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LivePricesTable}'
+                    - LivePricesTable: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-LivePricesTable'
+                  - !Sub 
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeagueMetadataTable}'
+                    - LeagueMetadataTable: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-LeagueMetadataTable'
         - PolicyName: S3Access
           PolicyDocument:
             Version: '2012-10-17'
@@ -168,15 +174,18 @@ Resources:
       Environment:
         Variables:
           ENVIRONMENT: !Ref EnvironmentName
-          MODELS_BUCKET: 
-            Fn::ImportValue:
-              Fn::Sub: '${BaseStackName}-DataLakeBucket'
-          MODELS_S3_PREFIX: models/currency
+          AWS_REGION: !Ref AWS::Region
           MODELS_DIR: /var/task/models
-          DYNAMO_CURRENCY_METADATA_TABLE: !Sub 'poeconomy-${EnvironmentName}-currency-metadata'
-          CURRENCY_METADATA_TABLE: !Sub 'poeconomy-${EnvironmentName}-currency-metadata'
-          LIVE_PRICES_TABLE: !Sub 'poeconomy-${EnvironmentName}-live-prices'
-          PREDICTIONS_TABLE: !Ref PredictionsTable
+          DYNAMO_CURRENCY_METADATA_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${IngestionStackName}-CurrencyMetadataTable'
+          DYNAMO_CURRENCY_PRICES_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${IngestionStackName}-LivePricesTable'
+          DYNAMO_LEAGUE_METADATA_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${IngestionStackName}-LeagueMetadataTable'
+          DYNAMO_PREDICTIONS_TABLE: !Ref PredictionsTable
           DATA_LAKE_BUCKET: 
             Fn::ImportValue:
               Fn::Sub: '${BaseStackName}-DataLakeBucket'
