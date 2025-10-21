@@ -45,7 +45,10 @@ def lambda_handler(event: dict, _context) -> dict:
     if _DYNAMO_RESOURCE is None:
         _DYNAMO_RESOURCE = boto3.resource("dynamodb", region_name=_APP_ENV.region_name)
         _METADATA_TABLE = _DYNAMO_RESOURCE.Table(_APP_ENV.currency_metadata_table)
-        _PREDICTIONS_TABLE = _DYNAMO_RESOURCE.Table(_APP_ENV.predictions_table)
+        if _APP_ENV.predictions_table:
+            _PREDICTIONS_TABLE = _DYNAMO_RESOURCE.Table(_APP_ENV.predictions_table)
+        else:
+            raise RuntimeError("DYNAMO_PREDICTIONS_TABLE environment variable is required for the API handler")
         _PRICES_TABLE = _DYNAMO_RESOURCE.Table(_APP_ENV.live_prices_table)
 
     request = ApiRequest.from_event(event)
