@@ -1,0 +1,15 @@
+# PoEconomy Ingestion Lambda requirements (compatible with GCC 7.3.1)
+# Minimal ML dependencies for ingestion operations
+
+# Core ML Libraries (exact versions for compatibility)
+numpy>=1.21.0,<2.0.0
+pandas>=1.5.0,<2.0.0
+scipy>=1.10.0
+
+# Data Processing
+python-dateutil>=2.8.0
+pytz>=2023.3
+
+# AWS/HTTP
+boto3>=1.28.0
+requests>=2.31.0
