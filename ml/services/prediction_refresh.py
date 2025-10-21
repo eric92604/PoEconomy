@@ -124,7 +124,7 @@ class DirectModelPredictor(ModelPredictor):
                         
                         # Create direct artifact
                         artifact = DirectModelArtifact(
-                            model_dir=model_dir,
+                            model_dir=metadata_file.parent,
                             scaler_path=scaler_file if scaler_file.exists() else None,
                             metadata_path=metadata_file,
                             metadata=metadata,
@@ -146,6 +146,14 @@ class DirectModelPredictor(ModelPredictor):
                 continue
         
         self.logger.info(f"Discovered {len(registry)} currencies with models")
+        
+        # Handle case where no valid models were discovered
+        if not registry:
+            self.logger.error("No valid model artifacts discovered in any model directories")
+            raise FileNotFoundError(
+                f"No valid model artifacts found in models directory: {self.models_dir}. "
+                f"Expected to find model_metadata.json files with corresponding ensemble_model.pkl files."
+            )
         
         # Log details about discovered models for debugging
         for currency, bundle in registry.items():
@@ -319,7 +327,6 @@ class DirectModelPredictor(ModelPredictor):
 
         except Exception as exc:
             self.logger.warning(f"Failed to generate prediction for {currency} ({horizon}): {exc}")
-            # Return None instead of raising exception to allow graceful handling
             return None
 
 
@@ -578,9 +585,26 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
         # Ensure models directory exists and contains bundled models
         actual_models_dir = _ensure_models_available(models_dir, logger)
         
-        predictor = DirectModelPredictor(models_dir=actual_models_dir, config=config, logger=logger)
-        data_source_config = DataSourceConfig.from_dynamo_config(config.dynamo)
-        data_source = create_data_source(data_source_config, logger)
+        # Initialize predictor with error handling
+        try:
+            predictor = DirectModelPredictor(models_dir=actual_models_dir, config=config, logger=logger)
+        except Exception as e:
+            logger.error(f"Failed to initialize DirectModelPredictor: {e}")
+            return {
+                "status": "predictor_init_failed",
+                "error": f"Failed to initialize predictor: {str(e)}"
+            }
+        
+        # Initialize data source with error handling
+        try:
+            data_source_config = DataSourceConfig.from_dynamo_config(config.dynamo)
+            data_source = create_data_source(data_source_config, logger)
+        except Exception as e:
+            logger.error(f"Failed to initialize data source: {e}")
+            return {
+                "status": "data_source_init_failed", 
+                "error": f"Failed to initialize data source: {str(e)}"
+            }
 
         target_currencies = _select_currencies(options, data_source, predictor, logger)
         if not target_currencies:

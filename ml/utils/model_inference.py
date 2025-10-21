@@ -79,7 +79,7 @@ class PredictionResult:
             "prediction_lower": self.prediction_lower,
             "prediction_upper": self.prediction_upper,
             "features_used": self.features_used,
-            "model_dir": str(self.model_dir),
+            "model_path": self.model_path,
             "metadata": self.metadata,
         }
 
