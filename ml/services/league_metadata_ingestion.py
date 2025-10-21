@@ -75,7 +75,8 @@ def build_league_metadata_items(
         league_type = _determine_league_type(league_name)
         
         item = {
-            "league": league_name,
+            "league_name": league_name,
+            "league": league_name,  # Keep both for backward compatibility
             "startDate": start_date.isoformat() if start_date else None,
             "endDate": end_date.isoformat() if end_date else None,
             "isActive": is_active,

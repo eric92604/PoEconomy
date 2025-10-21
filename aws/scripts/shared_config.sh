@@ -10,6 +10,7 @@ ENVIRONMENT=${1:-production}
 REGION=${AWS_DEFAULT_REGION:-us-west-2}
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Stack names
 BASE_STACK_NAME="poeconomy-${ENVIRONMENT}-base"
@@ -51,8 +52,18 @@ FEATURE_ENGINEERING_CRON="cron(0 2 * * ? *)"
 API_STAGE_NAME="api"
 
 # Task configuration
-TASK_TIMEOUT_MINUTES=60
+TASK_TIMEOUT_MINUTES=1440
 MAX_CURRENCIES_TO_TRAIN=0  # 0 = no limit
+
+# Training hyperparameters (can be overridden via environment variables)
+N_HYPERPARAMETER_TRIALS=${N_HYPERPARAMETER_TRIALS:-50}
+N_MODEL_TRIALS=${N_MODEL_TRIALS:-100}
+CV_FOLDS=${CV_FOLDS:-5}
+MAX_DEPTH=${MAX_DEPTH:-6}
+LEARNING_RATE=${LEARNING_RATE:-0.1}
+MAX_OPTUNA_WORKERS=${MAX_OPTUNA_WORKERS:-2}
+MODEL_N_JOBS=${MODEL_N_JOBS:-2}
+MIN_AVG_VALUE_THRESHOLD=${MIN_AVG_VALUE_THRESHOLD:-0.25}
 
 # Load environment variables if file exists
 if [[ -f "$ENV_FILE" ]]; then
@@ -457,6 +468,36 @@ package_and_upload_lambda() {
     
     echo "Packaging $lambda_name Lambda function..."
     
+    # Try using the Python packaging script first (more robust)
+    local python_script="$SCRIPT_DIR/package_lambda.py"
+    if [[ -f "$python_script" ]]; then
+        echo "Using Python packaging script for better reliability..."
+        local temp_dir=$(python -c "import tempfile; print(tempfile.mkdtemp())")
+        local temp_zip="$temp_dir/$zip_name"
+        
+        if python "$python_script" "$lambda_name" "$handler_file" "$temp_zip"; then
+            echo "Python packaging script succeeded"
+            
+            # Upload to S3
+            echo "Uploading $zip_name to S3..."
+            if aws s3 cp "$temp_zip" "s3://$DATA_LAKE_BUCKET_NAME/lambda/"; then
+                rm -rf "$temp_dir"
+                echo "✅ $lambda_name packaged and uploaded successfully"
+                return 0
+            else
+                echo "Error: Failed to upload $zip_name to S3"
+                rm -rf "$temp_dir"
+                return 1
+            fi
+        else
+            echo "Python packaging script failed, falling back to shell script method"
+            rm -rf "$temp_dir"
+        fi
+    fi
+    
+    # Fallback to original shell script method
+    echo "Using shell script packaging method..."
+    
     # Create temporary directory for packaging (Windows compatible)
     if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
         # Windows environment
@@ -511,6 +552,71 @@ package_and_upload_lambda() {
     cp "$SCRIPT_DIR/../lambdas/__init__.py" "$package_dir/"
     cp "$lambda_dir/requirements.txt" "$package_dir/"
     
+    # Copy ML modules that the Lambda functions depend on
+    echo "Copying ML modules..."
+    if ! python -c "
+import shutil
+import os
+import sys
+
+try:
+    # Handle Git Bash path conversion on Windows
+    root_dir_raw = r'$ROOT_DIR'
+    package_dir_raw = r'$package_dir'
+    
+    # Convert Git Bash paths to Windows paths if needed
+    if root_dir_raw.startswith('/c/'):
+        root_dir = 'C:' + root_dir_raw[2:].replace('/', '\\\\')
+    elif root_dir_raw.startswith('/'):
+        # Handle other Unix-style paths on Windows
+        root_dir = root_dir_raw[1:] + ':'
+    else:
+        root_dir = root_dir_raw
+    
+    # Normalize the package directory path
+    package_dir = os.path.normpath(package_dir_raw)
+    
+    ml_source = os.path.join(root_dir, 'ml')
+    ml_dest = os.path.join(package_dir, 'ml')
+    
+    print(f'Looking for ML source at: {ml_source}')
+    print(f'Target ML destination: {ml_dest}')
+    print(f'Root directory: {root_dir}')
+    print(f'Root directory exists: {os.path.exists(root_dir)}')
+    
+    if os.path.exists(root_dir):
+        print(f'Root directory contents: {os.listdir(root_dir)}')
+    
+    if os.path.exists(ml_source):
+        if os.path.exists(ml_dest):
+            shutil.rmtree(ml_dest)
+        shutil.copytree(ml_source, ml_dest)
+        print('ML modules copied successfully')
+        
+        # Verify the copy was successful
+        if os.path.exists(ml_dest):
+            print(f'ML destination exists: {os.path.exists(ml_dest)}')
+            print(f'ML destination contents: {os.listdir(ml_dest)}')
+        else:
+            print('Error: ML destination does not exist after copy')
+            sys.exit(1)
+    else:
+        print(f'Error: ML source directory not found: {ml_source}')
+        print(f'Root directory exists: {os.path.exists(root_dir)}')
+        if os.path.exists(root_dir):
+            print(f'Root directory contents: {os.listdir(root_dir)}')
+        sys.exit(1)
+except Exception as e:
+    print(f'Error copying ML modules: {e}')
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+"; then
+        echo "Error: Failed to copy ML modules"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    
     echo "Using requirements from $lambda_dir for $lambda_name"
     
     # Try to install dependencies, but continue if it fails
@@ -521,6 +627,18 @@ package_and_upload_lambda() {
         echo "Warning: Some dependencies failed to install, continuing with basic package..."
         # Install only basic dependencies that are likely to work
         pip install boto3 requests -t "$package_dir/" --quiet 2>/dev/null || true
+    fi
+    
+    # Verify ML modules are present in the package
+    if [[ ! -d "$package_dir/ml" ]]; then
+        echo "Warning: ML modules not found in package directory"
+        echo "Package directory contents:"
+        ls -la "$package_dir/" || true
+        echo "This may cause import errors in the Lambda function"
+    else
+        echo "ML modules verified in package directory"
+        echo "ML directory contents:"
+        ls -la "$package_dir/ml/" || true
     fi
     
     # Create zip file using Python (cross-platform compatible)

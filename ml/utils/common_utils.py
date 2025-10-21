@@ -21,7 +21,7 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 
-from ml.config.training_config import MLConfig, get_production_config, get_development_config, get_test_config
+from ml.config.training_config import MLConfig, get_default_config, get_all_currencies_config, get_high_value_config
 
 
 def create_base_parser(description: str, epilog: Optional[str] = None) -> argparse.ArgumentParser:
@@ -187,14 +187,14 @@ def load_config_from_args(args: Any) -> MLConfig:
     # Load based on mode
     if hasattr(args, 'mode'):
         if args.mode == 'production':
-            config = get_production_config()
+            config = get_default_config()
         elif args.mode == 'development':
-            config = get_development_config()
+            config = get_default_config()
         else:  # test
-            config = get_test_config()
+            config = get_default_config()
     else:
         # Default to production if no mode specified
-        config = get_production_config()
+        config = get_default_config()
     
     return config
 

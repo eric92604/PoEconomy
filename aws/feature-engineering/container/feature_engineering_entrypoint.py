@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 sys.path.append('/var/task/ml')
 
 from ml.pipelines.feature_engineering_pipeline import FeatureEngineeringPipeline
-from ml.config.training_config import get_production_config, get_development_config
+from ml.config.training_config import get_default_config, get_all_currencies_config
 
 # Set up standardized logging
 from ml.utils.common_utils import setup_standard_logging
@@ -86,9 +86,9 @@ def main():
         # Determine configuration mode
         mode = os.getenv('MODE', 'production')
         if mode == 'production':
-            config = get_production_config()
+            config = get_default_config()
         else:
-            config = get_development_config()
+            config = get_all_currencies_config()
         
         # Override config with environment variables
         if os.getenv('EXPERIMENT_ID'):

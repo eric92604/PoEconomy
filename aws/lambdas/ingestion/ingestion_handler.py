@@ -18,7 +18,7 @@ from ml.services.poe_watch_ingestion import (
 )
 from ml.utils.common_utils import MLLogger, setup_standard_logging
 
-from .config import AppEnvironment, load_environment
+from ..config import AppEnvironment, load_environment
 
 # Set up standardized logging
 LOGGER = setup_standard_logging(

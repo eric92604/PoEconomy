@@ -23,7 +23,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 warnings.filterwarnings('ignore')
 
-from ml.config.training_config import MLConfig, get_production_config, get_development_config, get_test_config
+from ml.config.training_config import MLConfig, get_default_config
 from ml.utils.common_utils import setup_ml_logging, MLLogger, ProgressLogger
 from ml.utils.model_training import ModelTrainer, save_model_artifacts, TrainingResult
 from ml.utils.data_processing import generate_target_currency_list
@@ -140,6 +140,22 @@ class ModelTrainingPipeline:
                 f"Training ALL currencies mode: {len(target_currencies)} currencies selected from processed data"
             )
             
+            # Apply threshold filtering
+            original_count = len(target_currencies)
+            target_currencies = self._filter_currencies_by_thresholds(target_currencies, processed_data)
+            filtered_count = len(target_currencies)
+            
+            if filtered_count < original_count:
+                self.logger.info(
+                    f"Filtered currencies by thresholds",
+                    extra={
+                        "original_count": original_count,
+                        "filtered_count": filtered_count,
+                        "min_records_threshold": int(self.config.data.min_records_threshold),
+                        "min_avg_value_threshold": float(self.config.data.min_avg_value_threshold)
+                    }
+                )
+            
             # Apply currency filter if specified
             if self.config.pipeline.currencies_to_train:
                 requested = {c.lower() for c in self.config.pipeline.currencies_to_train}
@@ -193,10 +209,10 @@ class ModelTrainingPipeline:
             self._processed_data = processed_data
             
             # Hyperparameter optimization
-            if self.config.model.n_trials <= 1:
-                self.logger.warning(f"Hyperparameter optimization is disabled (n_trials={self.config.model.n_trials}). This will result in poor model performance. Set n_trials > 1 to enable optimization.")
+            if self.config.model.n_hyperparameter_trials <= 1:
+                self.logger.warning(f"Hyperparameter optimization is disabled (n_hyperparameter_trials={self.config.model.n_hyperparameter_trials}). This will result in poor model performance. Set n_hyperparameter_trials > 1 to enable optimization.")
             else:
-                self.logger.info(f"Per-currency hyperparameter optimization enabled with n_trials={self.config.model.n_trials}")
+                self.logger.info(f"Per-currency hyperparameter optimization enabled with n_hyperparameter_trials={self.config.model.n_hyperparameter_trials}")
             
             # Use parallel training
             max_workers = self.config.model.max_currency_workers
@@ -511,6 +527,60 @@ class ModelTrainingPipeline:
             self.logger.error(f"Failed to extract currencies from processed data: {e}")
             return []
     
+    def _filter_currencies_by_thresholds(self, currencies: List[Dict[str, Any]], processed_data: pd.DataFrame) -> List[Dict[str, Any]]:
+        """
+        Filter currencies based on min_records_threshold and min_avg_value_threshold.
+        
+        Args:
+            currencies: List of currency dictionaries
+            processed_data: Processed dataframe for record counting
+            
+        Returns:
+            Filtered list of currencies that meet the thresholds
+        """
+        try:
+            filtered_currencies = []
+            
+            for currency in currencies:
+                currency_name = currency['get_currency']
+                
+                # Count records for this currency
+                currency_data = processed_data[processed_data['currency'] == currency_name]
+                record_count = len(currency_data)
+                
+                # Check if currency meets both thresholds
+                meets_records_threshold = bool(record_count >= self.config.data.min_records_threshold)
+                meets_value_threshold = bool(currency['avg_value'] >= self.config.data.min_avg_value_threshold)
+                
+                if meets_records_threshold and meets_value_threshold:
+                    filtered_currencies.append(currency)
+                else:
+                    self.logger.debug(
+                        f"Filtered out {currency_name}",
+                        extra={
+                            "record_count": record_count,
+                            "avg_value": currency['avg_value'],
+                            "meets_records": meets_records_threshold,
+                            "meets_value": meets_value_threshold
+                        }
+                    )
+            
+            self.logger.info(
+                f"Currency filtering completed",
+                extra={
+                    "original_count": len(currencies),
+                    "filtered_count": len(filtered_currencies),
+                    "min_records_threshold": int(self.config.data.min_records_threshold),
+                    "min_avg_value_threshold": float(self.config.data.min_avg_value_threshold)
+                }
+            )
+            
+            return filtered_currencies
+            
+        except Exception as e:
+            self.logger.error(f"Failed to filter currencies by thresholds: {e}")
+            return currencies  # Return original list if filtering fails
+    
     
     def _load_processed_data(self) -> Optional[pd.DataFrame]:
         """
@@ -582,6 +652,13 @@ class ModelTrainingPipeline:
             
             self.logger.info(f"Using processed data for {currency_name}: {len(currency_data)} records")
             
+            # Log overall data statistics for this currency
+            self.logger.info(f"Currency data overview for {currency_name}:")
+            self.logger.info(f"  Total records: {len(currency_data):,}")
+            if 'timestamp' in currency_data.columns:
+                date_range = currency_data['timestamp'].agg(['min', 'max'])
+                self.logger.info(f"  Date range: {date_range['min']} to {date_range['max']}")
+            
             # Log league distribution for this currency
             if 'league_name' in currency_data.columns:
                 league_dist = currency_data['league_name'].value_counts()
@@ -623,6 +700,24 @@ class ModelTrainingPipeline:
                 self.logger.warning(f"No target columns found for {currency_name}")
                 self.processing_stats['validation_failures'] += 1
                 return None
+            
+            # Log target column information
+            if isinstance(target_column, list):
+                self.logger.info(f"Found {len(target_column)} target horizons: {target_column}")
+                # Log NaN statistics for each target column
+                for target_col in target_column:
+                    if target_col in processed_data.columns:
+                        nan_count = processed_data[target_col].isna().sum()
+                        total_count = len(processed_data[target_col])
+                        nan_pct = (nan_count / total_count) * 100 if total_count > 0 else 0
+                        self.logger.info(f"  {target_col}: {nan_count:,}/{total_count:,} NaN ({nan_pct:.1f}%)")
+            else:
+                self.logger.info(f"Found single target: {target_column}")
+                if target_column in processed_data.columns:
+                    nan_count = processed_data[target_column].isna().sum()
+                    total_count = len(processed_data[target_column])
+                    nan_pct = (nan_count / total_count) * 100 if total_count > 0 else 0
+                    self.logger.info(f"  {target_column}: {nan_count:,}/{total_count:,} NaN ({nan_pct:.1f}%)")
             
             # Validate target columns exist
             if isinstance(target_column, list):
@@ -701,13 +796,39 @@ class ModelTrainingPipeline:
                     # Get target for this horizon
                     y_horizon = processed_data[target_col].values
                     
+                    # Log data filtering statistics
+                    total_samples = len(y_horizon)
+                    nan_count = pd.isna(y_horizon).sum()
+                    valid_count = total_samples - nan_count
+                    nan_percentage = (nan_count / total_samples) * 100 if total_samples > 0 else 0
+                    
+                    self.logger.info(f"Data filtering for {currency_name} {horizon}:")
+                    self.logger.info(f"  Total samples: {total_samples:,}")
+                    self.logger.info(f"  NaN values: {nan_count:,} ({nan_percentage:.1f}%)")
+                    self.logger.info(f"  Valid samples: {valid_count:,}")
+                    
                     # Filter out NaN values for this specific target
                     target_valid_mask = ~pd.isna(y_horizon)
                     X_horizon = X[target_valid_mask]
                     y_horizon = y_horizon[target_valid_mask]
                     
-                    if len(X_horizon) < 50:
-                        self.logger.warning(f"Insufficient data for {currency_name} {horizon} horizon: {len(X_horizon)} samples")
+                    self.logger.info(f"  After filtering: {len(X_horizon):,} samples available for training")
+                    
+                    # If we have very few samples, try a more lenient approach
+                    if len(X_horizon) < 20:
+                        # Try using forward-fill for NaN values to preserve more data
+                        y_horizon_ffill = processed_data[target_col].fillna(method='ffill').values
+                        target_valid_mask_ffill = ~pd.isna(y_horizon_ffill)
+                        X_horizon_ffill = X[target_valid_mask_ffill]
+                        y_horizon_ffill = y_horizon_ffill[target_valid_mask_ffill]
+                        
+                        if len(X_horizon_ffill) > len(X_horizon):
+                            self.logger.info(f"  Using forward-fill strategy: {len(X_horizon_ffill):,} samples (vs {len(X_horizon):,} without)")
+                            X_horizon = X_horizon_ffill
+                            y_horizon = y_horizon_ffill
+                    
+                    if len(X_horizon) < 10:  # Absolute minimum threshold
+                        self.logger.warning(f"Insufficient data for {currency_name} {horizon} horizon: {len(X_horizon)} samples (need at least 10)")
                         continue
                     
                     # Train model for this horizon
@@ -1221,14 +1342,8 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Production training with full optimization
-  python train_models.py --mode production
-  
-  # Development training with faster settings
-  python train_models.py --mode development
-  
-  # Testing with minimal settings
-  python train_models.py --mode test
+  # Default training with full optimization
+  python train_models.py
   
   # Train ALL currencies with sufficient data
   python train_models.py --train-all-currencies
@@ -1244,12 +1359,6 @@ Examples:
         """
     )
     
-    parser.add_argument(
-        '--mode',
-        choices=['production', 'development', 'test'],
-        default='production',
-        help='Training mode (default: production)'
-    )
     
     parser.add_argument(
         '--data-path',
@@ -1309,15 +1418,11 @@ def main() -> None:
     args = parse_arguments()
     
     try:
-        # Get configuration based on mode
+        # Get configuration
         if args.config:
             config = MLConfig.from_file(args.config)
-        elif args.mode == 'production':
-            config = get_production_config()
-        elif args.mode == 'development':
-            config = get_development_config()
-        else:  # test
-            config = get_test_config()
+        else:
+            config = get_default_config()
         
         # Override configuration with command line arguments
         if args.experiment_id:

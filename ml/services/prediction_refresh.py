@@ -122,9 +122,12 @@ class DirectModelPredictor(ModelPredictor):
                             self.logger.warning(f"Model file missing for {currency_label}: {model_file}")
                             continue
                         
+                        # Log successful model discovery for debugging
+                        self.logger.debug(f"Discovered model: {currency_label} -> {model_file.parent}")
+                        
                         # Create direct artifact
                         artifact = DirectModelArtifact(
-                            model_dir=model_dir,
+                            model_dir=metadata_file.parent,
                             scaler_path=scaler_file if scaler_file.exists() else None,
                             metadata_path=metadata_file,
                             metadata=metadata,
@@ -146,6 +149,14 @@ class DirectModelPredictor(ModelPredictor):
                 continue
         
         self.logger.info(f"Discovered {len(registry)} currencies with models")
+        
+        # Handle case where no valid models were discovered
+        if not registry:
+            self.logger.error("No valid model artifacts discovered in any model directories")
+            raise FileNotFoundError(
+                f"No valid model artifacts found in models directory: {self.models_dir}. "
+                f"Expected to find model_metadata.json files with corresponding ensemble_model.pkl files."
+            )
         
         # Log details about discovered models for debugging
         for currency, bundle in registry.items():
@@ -229,6 +240,22 @@ class DirectModelPredictor(ModelPredictor):
             artifact = self._select_model(currency, horizon)
             if artifact is not None:
                 self.logger.debug(f"Found artifact for {currency} ({horizon}): {artifact.model_dir.name}")
+                
+                # Verify model files exist before proceeding
+                model_file = artifact.model_dir / "ensemble_model.pkl"
+                scaler_file = artifact.model_dir / "scaler.pkl"
+                metadata_file = artifact.model_dir / "model_metadata.json"
+                
+                if not model_file.exists():
+                    self.logger.error(f"Model file missing: {model_file}")
+                    return None
+                
+                if not metadata_file.exists():
+                    self.logger.error(f"Metadata file missing: {metadata_file}")
+                    return None
+                
+                self.logger.debug(f"Model files verified: model={model_file.exists()}, scaler={scaler_file.exists()}, metadata={metadata_file.exists()}")
+                
                 raw_df = self._load_price_history(
                     currency=currency,
                     pay_currency=pay_currency,
@@ -308,6 +335,7 @@ class DirectModelPredictor(ModelPredictor):
                             prediction_lower=lower,
                             prediction_upper=upper,
                             features_used=len(feature_columns),
+                            model_path=str(artifact.model_dir),
                             metadata=artifact.metadata,
                         )
 
@@ -318,8 +346,28 @@ class DirectModelPredictor(ModelPredictor):
                         return result
 
         except Exception as exc:
-            self.logger.warning(f"Failed to generate prediction for {currency} ({horizon}): {exc}")
-            # Return None instead of raising exception to allow graceful handling
+            # Enhanced error logging to identify specific failure points
+            error_details = []
+            if "artifact" in locals() and artifact is None:
+                error_details.append("no model artifact found")
+            elif "raw_df" in locals() and (raw_df is None or raw_df.empty):
+                error_details.append("no price history data")
+            elif "processed_df" in locals() and (processed_df is None or processed_df.empty):
+                error_details.append("feature engineering failed")
+            elif "X" in locals() and len(X) == 0:
+                error_details.append("no feature matrix generated")
+            elif "scaler" in locals() and scaler is None:
+                error_details.append("scaler loading failed")
+            elif "model" in locals() and model is None:
+                error_details.append("model loading failed")
+            elif "prediction_value" in locals() and (math.isnan(prediction_value) or math.isinf(prediction_value)):
+                error_details.append("invalid prediction value")
+            elif "current_price" in locals() and (math.isnan(current_price) or math.isinf(current_price) or current_price < 0):
+                error_details.append("invalid current price")
+            else:
+                error_details.append(f"unexpected error: {type(exc).__name__}")
+            
+            self.logger.warning(f"Failed to generate prediction for {currency} ({horizon}): {exc} - {', '.join(error_details)}")
             return None
 
 
@@ -578,9 +626,26 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
         # Ensure models directory exists and contains bundled models
         actual_models_dir = _ensure_models_available(models_dir, logger)
         
-        predictor = DirectModelPredictor(models_dir=actual_models_dir, config=config, logger=logger)
-        data_source_config = DataSourceConfig.from_dynamo_config(config.dynamo)
-        data_source = create_data_source(data_source_config, logger)
+        # Initialize predictor with error handling
+        try:
+            predictor = DirectModelPredictor(models_dir=actual_models_dir, config=config, logger=logger)
+        except Exception as e:
+            logger.error(f"Failed to initialize DirectModelPredictor: {e}")
+            return {
+                "status": "predictor_init_failed",
+                "error": f"Failed to initialize predictor: {str(e)}"
+            }
+        
+        # Initialize data source with error handling
+        try:
+            data_source_config = DataSourceConfig.from_dynamo_config(config.dynamo)
+            data_source = create_data_source(data_source_config, logger)
+        except Exception as e:
+            logger.error(f"Failed to initialize data source: {e}")
+            return {
+                "status": "data_source_init_failed", 
+                "error": f"Failed to initialize data source: {str(e)}"
+            }
 
         target_currencies = _select_currencies(options, data_source, predictor, logger)
         if not target_currencies:
@@ -642,6 +707,13 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
         for currency in target_currencies:
             for horizon in options.horizons:
                 try:
+                    # Pre-validate model availability to provide better error messages
+                    available_currencies = predictor.list_available_currencies()
+                    if currency not in available_currencies:
+                        logger.warning(f"Skipping {currency} ({horizon}) - no trained model available (available: {len(available_currencies)} currencies)")
+                        failed_predictions += 1
+                        continue
+                    
                     prediction = predictor.predict_currency(
                         currency=currency,
                         horizon=horizon,
@@ -667,6 +739,13 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
                         failure_reasons = []
                         if not prediction:
                             failure_reasons.append("no prediction object")
+                            # Add diagnostic information for None predictions
+                            logger.debug(f"Prediction failed for {currency} ({horizon}) - checking model availability...")
+                            available_currencies = predictor.list_available_currencies()
+                            if currency not in available_currencies:
+                                failure_reasons.append(f"no trained model (available: {len(available_currencies)} currencies)")
+                            else:
+                                failure_reasons.append("model exists but prediction generation failed")
                         elif not hasattr(prediction, 'currency') or not prediction.currency:
                             failure_reasons.append("missing currency")
                         elif not hasattr(prediction, 'league') or not prediction.league:

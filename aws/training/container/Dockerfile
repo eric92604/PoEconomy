@@ -10,22 +10,16 @@ RUN ln -sf /usr/bin/python3.11 /usr/bin/python && \
     ln -sf /usr/bin/pip3.11 /usr/bin/pip
 
 # Install dependencies required for model training
-# Use same versions as Lambda container for consistency
+# Use exact versions to match prediction and feature engineering containers
 COPY aws/training/container/requirements.txt .
-RUN pip install --no-cache-dir \
-    "numpy>=1.21.0,<2.0.0" \
-    "pandas>=1.5.0,<2.0.0" \
-    "python-dateutil>=2.8.0" \
-    "pytz>=2023.3" \
-    "scipy>=1.10.0" \
-    "scikit-learn>=1.3.0" \
-    "lightgbm>=3.3.0" \
-    "xgboost>=1.7.0" \
-    "optuna>=2.10.0" \
-    "joblib>=1.3.0" \
-    "pyarrow>=10.0.0" \
-    "boto3>=1.28.0" \
-    "requests>=2.31.0"
+
+# Upgrade pip and install wheel first to avoid build issues
+RUN pip install --upgrade pip setuptools wheel
+
+# Install packages with retry logic and better error handling
+RUN pip install --no-cache-dir --retries 3 --timeout 300 \
+    --upgrade-strategy only-if-needed \
+    -r requirements.txt
 
 # Copy the ML training code
 COPY ml /app/ml

@@ -21,6 +21,13 @@ Parameters:
   PredictionStackName:
     Type: String
     Description: Name of the prediction stack to import DynamoDB tables from
+  LambdaS3Bucket:
+    Type: String
+    Description: S3 bucket for Lambda deployment packages
+  LambdaVersion:
+    Type: String
+    Description: Version/timestamp for Lambda deployment package
+    Default: "latest"
 
 Resources:
   # IAM Role for API Lambda
@@ -98,14 +105,13 @@ Resources:
     Properties:
       FunctionName: !Sub 'poeconomy-${EnvironmentName}-api'
       Description: Serve cached predictions and metadata via API Gateway.
-      Runtime: python3.11
-      Handler: lambda.prediction_api_handler.lambda_handler
+      PackageType: Zip
+      Runtime: python3.12
       Role: !GetAtt ApiLambdaRole.Arn
       Code:
-        S3Bucket: 
-          Fn::ImportValue:
-            Fn::Sub: '${BaseStackName}-DataLakeBucket'
-        S3Key: lambda/api.zip
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Sub 'lambda/${EnvironmentName}-api-${LambdaVersion}.zip'
+      Handler: prediction_api_handler.lambda_handler
       Timeout: 30
       MemorySize: 1024
       Environment:
@@ -116,14 +122,26 @@ Resources:
               Fn::Sub: '${BaseStackName}-DataLakeBucket'
           MODELS_S3_PREFIX: models/currency
           MODELS_DIR: /var/task/models
-          DYNAMO_CURRENCY_METADATA_TABLE: !Sub 'poeconomy-${EnvironmentName}-currency-metadata'
-          CURRENCY_METADATA_TABLE: !Sub 'poeconomy-${EnvironmentName}-currency-metadata'
-          LIVE_PRICES_TABLE: !Sub 'poeconomy-${EnvironmentName}-live-prices'
-          PREDICTIONS_TABLE: !Sub 'poeconomy-${EnvironmentName}-predictions'
-          LEAGUE_METADATA_TABLE: !Sub 'poeconomy-${EnvironmentName}-league-metadata'
+          DYNAMO_CURRENCY_METADATA_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${IngestionStackName}-CurrencyMetadataTable'
+          DYNAMO_CURRENCY_PRICES_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${IngestionStackName}-LivePricesTable'
+          DYNAMO_PREDICTIONS_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${PredictionStackName}-PredictionsTable'
+          DYNAMO_LEAGUE_METADATA_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${IngestionStackName}-LeagueMetadataTable'
+          DAILY_PRICES_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${IngestionStackName}-DailyPricesTable'
           DATA_LAKE_BUCKET: 
             Fn::ImportValue:
               Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          PREDICTION_REFRESH_FUNCTION_NAME: !Sub 'poeconomy-${EnvironmentName}-prediction-refresh'
+          PREDICTION_CACHE_TTL_HOURS: '2'
           LOG_LEVEL: INFO
       Tags:
         - Key: App
@@ -233,6 +251,7 @@ Resources:
       ResourceId: !GetAtt PredictionApiRestApi.RootResourceId
       HttpMethod: GET
       AuthorizationType: NONE
+      ApiKeyRequired: false
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -245,6 +264,7 @@ Resources:
       ResourceId: !Ref CurrenciesResource
       HttpMethod: GET
       AuthorizationType: NONE
+      ApiKeyRequired: true
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -257,6 +277,7 @@ Resources:
       ResourceId: !Ref LeaguesResource
       HttpMethod: GET
       AuthorizationType: NONE
+      ApiKeyRequired: true
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -269,6 +290,7 @@ Resources:
       ResourceId: !Ref SingleResource
       HttpMethod: POST
       AuthorizationType: NONE
+      ApiKeyRequired: true
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -281,6 +303,7 @@ Resources:
       ResourceId: !Ref BatchResource
       HttpMethod: POST
       AuthorizationType: NONE
+      ApiKeyRequired: true
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -293,6 +316,7 @@ Resources:
       ResourceId: !Ref CurrencyResource
       HttpMethod: GET
       AuthorizationType: NONE
+      ApiKeyRequired: true
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -305,6 +329,7 @@ Resources:
       ResourceId: !Ref LatestResource
       HttpMethod: GET
       AuthorizationType: NONE
+      ApiKeyRequired: true
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -317,6 +342,7 @@ Resources:
       ResourceId: !Ref LiveResource
       HttpMethod: GET
       AuthorizationType: NONE
+      ApiKeyRequired: true
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
@@ -347,6 +373,36 @@ Resources:
     Properties:
       RestApiId: !Ref PredictionApiRestApi
       StageName: !Ref ApiGatewayStageName
+      Description: !Sub "Deployment with API key authentication - ${AWS::StackName}"
+
+  # Reference to external API key (created manually to prevent resets)
+  # API Key ID: 16rsyury4g
+  # API Key Value: pKkeHkSGy73SCmGrC0F6W85OwM1IwwHC4tEUaTlB
+  # This key is managed outside CloudFormation to prevent resets on stack updates
+
+  # Usage Plan for rate limiting and quotas
+  UsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: !Sub 'poeconomy-${EnvironmentName}-usage-plan'
+      Description: 'Usage plan for PoEconomy API with rate limiting'
+      ApiStages:
+        - ApiId: !Ref PredictionApiRestApi
+          Stage: !Ref ApiGatewayStageName
+      Throttle:
+        BurstLimit: 100
+        RateLimit: 50
+      Quota:
+        Limit: 10000
+        Period: DAY
+
+  # Link external API Key to Usage Plan
+  ApiKeyUsagePlan:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: "16rsyury4g"  # External API key ID
+      KeyType: API_KEY
+      UsagePlanId: !Ref UsagePlan
 
 Outputs:
   ApiInvokeUrl:
@@ -360,3 +416,11 @@ Outputs:
   PredictionApiRestApi:
     Description: API Gateway REST API ID
     Value: !Ref PredictionApiRestApi
+
+  ApiKeyId:
+    Description: External API Key ID for authentication (managed outside CloudFormation)
+    Value: "16rsyury4g"
+
+  UsagePlanId:
+    Description: Usage Plan ID for rate limiting
+    Value: !Ref UsagePlan

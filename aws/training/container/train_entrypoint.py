@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 sys.path.append('/app/ml')
 
 from ml.scripts.train_models import main as train_main
-from ml.config.training_config import get_production_config
+from ml.config.training_config import get_default_config
 
 # Set up standardized logging
 from ml.utils.common_utils import setup_standard_logging
@@ -88,7 +88,7 @@ def main():
         check_timeout()
         
         training_mode = os.getenv('TRAINING_MODE', 'production')
-        min_records = os.getenv('MIN_RECORDS', '50')
+        min_records = os.getenv('MIN_RECORDS_THRESHOLD', '50')
         max_currencies = os.getenv('MAX_CURRENCIES_TO_TRAIN', '0')
         
         logger.info(f"Training configuration:")
