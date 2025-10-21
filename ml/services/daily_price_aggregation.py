@@ -9,7 +9,7 @@ other daily statistics.
 
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
@@ -23,7 +23,7 @@ from botocore.exceptions import ClientError
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
 
-from utils.logging_config import MLLogger
+from ml.utils.common_utils import MLLogger
 from config.training_config import MLConfig
 
 
@@ -60,11 +60,143 @@ class DailyPriceAggregator:
         config = MLConfig()
         self.live_prices_table_name = os.getenv("DYNAMO_LIVE_PRICES_TABLE", config.dynamo.currency_prices_table)
         self.daily_prices_table_name = os.getenv("DYNAMO_DAILY_PRICES_TABLE", "poeconomy-daily-prices")
+        self.league_metadata_table_name = os.getenv("DYNAMO_LEAGUE_METADATA_TABLE", config.dynamo.league_metadata_table)
+        self.currency_metadata_table_name = os.getenv("DYNAMO_CURRENCY_METADATA_TABLE", config.dynamo.currency_metadata_table)
         
         self.live_prices_table = self.dynamodb.Table(self.live_prices_table_name)
         self.daily_prices_table = self.dynamodb.Table(self.daily_prices_table_name)
+        self.league_metadata_table = self.dynamodb.Table(self.league_metadata_table_name)
+        self.currency_metadata_table = self.dynamodb.Table(self.currency_metadata_table_name)
         
-        self.logger.info(f"Initialized DailyPriceAggregator with tables: {self.live_prices_table_name}, {self.daily_prices_table_name}")
+        self.logger.info(f"Initialized DailyPriceAggregator with tables: {self.live_prices_table_name}, {self.daily_prices_table_name}, {self.league_metadata_table_name}, {self.currency_metadata_table_name}")
+    
+    def get_current_seasonal_league(self) -> Optional[str]:
+        """Get the current active seasonal league from the league metadata table.
+        
+        Returns:
+            Name of the current seasonal league or None if not found
+        """
+        try:
+            # Query for active seasonal leagues
+            response = self.league_metadata_table.scan(
+                FilterExpression=Key("isActive").eq(True) & Key("league_type").eq("seasonal")
+            )
+            
+            active_seasonal_leagues = response.get("Items", [])
+            
+            if not active_seasonal_leagues:
+                self.logger.warning("No active seasonal leagues found")
+                return None
+            
+            # If multiple active seasonal leagues, prefer the most recent one
+            # Sort by last_updated or startDate
+            active_seasonal_leagues.sort(
+                key=lambda x: x.get("last_updated", ""), 
+                reverse=True
+            )
+            
+            current_league = active_seasonal_leagues[0]["league_name"]
+            self.logger.info(f"Current seasonal league: {current_league}")
+            return current_league
+            
+        except Exception as e:
+            self.logger.error(f"Error getting current seasonal league: {e}")
+            return None
+    
+    def get_available_currencies(self, league: str = None) -> List[str]:
+        """Get currencies that exist in both metadata and live prices tables.
+        
+        Args:
+            league: League name to filter by (if None, gets currencies from all leagues)
+            
+        Returns:
+            List of currency names that exist in both tables
+        """
+        try:
+            # Get currencies from metadata table
+            metadata_currencies = set()
+            
+            if league:
+                # Filter by specific league
+                response = self.currency_metadata_table.scan(
+                    FilterExpression=Key("league").eq(league)
+                )
+            else:
+                # Get all currencies from metadata
+                response = self.currency_metadata_table.scan()
+            
+            for item in response.get("Items", []):
+                currency_name = item.get("currency")
+                if currency_name:
+                    metadata_currencies.add(currency_name)
+            
+            # Handle pagination for metadata table
+            while "LastEvaluatedKey" in response:
+                if league:
+                    response = self.currency_metadata_table.scan(
+                        FilterExpression=Key("league").eq(league),
+                        ExclusiveStartKey=response["LastEvaluatedKey"]
+                    )
+                else:
+                    response = self.currency_metadata_table.scan(
+                        ExclusiveStartKey=response["LastEvaluatedKey"]
+                    )
+                
+                for item in response.get("Items", []):
+                    currency_name = item.get("currency")
+                    if currency_name:
+                        metadata_currencies.add(currency_name)
+            
+            self.logger.info(f"Found {len(metadata_currencies)} currencies in metadata table")
+            
+            # Verify currencies exist in live prices table
+            available_currencies = []
+            
+            for currency in metadata_currencies:
+                if self._currency_exists_in_live_prices(currency, league):
+                    available_currencies.append(currency)
+                else:
+                    self.logger.debug(f"Currency {currency} not found in live prices table")
+            
+            self.logger.info(f"Found {len(available_currencies)} currencies available in both metadata and live prices tables")
+            return available_currencies
+            
+        except Exception as e:
+            self.logger.error(f"Error getting available currencies: {e}")
+            # Fallback to default currencies
+            return ["Divine Orb", "Chaos Orb", "Exalted Orb"]
+    
+    def _currency_exists_in_live_prices(self, currency: str, league: str = None) -> bool:
+        """Check if a currency exists in the live prices table.
+        
+        Args:
+            currency: Currency name to check
+            league: League name to check (if None, checks all leagues)
+            
+        Returns:
+            True if currency exists in live prices table, False otherwise
+        """
+        try:
+            if league:
+                # Check specific currency-league combination
+                currency_league = f"{currency}#{league}"
+                response = self.live_prices_table.query(
+                    KeyConditionExpression=Key("currency_league").eq(currency_league),
+                    Limit=1
+                )
+                return len(response.get("Items", [])) > 0
+            else:
+                # Check if currency exists in any league
+                # We'll scan for any currency_league that starts with the currency name
+                response = self.live_prices_table.scan(
+                    FilterExpression=Key("currency").eq(currency),
+                    Limit=1
+                )
+                return len(response.get("Items", [])) > 0
+                
+        except Exception as e:
+            self.logger.debug(f"Error checking if currency {currency} exists in live prices: {e}")
+            return False
     
     def aggregate_daily_prices(
         self, 
@@ -83,8 +215,8 @@ class DailyPriceAggregator:
             DailyPriceData object or None if no data found
         """
         if target_date is None:
-            # Default to yesterday
-            yesterday = datetime.now() - timedelta(days=1)
+            # Default to yesterday in UTC
+            yesterday = datetime.now(timezone.utc) - timedelta(days=1)
             target_date = yesterday.strftime("%Y-%m-%d")
         
         self.logger.info(f"Aggregating daily prices for {currency} in {league} on {target_date}")
@@ -112,12 +244,14 @@ class DailyPriceAggregator:
         Returns:
             List of hourly price items
         """
-        # Convert date to timestamp range
-        start_date = datetime.strptime(date, "%Y-%m-%d")
+        # Convert date to timestamp range (UTC)
+        start_date = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         end_date = start_date + timedelta(days=1)
         
         start_timestamp = int(start_date.timestamp())
         end_timestamp = int(end_date.timestamp())
+        
+        self.logger.debug(f"Querying timestamps from {start_timestamp} to {end_timestamp} for {currency} in {league}")
         
         currency_league = f"{currency}#{league}"
         
@@ -244,15 +378,17 @@ class DailyPriceAggregator:
     def aggregate_and_save_daily_prices(
         self, 
         currencies: List[str], 
-        leagues: List[str], 
-        target_date: str = None
+        leagues: List[str] = None, 
+        target_date: str = None,
+        use_current_seasonal_only: bool = True
     ) -> Dict[str, Any]:
         """Aggregate and save daily prices for multiple currencies and leagues.
         
         Args:
             currencies: List of currency names
-            leagues: List of league names
+            leagues: List of league names (if None and use_current_seasonal_only=True, uses current seasonal league)
             target_date: Date in YYYY-MM-DD format (defaults to yesterday)
+            use_current_seasonal_only: If True, only process the current seasonal league
             
         Returns:
             Dictionary with aggregation results
@@ -263,6 +399,31 @@ class DailyPriceAggregator:
             "failed": 0,
             "errors": []
         }
+        
+        # Determine which leagues to process
+        if use_current_seasonal_only and leagues is None:
+            current_league = self.get_current_seasonal_league()
+            if current_league:
+                leagues = [current_league]
+                self.logger.info(f"Processing only current seasonal league: {current_league}")
+            else:
+                self.logger.error("No current seasonal league found and use_current_seasonal_only=True")
+                results["errors"].append("No current seasonal league found")
+                return results
+        elif leagues is None:
+            # Fallback to default leagues if none specified
+            leagues = ["Mercenaries", "Standard"]
+        
+        # Get available currencies from metadata and live prices tables
+        if not currencies:
+            # Get currencies that exist in both metadata and live prices tables
+            available_currencies = set()
+            for league in leagues:
+                league_currencies = self.get_available_currencies(league)
+                available_currencies.update(league_currencies)
+            
+            currencies = list(available_currencies)
+            self.logger.info(f"Found {len(currencies)} currencies to process from metadata and live prices tables")
         
         for currency in currencies:
             for league in leagues:
@@ -336,35 +497,76 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Daily Price Aggregation Service")
-    parser.add_argument("--currency", required=True, help="Currency name")
-    parser.add_argument("--league", required=True, help="League name")
+    parser.add_argument("--currency", help="Currency name (if not provided, uses common currencies)")
+    parser.add_argument("--league", help="League name (if not provided, uses current seasonal league)")
     parser.add_argument("--date", help="Date in YYYY-MM-DD format (defaults to yesterday)")
-    parser.add_argument("--action", choices=["aggregate", "query"], default="aggregate", help="Action to perform")
+    parser.add_argument("--action", choices=["aggregate", "query", "debug"], default="aggregate", help="Action to perform")
     parser.add_argument("--start-date", help="Start date for query (YYYY-MM-DD)")
     parser.add_argument("--end-date", help="End date for query (YYYY-MM-DD)")
+    parser.add_argument("--use-current-seasonal-only", action="store_true", default=True, help="Only process current seasonal league")
+    parser.add_argument("--debug-timestamps", action="store_true", help="Debug timestamp ranges for queries")
     
     args = parser.parse_args()
     
     logger = MLLogger("DailyPriceAggregator", level="INFO")
     aggregator = DailyPriceAggregator(logger=logger)
     
-    if args.action == "aggregate":
-        daily_data = aggregator.aggregate_daily_prices(args.currency, args.league, args.date)
-        if daily_data:
-            print(f"Daily data for {args.currency} in {args.league} on {daily_data.date}:")
-            print(f"  Open: {daily_data.open_price}")
-            print(f"  High: {daily_data.high_price}")
-            print(f"  Low: {daily_data.low_price}")
-            print(f"  Close: {daily_data.close_price}")
-            print(f"  Average: {daily_data.avg_price}")
-            print(f"  Volume: {daily_data.volume}")
-            print(f"  Change: {daily_data.price_change_percent}%")
-            
-            # Save the data
-            success = aggregator.save_daily_price(daily_data)
-            print(f"Saved to database: {success}")
+    if args.action == "debug":
+        # Debug current seasonal league and timestamp ranges
+        current_league = aggregator.get_current_seasonal_league()
+        print(f"Current seasonal league: {current_league}")
+        
+        if args.date:
+            target_date = args.date
         else:
-            print("No data found for aggregation")
+            yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+            target_date = yesterday.strftime("%Y-%m-%d")
+        
+        print(f"Target date: {target_date}")
+        
+        # Show timestamp range
+        start_date = datetime.strptime(target_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end_date = start_date + timedelta(days=1)
+        start_timestamp = int(start_date.timestamp())
+        end_timestamp = int(end_date.timestamp())
+        
+        print(f"Timestamp range: {start_timestamp} to {end_timestamp}")
+        print(f"Start date: {start_date}")
+        print(f"End date: {end_date}")
+        
+        # Show available currencies
+        available_currencies = aggregator.get_available_currencies(current_league)
+        print(f"Available currencies in {current_league}: {len(available_currencies)}")
+        if available_currencies:
+            print("Sample currencies:", available_currencies[:10])  # Show first 10
+        
+        # Test query for a specific currency
+        if args.currency and current_league:
+            test_data = aggregator._get_hourly_data_for_date(args.currency, current_league, target_date)
+            print(f"Found {len(test_data)} data points for {args.currency} in {current_league}")
+            if test_data:
+                print("Sample data points:")
+                for i, item in enumerate(test_data[:3]):  # Show first 3 items
+                    print(f"  {i+1}: timestamp={item.get('timestamp')}, price={item.get('price')}")
+    
+    elif args.action == "aggregate":
+        # Determine currencies and leagues
+        currencies = [args.currency] if args.currency else None  # None means get from metadata
+        leagues = [args.league] if args.league else None
+        
+        # Use the improved aggregation method
+        results = aggregator.aggregate_and_save_daily_prices(
+            currencies=currencies,
+            leagues=leagues,
+            target_date=args.date,
+            use_current_seasonal_only=args.use_current_seasonal_only
+        )
+        
+        print(f"Aggregation results: {results['successful']}/{results['processed']} successful")
+        if results["errors"]:
+            print("Errors:")
+            for error in results["errors"]:
+                print(f"  - {error}")
     
     elif args.action == "query":
         if not args.start_date:
@@ -372,15 +574,15 @@ def main():
             return
         
         daily_prices = aggregator.get_daily_prices(
-            args.currency, 
-            args.league, 
+            args.currency or "Divine Orb", 
+            args.league or "Mercenaries", 
             args.start_date, 
             args.end_date
         )
         
         print(f"Found {len(daily_prices)} daily price records:")
         for price in daily_prices:
-            print(f"  {price['date']}: O:{price['open_price']} H:{price['high_price']} L:{price['low_price']} C:{price['close_price']}")
+            print(f"  {price['date']}: H:{price['high_price']} L:{price['low_price']} Avg:{price['avg_price']} Change:{price['price_change_percent']}%")
 
 
 if __name__ == "__main__":

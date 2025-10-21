@@ -68,17 +68,13 @@ def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
         aggregator = DailyPriceAggregator(region_name=app_env.region_name, logger=logger)
         
         if action == "aggregate":
-            # Get currencies and leagues to process
-            if not currencies or not leagues:
-                currencies, leagues = _get_default_currencies_and_leagues(app_env, dynamodb, logger)
-            
-            logger.info(f"Processing {len(currencies)} currencies across {len(leagues)} leagues")
-            
-            # Aggregate and save daily prices
+            # Use the improved aggregation method that automatically selects currencies from metadata
+            # and current seasonal league
             results = aggregator.aggregate_and_save_daily_prices(
-                currencies=currencies,
-                leagues=leagues,
-                target_date=target_date
+                currencies=currencies,  # Will be None if not specified, so gets from metadata
+                leagues=leagues,  # Will be None, so it uses current seasonal league
+                target_date=target_date,
+                use_current_seasonal_only=True
             )
             
             return {
