@@ -82,7 +82,7 @@ class ModelMetrics:
             mae=mae,
             rmse=rmse,
             mape=mape,
-            r2=max(r2, -1.0),  # Cap at -1 for very bad predictions
+            r2=r2,
             directional_accuracy=directional_accuracy
         )
     
@@ -118,7 +118,7 @@ class ModelMetrics:
             # Basic metrics
             mae_dict[target_name] = mean_absolute_error(y_true_valid, y_pred_valid)
             rmse_dict[target_name] = np.sqrt(mean_squared_error(y_true_valid, y_pred_valid))
-            r2_dict[target_name] = max(r2_score(y_true_valid, y_pred_valid), -1.0)
+            r2_dict[target_name] = r2_score(y_true_valid, y_pred_valid)
             
             # MAPE with robust calculation
             epsilon = 1e-8
@@ -169,9 +169,7 @@ class BaseModel(ABC):
         self.logger = logger
         self.model: Any = None
         
-        # Only log initialization for final models, not during hyperparameter optimization
-        if self.logger and not hasattr(self, '_is_optuna_trial'):
-            self.logger.info(f"Initializing {self.get_model_type()} model")
+        # Suppress model initialization logging to reduce noise
     
     @abstractmethod
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> Any:
@@ -232,8 +230,8 @@ class BaseModel(ABC):
         """Fit the model to training data."""
         start_time = time.time()
         
-        if X_val is not None and y_val is not None:
-            # Handle early stopping for different model types
+        if X_val is not None and y_val is not None and len(X_val) >= 5:
+            # Only use early stopping if we have sufficient validation data
             if isinstance(self.model, lgb.LGBMRegressor):
                 # LightGBM early stopping
                 self.model.fit(
@@ -242,50 +240,32 @@ class BaseModel(ABC):
                     callbacks=[lgb.early_stopping(self.config.early_stopping_rounds, verbose=False)]
                 )
             elif isinstance(self.model, xgb.XGBRegressor):
-                # XGBoost early stopping - handle version compatibility properly
+                # XGBoost early stopping - use the correct API for version 2.1.0
                 try:
-                    # Check XGBoost version to determine the correct approach
-                    import xgboost as xgb_module
-                    xgb_version = xgb_module.__version__
-                    
-                    # For XGBoost >= 1.6.0, use callback-based approach
-                    if hasattr(xgb_module, 'callback') and hasattr(xgb_module.callback, 'EarlyStopping'):
-                        self.model.fit(
-                            X, y,
-                            eval_set=[(X_val, y_val)],
-                            callbacks=[xgb_module.callback.EarlyStopping(rounds=self.config.early_stopping_rounds, save_best=True)],
-                            verbose=False
-                        )
-                    else:
-                        # For older versions, use parameter-based approach
-                        self.model.fit(
-                            X, y,
-                            eval_set=[(X_val, y_val)],
-                            early_stopping_rounds=self.config.early_stopping_rounds,
-                            verbose=False
-                        )
+                    # For XGBoost 2.1.0+, early_stopping_rounds should be set during model initialization
+                    # and eval_set should be provided to fit()
+                    self.model.fit(
+                        X, y,
+                        eval_set=[(X_val, y_val)],
+                        verbose=False
+                    )
                 except (TypeError, AttributeError, ImportError) as e:
                     # If early stopping fails, train without it
                     if self.logger:
-                        self.logger.warning(f"XGBoost early stopping not supported in this version ({xgb_version if 'xgb_version' in locals() else 'unknown'}): {e}. Training without early stopping.")
+                        self.logger.warning(f"XGBoost early stopping failed: {e}. Training without early stopping.")
                     self.model.fit(X, y, verbose=False)
             else:
                 # Other models without early stopping
                 self.model.fit(X, y)
         else:
-            # No validation data - train without early stopping
+            # No validation data or insufficient data - train without early stopping
+            if self.logger and X_val is not None and len(X_val) < 5:
+                self.logger.warning(f"Insufficient validation data for early stopping: {len(X_val)} samples. Training without early stopping.")
             self.model.fit(X, y)
         
         training_time = time.time() - start_time
         
-        # Log training completion with key statistics
-        if self.logger:
-            # Get best iteration for LightGBM models
-            best_iteration = getattr(self.model, 'best_iteration', None)
-            if best_iteration is not None:
-                self.logger.info(f"{self.get_model_type()} training completed in {training_time:.2f}s (best iteration: {best_iteration})")
-            else:
-                self.logger.info(f"{self.get_model_type()} training completed in {training_time:.2f}s")
+        # Training completed silently
     
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Make predictions using the trained model."""
@@ -327,12 +307,12 @@ class LightGBMModel(BaseModel):
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> lgb.LGBMRegressor:
         """Create LightGBM model with optimal parameters."""
         if trial is not None:
-            # Hyperparameter optimization - refined ranges for better convergence
+            # Hyperparameter optimization - ranges optimized for small datasets
             params = {
-                'n_estimators': trial.suggest_int('lgb_n_estimators', 200, 800),
-                'max_depth': trial.suggest_int('lgb_max_depth', 4, 12),
+                'n_estimators': trial.suggest_int('lgb_n_estimators', 50, 200),  # Reduced for small datasets
+                'max_depth': trial.suggest_int('lgb_max_depth', 4, 8),
                 'learning_rate': trial.suggest_float('lgb_learning_rate', 0.01, 0.2),
-                'num_leaves': trial.suggest_int('lgb_num_leaves', 20, 200),
+                'num_leaves': trial.suggest_int('lgb_num_leaves', 31, 127),  # 2^5 to 2^7-1
                 'min_child_samples': trial.suggest_int('lgb_min_child_samples', 10, 50),
                 'subsample': trial.suggest_float('lgb_subsample', 0.7, 1.0),
                 'colsample_bytree': trial.suggest_float('lgb_colsample_bytree', 0.7, 1.0),
@@ -340,12 +320,12 @@ class LightGBMModel(BaseModel):
                 'reg_lambda': trial.suggest_float('lgb_reg_lambda', 0.0, 5.0),
             }
         else:
-            # Default parameters
+            # Default parameters - use n_model_trials for training iterations
             params = {
-                'n_estimators': 500,
-                'max_depth': 8,
-                'learning_rate': 0.1,
-                'num_leaves': 100,
+                'n_estimators': self.config.n_model_trials,
+                'max_depth': self.config.max_depth,  # Use environment variable
+                'learning_rate': self.config.learning_rate,  # Use environment variable
+                'num_leaves': 2**self.config.max_depth - 1,  # Calculate based on max_depth
                 'min_child_samples': 20,
                 'subsample': 0.8,
                 'colsample_bytree': 0.8,
@@ -384,24 +364,24 @@ class XGBoostModel(BaseModel):
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> xgb.XGBRegressor:
         """Create XGBoost model with optimal parameters."""
         if trial is not None:
-            # Hyperparameter optimization - refined ranges for better convergence
+            # Hyperparameter optimization - ranges optimized for small datasets
             params = {
-                'n_estimators': trial.suggest_int('xgb_n_estimators', 200, 800),
-                'max_depth': trial.suggest_int('xgb_max_depth', 4, 12),
+                'n_estimators': trial.suggest_int('xgb_n_estimators', 50, 200),  # Reduced for small datasets
+                'max_depth': trial.suggest_int('xgb_max_depth', 4, 8),
                 'learning_rate': trial.suggest_float('xgb_learning_rate', 0.01, 0.2),
-                'min_child_weight': trial.suggest_int('xgb_min_child_weight', 1, 8),
+                'min_child_weight': trial.suggest_int('xgb_min_child_weight', 1, 5),
                 'subsample': trial.suggest_float('xgb_subsample', 0.7, 1.0),
                 'colsample_bytree': trial.suggest_float('xgb_colsample_bytree', 0.7, 1.0),
                 'reg_alpha': trial.suggest_float('xgb_reg_alpha', 0.0, 5.0),
                 'reg_lambda': trial.suggest_float('xgb_reg_lambda', 0.0, 5.0),
             }
         else:
-            # Default parameters
+            # Default parameters - use n_model_trials for training iterations
             params = {
-                'n_estimators': 500,
-                'max_depth': 8,
-                'learning_rate': 0.1,
-                'min_child_weight': 3,
+                'n_estimators': self.config.n_model_trials,
+                'max_depth': self.config.max_depth,  # Use environment variable
+                'learning_rate': self.config.learning_rate,  # Use environment variable
+                'min_child_weight': 1,  # Reduced from 3 for better performance
                 'subsample': 0.8,
                 'colsample_bytree': 0.8,
                 'reg_alpha': 0.1,
@@ -423,7 +403,8 @@ class XGBoostModel(BaseModel):
             'random_state': self.config.random_state,
             'n_jobs': optimal_n_jobs,
             'tree_method': 'hist',  # type: ignore[dict-item]  # Optimal for multi-core
-            'verbosity': 0
+            'verbosity': 0,
+            'early_stopping_rounds': self.config.early_stopping_rounds  # Set early stopping during initialization for XGBoost 2.1.0+
         })
         
         return xgb.XGBRegressor(**params)
@@ -499,9 +480,7 @@ class EnsembleModel:
         # Normalize weights
         total_weight = sum(self.weights)
         self.weights = [w / total_weight for w in self.weights]
-        
-        if self.logger:
-            self.logger.info(f"Initialized ensemble with {len(models)} models")
+
     
     def fit(
         self,
@@ -512,9 +491,6 @@ class EnsembleModel:
     ) -> None:
         """Fit all models in the ensemble."""
         for i, model in enumerate(self.models):
-            if self.logger:
-                self.logger.info(f"Training ensemble model {i+1}/{len(self.models)}: {model.get_model_type()}")
-            
             model.model = model._create_model()
             model.fit(X, y, X_val, y_val)
     
@@ -577,10 +553,6 @@ class HyperparameterOptimizer:
         
         # Configure Optuna to be less verbose
         optuna.logging.set_verbosity(optuna.logging.WARNING)
-        
-        # Cache for optimized hyperparameters
-        self._optimized_params: Dict[str, Dict[str, Any]] = {}
-        self._optimization_completed: Dict[str, bool] = {}
     
     def optimize(
         self,
@@ -593,9 +565,6 @@ class HyperparameterOptimizer:
         cv_folds: int = 5
     ) -> Dict[str, Any]:
         """Optimize hyperparameters for a model."""
-        if self.logger:
-            self.logger.info(f"Starting hyperparameter optimization for {model_class.__name__}")
-            self.logger.info(f"Using {self.config.max_optuna_workers} parallel workers for {self.config.n_trials} trials")
         
         def objective(trial: Any) -> float:
             # Create model with trial parameters
@@ -604,15 +573,32 @@ class HyperparameterOptimizer:
             model.model = model._create_model(trial)
             
             # Use provided validation data if available, otherwise use cross-validation
-            if X_val is not None and y_val is not None:
-                # Use provided validation data
-                model.model.fit(X, y)
+            if X_val is not None and y_val is not None and len(X_val) >= 5:
+                # Use provided validation data with early stopping
+                model.fit(X, y, X_val, y_val)
                 y_pred = model.predict(X_val)
                 mae = mean_absolute_error(y_val, y_pred)
                 return float(mae)
             else:
-                # Fall back to time series cross-validation
-                tscv = TimeSeriesSplit(n_splits=cv_folds)
+                # Fall back to time series cross-validation with proper validation
+                min_samples_per_fold = 10
+                max_folds = max(2, len(X) // min_samples_per_fold)  # At least 2 folds
+                n_splits = min(cv_folds, max_folds)
+                
+                if n_splits < 2:
+                    if self.logger:
+                        self.logger.warning(f"Insufficient data for cross-validation: {len(X)} samples, need at least {min_samples_per_fold * 2}. Using simple train/validation split.")
+                    # Use simple train/validation split instead
+                    split_idx = int(len(X) * 0.8)
+                    X_train_fold, X_val_fold = X[:split_idx], X[split_idx:]
+                    y_train_fold, y_val_fold = y[:split_idx], y[split_idx:]
+                    
+                    model.fit(X_train_fold, y_train_fold)
+                    y_pred = model.predict(X_val_fold)
+                    mae = mean_absolute_error(y_val_fold, y_pred)
+                    return float(mae)
+                
+                tscv = TimeSeriesSplit(n_splits=n_splits)
                 scores = []
                 
                 for train_idx, val_idx in tscv.split(X):
@@ -620,7 +606,7 @@ class HyperparameterOptimizer:
                     y_train_fold, y_val_fold = y[train_idx], y[val_idx]
                     
                     # Train and evaluate
-                    model.model.fit(X_train_fold, y_train_fold)
+                    model.fit(X_train_fold, y_train_fold)
                     y_pred = model.predict(X_val_fold)
                     
                     # Calculate MAE as objective
@@ -633,25 +619,51 @@ class HyperparameterOptimizer:
         # Make study name unique per currency and model type to avoid conflicts
         study_name = f"{model_class.__name__}_{currency}_{self.config.random_state}"
         
+        # Initialize storage_file variable for cleanup
+        storage_file = None
+        
         if self.config.max_optuna_workers > 1:
-            # Use JournalStorage for multi-threaded parallelization
+            # Use SQLite storage for multi-threaded parallelization with proper configuration
             import tempfile
             import os
+            import uuid
+            
+            # Create unique database file per currency and process to avoid conflicts
             temp_dir = tempfile.gettempdir()
-            storage_file = os.path.join(temp_dir, f"optuna_{study_name}.log")
-            storage = optuna.storages.JournalStorage(
-                optuna.storages.journal.JournalFileBackend(storage_file)
-            )
-            study = optuna.create_study(
-                direction='minimize',
-                sampler=TPESampler(seed=self.config.random_state),
-                pruner=MedianPruner(),
-                storage=storage,
-                study_name=study_name,
-                load_if_exists=True  # Load existing study if it exists
-            )
-            if self.logger:
-                self.logger.info(f"Using JournalStorage for parallel optimization: {storage_file}")
+            unique_id = str(uuid.uuid4())[:8]  # Short unique ID
+            storage_file = os.path.join(temp_dir, f"optuna_{study_name}_{unique_id}.db")
+            
+            # Configure SQLite for better concurrent access
+            sqlite_url = f"sqlite:///{storage_file}?timeout=30&check_same_thread=False"
+            
+            try:
+                # Create storage with proper connection management
+                storage = optuna.storages.RDBStorage(
+                    sqlite_url,
+                    engine_kwargs={'pool_pre_ping': True, 'pool_recycle': 300}
+                )
+                study = optuna.create_study(
+                    direction='minimize',
+                    sampler=TPESampler(seed=self.config.random_state),
+                    pruner=MedianPruner(),
+                    storage=storage,
+                    study_name=study_name,
+                    load_if_exists=True
+                )
+                if self.logger:
+                    self.logger.debug(f"Using SQLite storage for {currency}: {storage_file}")
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"SQLite storage failed for {currency}: {e}. Falling back to in-memory storage.")
+                # Fall back to in-memory storage if SQLite fails
+                study = optuna.create_study(
+                    direction='minimize',
+                    sampler=TPESampler(seed=self.config.random_state),
+                    pruner=MedianPruner(),
+                    study_name=study_name,
+                    load_if_exists=True
+                )
+                storage_file = None  # No file to clean up
         else:
             # Use in-memory storage for single-threaded optimization
             study = optuna.create_study(
@@ -659,40 +671,54 @@ class HyperparameterOptimizer:
                 sampler=TPESampler(seed=self.config.random_state),
                 pruner=MedianPruner(),
                 study_name=study_name,
-                load_if_exists=True  # Load existing study if it exists
+                load_if_exists=True
             )
-            if self.logger:
-                self.logger.info("Using in-memory storage for single-threaded optimization")
         
         # Check if we're likely running in a parallel context (multiple currency workers)
         import os
         max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '6'))
         if max_currency_workers > 1:
-            # For 8 vCPU: 6 currency workers × 2-3 Optuna workers = 12-18 processes (optimal)
-            optuna_workers = max(1, min(self.config.max_optuna_workers, 3))
+            # Reduce Optuna workers when multiple currency workers are running to avoid resource conflicts
+            optuna_workers = max(1, min(self.config.max_optuna_workers, 2))
             if self.logger:
-                self.logger.info(f"Allocating {optuna_workers} Optuna workers for parallel currency training (8 vCPU optimized)")
+                self.logger.debug(f"Reduced Optuna workers to {optuna_workers} due to parallel currency processing")
         else:
-            # Single currency worker: can use full Optuna parallelism
             optuna_workers = self.config.max_optuna_workers
-            if self.logger:
-                self.logger.info(f"Using full Optuna parallelism: {optuna_workers} workers")
             
-        study.optimize(objective, n_trials=self.config.n_trials, n_jobs=optuna_workers)
+        study.optimize(objective, n_trials=self.config.n_hyperparameter_trials, n_jobs=optuna_workers)
         
         if self.logger:
             self.logger.info(f"Optimization completed. Best MAE: {study.best_value:.4f}")
         
+        # Clean up temporary database file if it exists
+        if storage_file is not None:
+            try:
+                import os
+                import time
+                
+                # Give a moment for any pending writes to complete
+                time.sleep(0.1)
+                
+                if os.path.exists(storage_file):
+                    # Force close any open connections
+                    try:
+                        if 'storage' in locals():
+                            storage._backend._engine.dispose()
+                    except:
+                        pass
+                    
+                    os.remove(storage_file)
+                    if self.logger:
+                        self.logger.debug(f"Cleaned up temporary database: {storage_file}")
+                else:
+                    if self.logger:
+                        self.logger.debug(f"Temporary database file already cleaned up: {storage_file}")
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"Failed to clean up database file {storage_file}: {e}")
+        
         return study.best_params
     
-    
-    def get_optimized_params(self, model_name: str) -> Optional[Dict[str, Any]]:
-        """Get cached optimized parameters for a model type."""
-        return self._optimized_params.get(model_name)
-    
-    def is_optimized(self, model_name: str) -> bool:
-        """Check if model type has been optimized."""
-        return self._optimization_completed.get(model_name, False)
 
 
 class ModelTrainer:
@@ -707,9 +733,6 @@ class ModelTrainer:
         self.config = config
         self.processing_config = processing_config
         self.logger = logger
-        
-        if self.logger:
-            self.logger.info("ModelTrainer initialized")
         
         # Initialize hyperparameter optimizer
         self.hyperparameter_optimizer = HyperparameterOptimizer(self.config, self.logger)
@@ -736,8 +759,8 @@ class ModelTrainer:
         y_train, y_test = y[:split_idx], y[split_idx:]
         
         # Further split training data for validation (only if we have enough data)
-        min_val_samples = 20
-        if len(X_train) > min_val_samples * 2:
+        min_val_samples = 10  # Reduced from 20 to 10
+        if len(X_train) > min_val_samples * 2:  # Need at least 20 samples for validation
             val_split_idx = int(len(X_train) * 0.8)
             X_train_split, X_val = X_train[:val_split_idx], X_train[val_split_idx:]
             y_train_split, y_val = y_train[:val_split_idx], y_train[val_split_idx:]
@@ -746,14 +769,15 @@ class ModelTrainer:
             X_train_split, X_val = X_train, None
             y_train_split, y_val = y_train, None
             if self.logger:
-                self.logger.warning(f"Insufficient data for validation split: {len(X_train)} samples")
+                self.logger.warning(f"Insufficient data for validation split: {len(X_train)} samples (need at least {min_val_samples * 2})")
         
         # Scale features if needed
         scaler = None
         if self.processing_config.robust_scaling:
             scaler = RobustScaler()
             X_train_split = scaler.fit_transform(X_train_split)
-            X_val = scaler.transform(X_val)
+            if X_val is not None:
+                X_val = scaler.transform(X_val)
             X_test = scaler.transform(X_test)
         
         # Train model
@@ -805,7 +829,7 @@ class ModelTrainer:
         models = []
         
         # Perform per-currency hyperparameter optimization if enabled
-        if self.config.n_trials > 1:
+        if self.config.n_hyperparameter_trials > 1:
             if self.config.use_lightgbm:
                 lgb_model = LightGBMModel(self.config, self.logger)
                 
@@ -880,7 +904,7 @@ class ModelTrainer:
     ) -> BaseModel:
         """Train a single base model with optional hyperparameter optimization."""
         # Use hyperparameter optimization if enabled
-        if self.config.n_trials > 1:
+        if self.config.n_hyperparameter_trials > 1:
             optimizer = HyperparameterOptimizer(self.config, self.logger)
             
             if model_type == "lightgbm":
@@ -1011,20 +1035,12 @@ def save_model_artifacts(
         'currency': currency,
         'training_timestamp': datetime.now().isoformat(),
         'training_time': result.training_time,
-        'metrics': result.metrics.to_dict(),  # Only metrics needed for RMSE extraction
-        # Removed: hyperparameters, feature_importance, cross_validation_scores
-        # These are not used by the prediction lambda
+        'metrics': result.metrics.to_dict(),
     }
     
     metadata_path = output_dir / "model_metadata.json"
     with open(metadata_path, 'w') as f:
         json.dump(metadata, f, indent=2, default=str)
     saved_files['metadata'] = str(metadata_path)
-    
-    # REMOVED: Individual metrics, feature importance, and hyperparameters files
-    # These files are not used by the prediction lambda and only add storage overhead
-    # - {currency}_metrics.json
-    # - {currency}_feature_importance.json  
-    # - {currency}_hyperparameters.json
-    
+
     return saved_files 

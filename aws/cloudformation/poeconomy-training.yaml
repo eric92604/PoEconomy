@@ -25,12 +25,44 @@ Parameters:
     Description: Minimum number of records required for training
   TaskTimeoutMinutes:
     Type: Number
-    Default: 60
+    Default: 1440
     Description: Task timeout in minutes
   MaxCurrenciesToTrain:
     Type: Number
     Default: 0
     Description: Maximum number of currencies to train (0 = no limit)
+  NHyperparameterTrials:
+    Type: Number
+    Default: 50
+    Description: Number of hyperparameter optimization trials
+  NModelTrials:
+    Type: Number
+    Default: 100
+    Description: Number of model training iterations (boosting rounds)
+  CVFolds:
+    Type: Number
+    Default: 5
+    Description: Number of cross-validation folds
+  MaxDepth:
+    Type: Number
+    Default: 6
+    Description: Maximum tree depth for models
+  LearningRate:
+    Type: String
+    Default: '0.1'
+    Description: Learning rate for models
+  MaxOptunaWorkers:
+    Type: Number
+    Default: 2
+    Description: Number of Optuna workers per currency
+  ModelNJobs:
+    Type: Number
+    Default: 2
+    Description: Number of model training jobs per currency
+  MinAvgValueThreshold:
+    Type: String
+    Default: '0.25'
+    Description: Minimum average value threshold for currency selection
   BaseStackName:
     Type: String
     Default: poeconomy-production-base
@@ -192,7 +224,7 @@ Resources:
               Value: !Ref EnvironmentName
             - Name: TRAINING_MODE
               Value: !Ref TrainingMode
-            - Name: MIN_RECORDS
+            - Name: MIN_RECORDS_THRESHOLD
               Value: !Ref MinRecordsThreshold
             - Name: TASK_TIMEOUT_MINUTES
               Value: !Ref TaskTimeoutMinutes
@@ -202,6 +234,30 @@ Resources:
               Value: !Ref DataLakeBucketName
             - Name: MODELS_BUCKET
               Value: !Ref DataLakeBucketName
+            # Threading and Parallelization
+            - Name: MAX_CURRENCY_WORKERS
+              Value: '4'
+            - Name: MAX_OPTUNA_WORKERS
+              Value: !Ref MaxOptunaWorkers
+            - Name: MODEL_N_JOBS
+              Value: !Ref ModelNJobs
+            # Hyperparameter Optimization
+            - Name: N_HYPERPARAMETER_TRIALS
+              Value: !Ref NHyperparameterTrials
+            - Name: N_MODEL_TRIALS
+              Value: !Ref NModelTrials
+            - Name: CV_FOLDS
+              Value: !Ref CVFolds
+            # Model Performance
+            - Name: MAX_DEPTH
+              Value: !Ref MaxDepth
+            - Name: LEARNING_RATE
+              Value: !Ref LearningRate
+            # Data Selection
+            - Name: MIN_RECORDS_THRESHOLD
+              Value: !Ref MinRecordsThreshold
+            - Name: MIN_AVG_VALUE_THRESHOLD
+              Value: !Ref MinAvgValueThreshold
 
 
   # IAM Role for ECS Task Execution

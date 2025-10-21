@@ -1,5 +1,30 @@
 """
 Centralized configuration management for ML training pipeline.
+
+Environment Variables:
+    # Threading and Parallelization
+    MAX_CURRENCY_WORKERS: Number of parallel currency workers (default: 4)
+    MAX_OPTUNA_WORKERS: Number of Optuna workers per currency (default: 2)
+    MODEL_N_JOBS: Number of model training jobs per currency (default: 2)
+    
+    # Hyperparameter Optimization
+    N_HYPERPARAMETER_TRIALS: Number of hyperparameter optimization trials (default: 50)
+    N_MODEL_TRIALS: Number of model training iterations (default: 100)
+    CV_FOLDS: Number of cross-validation folds (default: 5)
+    
+    # Model Performance
+    MAX_DEPTH: Maximum tree depth (default: 6)
+    LEARNING_RATE: Learning rate for models (default: 0.1)
+    
+    # Data Selection
+    MIN_RECORDS_THRESHOLD: Minimum records required for training (default: 5)
+    MAX_CURRENCIES_TO_TRAIN: Maximum number of currencies to train (default: None)
+    MIN_AVG_VALUE_THRESHOLD: Minimum average value threshold (default: 5.0)
+    
+    # AWS Configuration
+    AWS_REGION: AWS region (default: us-west-2)
+    DATA_LAKE_BUCKET: S3 bucket for data lake
+    DYNAMO_*: Various DynamoDB table and attribute configurations
 """
 
 from dataclasses import dataclass, field
@@ -19,25 +44,26 @@ class ModelConfig:
     use_xgboost: bool = True
     use_ensemble: bool = True
     
-    max_currency_workers: int = field(default_factory=lambda: int(os.getenv('MAX_CURRENCY_WORKERS', '6')))
-    max_optuna_workers: int = 4
-    model_n_jobs: int = 4
+    max_currency_workers: int = field(default_factory=lambda: int(os.getenv('MAX_CURRENCY_WORKERS', '4')))
+    max_optuna_workers: int = field(default_factory=lambda: int(os.getenv('MAX_OPTUNA_WORKERS', '2')))
+    model_n_jobs: int = field(default_factory=lambda: int(os.getenv('MODEL_N_JOBS', '2')))
     
     # Training Parameters
     test_size: float = 0.2
     random_state: int = 42
-    cv_folds: int = 5
-    early_stopping_rounds: int = 50
+    cv_folds: int = field(default_factory=lambda: int(os.getenv('CV_FOLDS', '5')))
+    early_stopping_rounds: int = 50  # Increased to allow more training before stopping
     
     
     # Hyperparameter Optimization
-    n_trials: int = 50  # Optimal for 8 vCPU system - balances thoroughness with efficiency
+    n_hyperparameter_trials: int = field(default_factory=lambda: int(os.getenv('N_HYPERPARAMETER_TRIALS', '50')))
     
     # Model Performance
-    max_depth: int = 8
-    learning_rate: float = 0.1
-    n_estimators: int = 500
+    max_depth: int = field(default_factory=lambda: int(os.getenv('MAX_DEPTH', '6')))
+    learning_rate: float = field(default_factory=lambda: float(os.getenv('LEARNING_RATE', '0.1')))
     
+    # Model Training Iterations (number of boosting rounds for LightGBM/XGBoost)
+    n_model_trials: int = field(default_factory=lambda: int(os.getenv('N_MODEL_TRIALS', '100')))
 
 
 @dataclass
@@ -53,9 +79,9 @@ class DataConfig:
     excluded_leagues: List[str] = field(default_factory=list)
     
     # Currency selection strategy
-    min_records_threshold: int = 5  # Reduced from 50 to allow minimal data
-    max_currencies_to_train: Optional[int] = None
-    min_avg_value_threshold: float = 5.0
+    min_records_threshold: int = field(default_factory=lambda: int(os.getenv('MIN_RECORDS_THRESHOLD', '5')))
+    max_currencies_to_train: Optional[int] = field(default_factory=lambda: int(os.getenv('MAX_CURRENCIES_TO_TRAIN', '0')) if os.getenv('MAX_CURRENCIES_TO_TRAIN') and int(os.getenv('MAX_CURRENCIES_TO_TRAIN', '0')) > 0 else None)
+    min_avg_value_threshold: float = field(default_factory=lambda: float(os.getenv('MIN_AVG_VALUE_THRESHOLD', '0.25')))
     train_all_currencies: bool = False
     
     # Target variables
@@ -348,50 +374,28 @@ def get_config(config_path: Optional[str] = None) -> MLConfig:
 
 def get_config_by_mode(mode: str = "production") -> MLConfig:
     """Get configuration based on mode."""
-    if mode == "production":
-        return get_production_config()
-    elif mode == "development":
-        return get_development_config()
-    elif mode == "test":
-        return get_test_config()
-    elif mode == "all_currencies":
+    if mode == "all_currencies":
         return get_all_currencies_config()
     elif mode == "high_value":
         return get_high_value_config()
     else:
-        raise ValueError(f"Unknown mode: {mode}. Use 'production', 'development', 'test', 'all_currencies', or 'high_value'")
+        # Default to production configuration for any mode
+        return get_default_config()
 
 
-# Environment-specific configurations
-def get_development_config() -> MLConfig:
-    """Get configuration optimized for development."""
+# Default configuration
+def get_default_config() -> MLConfig:
+    """Get default configuration optimized for production."""
     config = MLConfig()
-    config.model.n_trials = 50
-    config.model.cv_folds = 3
-    config.logging.level = "INFO"
-    config.experiment.tags = ["development"]
     
-    # Enhanced data quality settings for development
-    config.data.min_records_threshold = 5 
-    config.processing.outlier_removal = True
-    config.processing.robust_scaling = True
-    config.processing.max_missing_ratio = 0.2
-    
-    return config
-
-
-def get_production_config() -> MLConfig:
-    """Get configuration optimized for production."""
-    config = MLConfig()
-    config.model.n_trials = 100
-    config.model.cv_folds = 5
+    # Set production-optimized defaults (environment variables are already handled by dataclass fields)
+    # Only set non-environment-variable properties
     config.logging.level = "INFO"
     config.logging.suppress_lightgbm = True
     config.logging.suppress_optuna = True
     config.experiment.tags = ["production"]
     
     # Enhanced data quality settings for production
-    config.data.min_records_threshold = 50  # Increased for better model quality
     config.processing.outlier_removal = True
     config.processing.robust_scaling = True
     config.processing.max_missing_ratio = 0.3  # Allow some missing data for production
@@ -399,28 +403,13 @@ def get_production_config() -> MLConfig:
     return config
 
 
-def get_test_config() -> MLConfig:
-    """Get configuration optimized for testing."""
-    config = MLConfig()
-    config.model.n_trials = 3  # Very fast for testing
-    config.model.cv_folds = 2  # Minimum for cross-validation
-    config.logging.level = "DEBUG"
-    config.experiment.tags = ["test"]
-    
-    # Enhanced data quality settings for testing
-    config.data.min_records_threshold = 1  # Minimal threshold for testing
-    config.processing.outlier_removal = True
-    config.processing.robust_scaling = True
-    
-    return config
-
-
 def get_all_currencies_config() -> MLConfig:
     """Get configuration optimized for training all available currencies."""
-    config = get_production_config()
+    config = get_default_config()
     
-    # Lower threshold for more currencies
-    config.data.min_records_threshold = 30  # Balanced threshold for more currencies
+    # Lower threshold for more currencies (only if not set via env var)
+    if not os.getenv('MIN_RECORDS_THRESHOLD'):
+        config.data.min_records_threshold = 30  # Balanced threshold for more currencies
     
     # Adjust processing for larger scale
     
@@ -434,7 +423,7 @@ def get_all_currencies_config() -> MLConfig:
 
 def get_high_value_config() -> MLConfig:
     """Get configuration optimized for training only high-value currencies (including Mirror items)."""
-    config = get_production_config()
+    config = get_default_config()
     
     # Lower threshold for rare items
     config.data.min_records_threshold = 20  # Balanced threshold for rare items

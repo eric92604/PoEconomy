@@ -88,7 +88,7 @@ def main():
         check_timeout()
         
         training_mode = os.getenv('TRAINING_MODE', 'production')
-        min_records = os.getenv('MIN_RECORDS', '50')
+        min_records = os.getenv('MIN_RECORDS_THRESHOLD', '50')
         max_currencies = os.getenv('MAX_CURRENCIES_TO_TRAIN', '0')
         
         logger.info(f"Training configuration:")

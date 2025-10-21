@@ -28,7 +28,15 @@ deploy_cloudformation_stack "$TRAINING_STACK_NAME" "$TRAINING_TEMPLATE" \
   "TaskTimeoutMinutes=$TASK_TIMEOUT_MINUTES" \
   "MaxCurrenciesToTrain=$MAX_CURRENCIES_TO_TRAIN" \
   "BaseStackName=$BASE_STACK_NAME" \
-  "DataLakeBucketName=$DATA_LAKE_BUCKET_NAME"
+  "DataLakeBucketName=$DATA_LAKE_BUCKET_NAME" \
+  "NHyperparameterTrials=${N_HYPERPARAMETER_TRIALS:-50}" \
+  "NModelTrials=${N_MODEL_TRIALS:-100}" \
+  "CVFolds=${CV_FOLDS:-5}" \
+  "MaxDepth=${MAX_DEPTH:-6}" \
+  "LearningRate=${LEARNING_RATE:-0.1}" \
+  "MaxOptunaWorkers=${MAX_OPTUNA_WORKERS:-2}" \
+  "ModelNJobs=${MODEL_N_JOBS:-2}" \
+  "MinAvgValueThreshold=${MIN_AVG_VALUE_THRESHOLD:-5.0}"
 
 # Update .env file with current stack outputs
 update_env_file

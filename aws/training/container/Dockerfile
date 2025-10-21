@@ -12,7 +12,14 @@ RUN ln -sf /usr/bin/python3.11 /usr/bin/python && \
 # Install dependencies required for model training
 # Use exact versions to match prediction and feature engineering containers
 COPY aws/training/container/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+# Upgrade pip and install wheel first to avoid build issues
+RUN pip install --upgrade pip setuptools wheel
+
+# Install packages with retry logic and better error handling
+RUN pip install --no-cache-dir --retries 3 --timeout 300 \
+    --upgrade-strategy only-if-needed \
+    -r requirements.txt
 
 # Copy the ML training code
 COPY ml /app/ml
