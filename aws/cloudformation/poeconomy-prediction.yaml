@@ -33,8 +33,6 @@ Resources:
           AttributeType: S
         - AttributeName: horizon
           AttributeType: S
-        - AttributeName: ttl
-          AttributeType: N
       KeySchema:
         - AttributeName: currency_league
           KeyType: HASH
@@ -174,7 +172,6 @@ Resources:
       Environment:
         Variables:
           ENVIRONMENT: !Ref EnvironmentName
-          AWS_REGION: !Ref AWS::Region
           MODELS_DIR: /var/task/models
           DYNAMO_CURRENCY_METADATA_TABLE: 
             Fn::ImportValue:
