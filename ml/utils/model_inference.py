@@ -443,10 +443,46 @@ class ModelPredictor:
         feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
         feature_matrix = feature_frame.to_numpy(dtype=float, na_value=np.nan)
 
-        valid_mask = np.all(np.isfinite(feature_matrix), axis=1)
+        # More robust handling of NaN values for small datasets
+        # Instead of requiring ALL features to be finite, we'll:
+        # 1. Impute NaN values with column means/medians
+        # 2. Use a more lenient filtering approach
+        
+        # Count NaN values per row
+        nan_counts = np.isnan(feature_matrix).sum(axis=1)
+        total_features = feature_matrix.shape[1]
+        
+        # For small datasets, be more lenient with NaN tolerance
+        # Allow rows with up to 50% NaN values (for 5 data points, this is reasonable)
+        max_nan_ratio = 0.5
+        max_nan_count = int(total_features * max_nan_ratio)
+        
+        # Filter rows with too many NaN values
+        valid_mask = nan_counts <= max_nan_count
+        
+        if not np.any(valid_mask):
+            # If no rows pass the NaN filter, use the row with the fewest NaN values
+            min_nan_idx = np.argmin(nan_counts)
+            valid_mask = np.zeros(len(feature_matrix), dtype=bool)
+            valid_mask[min_nan_idx] = True
+            self.logger.warning(f"No rows passed NaN filter, using row with fewest NaN values ({nan_counts[min_nan_idx]}/{total_features})")
+        
         filtered_matrix = feature_matrix[valid_mask]
         filtered_rows = processed_df[valid_mask].reset_index(drop=True)
-
+        
+        # Impute remaining NaN values with column means
+        for col_idx in range(filtered_matrix.shape[1]):
+            col_data = filtered_matrix[:, col_idx]
+            if np.any(np.isnan(col_data)):
+                # Use median for imputation (more robust than mean)
+                median_val = np.nanmedian(col_data)
+                if np.isnan(median_val):
+                    # If all values are NaN, use 0
+                    median_val = 0.0
+                filtered_matrix[np.isnan(col_data), col_idx] = median_val
+                self.logger.debug(f"Imputed {np.isnan(col_data).sum()} NaN values in column {col_idx} with {median_val}")
+        
+        self.logger.debug(f"Feature matrix extraction: {len(filtered_matrix)} rows, {filtered_matrix.shape[1]} features")
         return filtered_matrix, filtered_rows
 
     def _compute_confidence(self, rmse: Optional[float], current_price: float) -> float:
