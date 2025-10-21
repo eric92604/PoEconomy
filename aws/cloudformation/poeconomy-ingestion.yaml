@@ -22,6 +22,13 @@ Parameters:
   BaseStackName:
     Type: String
     Description: Name of the base stack to import data lake bucket from
+  LambdaCodeVersion:
+    Type: String
+    Default: "1.0.0"
+    Description: Version identifier for Lambda function code to force updates
+  IngestionContainerImageUri:
+    Type: String
+    Description: URI of the ingestion container image for Lambda functions
 
 Resources:
   # DynamoDB Tables for Ingestion
@@ -318,6 +325,7 @@ Resources:
 
   LeagueMetadataLogGroup:
     Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
     Properties:
       LogGroupName: !Sub '/aws/lambda/poeconomy-${EnvironmentName}-league-metadata'
       RetentionInDays: 14
@@ -339,15 +347,14 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub 'poeconomy-${EnvironmentName}-ingestion'
-      Description: Ingest currency data from POE Watch API and store in DynamoDB
-      Runtime: python3.11
-      Handler: ingestion_handler.lambda_handler
-      Role: !GetAtt IngestionLambdaRole.Arn
+      Description: !Sub 'Ingest currency data from POE Watch API and store in DynamoDB (Version: ${LambdaCodeVersion})'
+      PackageType: Image
       Code:
-        S3Bucket: 
-          Fn::ImportValue:
-            Fn::Sub: '${BaseStackName}-DataLakeBucket'
-        S3Key: lambda/ingestion.zip
+        ImageUri: !Ref IngestionContainerImageUri
+      ImageConfig:
+        Command:
+          - lambda.ingestion.ingestion_handler.lambda_handler
+      Role: !GetAtt IngestionLambdaRole.Arn
       Timeout: 300
       MemorySize: 1024
       Environment:
@@ -361,7 +368,9 @@ Resources:
           DYNAMO_CURRENCY_METADATA_TABLE: !Ref CurrencyMetadataTable
           CURRENCY_METADATA_TABLE: !Ref CurrencyMetadataTable
           LIVE_PRICES_TABLE: !Ref LivePricesTable
+          DYNAMO_CURRENCY_PRICES_TABLE: !Ref LivePricesTable
           LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
+          DYNAMO_LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
           DAILY_PRICES_TABLE: !Ref DailyPricesTable
           DATA_LAKE_BUCKET: 
             Fn::ImportValue:
@@ -377,24 +386,36 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub 'poeconomy-${EnvironmentName}-league-metadata'
-      Description: Ingest league metadata from POE API
-      Runtime: python3.11
-      Handler: league_metadata_handler.lambda_handler
-      Role: !GetAtt LeagueMetadataLambdaRole.Arn
+      Description: !Sub 'Ingest league metadata from POE API (Version: ${LambdaCodeVersion})'
+      PackageType: Image
       Code:
-        S3Bucket: 
-          Fn::ImportValue:
-            Fn::Sub: '${BaseStackName}-DataLakeBucket'
-        S3Key: lambda/league_metadata.zip
+        ImageUri: !Ref IngestionContainerImageUri
+      ImageConfig:
+        Command:
+          - lambda.ingestion.league_metadata_handler.lambda_handler
+      Role: !GetAtt LeagueMetadataLambdaRole.Arn
       Timeout: 300
       MemorySize: 512
       Environment:
         Variables:
           ENVIRONMENT: !Ref EnvironmentName
+          MODELS_BUCKET: 
+            Fn::ImportValue:
+              Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          MODELS_S3_PREFIX: models/currency
+          MODELS_DIR: /var/task/models
+          DYNAMO_CURRENCY_METADATA_TABLE: !Ref CurrencyMetadataTable
+          CURRENCY_METADATA_TABLE: !Ref CurrencyMetadataTable
+          LIVE_PRICES_TABLE: !Ref LivePricesTable
+          DYNAMO_CURRENCY_PRICES_TABLE: !Ref LivePricesTable
           LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
+          DYNAMO_LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
+          DAILY_PRICES_TABLE: !Ref DailyPricesTable
           DATA_LAKE_BUCKET: 
             Fn::ImportValue:
               Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          PREDICTION_REFRESH_FUNCTION_NAME: !Sub 'poeconomy-${EnvironmentName}-prediction-refresh'
+          PREDICTION_CACHE_TTL_HOURS: '2'
           LOG_LEVEL: INFO
       Tags:
         - Key: App
@@ -404,22 +425,36 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub 'poeconomy-${EnvironmentName}-daily-aggregation'
-      Description: Aggregate hourly price data into daily price data
-      Runtime: python3.11
-      Handler: daily_aggregation_handler.lambda_handler
-      Role: !GetAtt DailyAggregationLambdaRole.Arn
+      Description: !Sub 'Aggregate hourly price data into daily price data (Version: ${LambdaCodeVersion})'
+      PackageType: Image
       Code:
-        S3Bucket: 
-          Fn::ImportValue:
-            Fn::Sub: '${BaseStackName}-DataLakeBucket'
-        S3Key: lambda/daily_aggregation.zip
+        ImageUri: !Ref IngestionContainerImageUri
+      ImageConfig:
+        Command:
+          - lambda.ingestion.daily_aggregation_handler.lambda_handler
+      Role: !GetAtt DailyAggregationLambdaRole.Arn
       Timeout: 300
       MemorySize: 1024
       Environment:
         Variables:
           ENVIRONMENT: !Ref EnvironmentName
+          MODELS_BUCKET: 
+            Fn::ImportValue:
+              Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          MODELS_S3_PREFIX: models/currency
+          MODELS_DIR: /var/task/models
+          DYNAMO_CURRENCY_METADATA_TABLE: !Ref CurrencyMetadataTable
+          CURRENCY_METADATA_TABLE: !Ref CurrencyMetadataTable
           LIVE_PRICES_TABLE: !Ref LivePricesTable
+          DYNAMO_CURRENCY_PRICES_TABLE: !Ref LivePricesTable
+          LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
+          DYNAMO_LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
           DAILY_PRICES_TABLE: !Ref DailyPricesTable
+          DATA_LAKE_BUCKET: 
+            Fn::ImportValue:
+              Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          PREDICTION_REFRESH_FUNCTION_NAME: !Sub 'poeconomy-${EnvironmentName}-prediction-refresh'
+          PREDICTION_CACHE_TTL_HOURS: '2'
           LOG_LEVEL: INFO
       Tags:
         - Key: App

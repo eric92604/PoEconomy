@@ -116,14 +116,32 @@ Resources:
               Fn::Sub: '${BaseStackName}-DataLakeBucket'
           MODELS_S3_PREFIX: models/currency
           MODELS_DIR: /var/task/models
-          DYNAMO_CURRENCY_METADATA_TABLE: !Sub 'poeconomy-${EnvironmentName}-currency-metadata'
-          CURRENCY_METADATA_TABLE: !Sub 'poeconomy-${EnvironmentName}-currency-metadata'
-          LIVE_PRICES_TABLE: !Sub 'poeconomy-${EnvironmentName}-live-prices'
-          PREDICTIONS_TABLE: !Sub 'poeconomy-${EnvironmentName}-predictions'
-          LEAGUE_METADATA_TABLE: !Sub 'poeconomy-${EnvironmentName}-league-metadata'
+          DYNAMO_CURRENCY_METADATA_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${IngestionStackName}-CurrencyMetadataTableName'
+          CURRENCY_METADATA_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${IngestionStackName}-CurrencyMetadataTableName'
+          LIVE_PRICES_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${IngestionStackName}-LivePricesTableName'
+          DYNAMO_CURRENCY_PRICES_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${IngestionStackName}-LivePricesTableName'
+          PREDICTIONS_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${PredictionStackName}-PredictionsTableName'
+          LEAGUE_METADATA_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${IngestionStackName}-LeagueMetadataTableName'
+          DAILY_PRICES_TABLE: 
+            Fn::ImportValue:
+              Fn::Sub: '${IngestionStackName}-DailyPricesTableName'
           DATA_LAKE_BUCKET: 
             Fn::ImportValue:
               Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          PREDICTION_REFRESH_FUNCTION_NAME: !Sub 'poeconomy-${EnvironmentName}-prediction-refresh'
+          PREDICTION_CACHE_TTL_HOURS: '2'
           LOG_LEVEL: INFO
       Tags:
         - Key: App
