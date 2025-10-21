@@ -24,7 +24,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 warnings.filterwarnings('ignore')
 
 # Import utilities
-from ml.config.training_config import MLConfig, DataConfig, ProcessingConfig, get_production_config, get_development_config, get_test_config
+from ml.config.training_config import MLConfig, DataConfig, ProcessingConfig, get_default_config, get_all_currencies_config, get_high_value_config
 from ml.utils.common_utils import setup_ml_logging, MLLogger, ProgressLogger
 from ml.utils.data_processing import DataProcessor
 from ml.utils.feature_engineering import FeatureEngineer
@@ -674,11 +674,11 @@ def main() -> None:
         if args.config:
             config = MLConfig.from_file(args.config)
         elif args.mode == 'production':
-            config = get_production_config()
+            config = get_default_config()
         elif args.mode == 'development':
-            config = get_development_config()
+            config = get_default_config()
         else:  # test
-            config = get_test_config()
+            config = get_default_config()
         
         # Override configuration with command line arguments
         if args.experiment_id:
