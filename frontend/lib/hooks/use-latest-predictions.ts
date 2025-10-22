@@ -23,13 +23,16 @@ export function useLatestPredictions(params: {
   league?: string;
   horizons?: string[];
   limit?: number;
+  enabled?: boolean;
 } = {}): UseQueryResult<LatestPredictionsResponse> {
   return useQuery({
     queryKey: latestPredictionsKeys.byParams(params.league, params.horizons, params.limit),
     queryFn: () => latestPredictionsApi.getLatestPredictions(params),
+    enabled: params.enabled !== false, // Only fetch when enabled
     staleTime: 5 * 60 * 1000, // 5 minutes
     gcTime: 10 * 60 * 1000, // 10 minutes
-    refetchInterval: 5 * 60 * 1000, // Refetch every 5 minutes
+    refetchInterval: false, // Disable automatic refetching to prevent multiple calls
+    refetchOnWindowFocus: false, // Disable refetch on window focus
   });
 }
 

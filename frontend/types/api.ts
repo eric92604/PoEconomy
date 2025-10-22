@@ -56,6 +56,8 @@ export interface PredictionData {
   confidence: number;
   timestamp: number;
   source: PredictionSource;
+  prediction_lower?: number;
+  prediction_upper?: number;
 }
 
 /**

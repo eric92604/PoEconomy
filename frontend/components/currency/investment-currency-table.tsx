@@ -29,6 +29,7 @@ import {
 } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import { CurrencyIcon } from "@/components/currency/currency-icon";
+import { ChaosPrice } from "@/components/currency/chaos-price";
 
 interface InvestmentCurrencyTableProps {
   currencies: CurrencyWithPredictions[];
@@ -172,16 +173,12 @@ export const InvestmentCurrencyTable = memo(function InvestmentCurrencyTable({
                   </div>
                 </TableCell>
                 <TableCell className="text-right">
-                  <span className="font-mono">
-                    {formatPrice(currency.current_price)}c
-                  </span>
+                  <ChaosPrice price={currency.current_price} />
                 </TableCell>
                 <TableCell className="text-right">
                   {prediction ? (
                     <div className="flex flex-col items-end">
-                      <span className="font-mono">
-                        {formatPrice(prediction.predicted_price)}c
-                      </span>
+                      <ChaosPrice price={prediction.predicted_price} />
                       <span
                         className={cn(
                           "text-sm font-semibold flex items-center gap-1",
@@ -211,10 +208,14 @@ export const InvestmentCurrencyTable = memo(function InvestmentCurrencyTable({
 
                     if (predictionWithRange) {
                       return (
-                        <span className="text-sm text-muted-foreground font-mono">
-                          {formatPrice(predictionWithRange.prediction_lower!)} -{" "}
-                          {formatPrice(predictionWithRange.prediction_upper!)}
-                        </span>
+                        <div className="text-sm text-muted-foreground font-mono flex items-center gap-1">
+                          <span>{formatPrice(predictionWithRange.prediction_lower!)} - {formatPrice(predictionWithRange.prediction_upper!)}</span>
+                          <CurrencyIcon 
+                            iconUrl="/images/chaos-orb.png" 
+                            currency="Chaos Orb" 
+                            size="sm" 
+                          />
+                        </div>
                       );
                     }
 

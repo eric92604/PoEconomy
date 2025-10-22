@@ -66,6 +66,7 @@ export default function InvestmentsPage() {
     league: selectedLeague || undefined,
     horizons: ["1d", "3d", "7d"], // All horizons for investment analysis
     limit: 500, // Increase limit to get more currencies
+    enabled: !!selectedLeague, // Only fetch when we have a selected league
   });
 
   // Transform predictions into currency data
@@ -100,6 +101,8 @@ export default function InvestmentsPage() {
             price_change_percent: prediction.price_change_percent,
             confidence: prediction.confidence,
             horizon: horizon as "1d" | "3d" | "7d",
+            prediction_lower: prediction.prediction_lower,
+            prediction_upper: prediction.prediction_upper,
           };
         }
       });
