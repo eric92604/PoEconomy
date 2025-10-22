@@ -80,7 +80,7 @@ export default function InvestmentsPage() {
 
   // Transform predictions into currency data
   const currenciesWithPredictions = useMemo((): CurrencyWithPredictions[] => {
-    if (!predictionsData || !selectedLeague) return [];
+    if (!predictionsData || !selectedLeague || !currenciesData) return [];
 
     const currencyMap = new Map<string, CurrencyWithPredictions>();
 
@@ -88,10 +88,15 @@ export default function InvestmentsPage() {
       const key = pred.currency;
       
       if (!currencyMap.has(key)) {
+        // Get icon URL from currency metadata
+        const currencyMetadata = currenciesData.currencies[pred.currency]?.[pred.league];
+        const iconUrl = currencyMetadata?.icon_url;
+        
         currencyMap.set(key, {
           currency: pred.currency,
           league: pred.league,
           current_price: pred.current_price,
+          icon_url: iconUrl,
           predictions: {},
           average_confidence: 0,
         });
@@ -118,7 +123,7 @@ export default function InvestmentsPage() {
     });
 
     return Array.from(currencyMap.values());
-  }, [predictionsData, selectedLeague]);
+  }, [predictionsData, selectedLeague, currenciesData]);
 
   // Handle filter changes
   const handleSearchChange = (value: string) => {
