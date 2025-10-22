@@ -109,6 +109,7 @@ export default function DashboardPage() {
   }, [predictionsData, leaguesData, currenciesData]);
 
   const isLoading = currenciesLoading || leaguesLoading || predictionsLoading;
+  const isInitialLoad = currenciesLoading || leaguesLoading;
 
   return (
     <div className="py-8 space-y-8">
@@ -121,7 +122,7 @@ export default function DashboardPage() {
             <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            {isLoading ? (
+            {isInitialLoad ? (
               <Skeleton className="h-8 w-16" />
             ) : (
               <div className="text-2xl font-bold">{stats.totalCurrencies}</div>

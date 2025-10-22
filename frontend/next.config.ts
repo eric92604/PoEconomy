@@ -7,6 +7,30 @@ const nextConfig: NextConfig = {
   output: 'export',
   trailingSlash: true,
   
+  // Performance optimizations
+  compiler: {
+    // Remove console.log in production
+    removeConsole: process.env.NODE_ENV === 'production',
+  },
+  
+  // Webpack optimizations
+  webpack: (config, { dev, isServer }) => {
+    // Optimize for production builds
+    if (!dev && !isServer) {
+      config.optimization.splitChunks = {
+        chunks: 'all',
+        cacheGroups: {
+          vendor: {
+            test: /[\\/]node_modules[\\/]/,
+            name: 'vendors',
+            chunks: 'all',
+          },
+        },
+      };
+    }
+    return config;
+  },
+  
   // Enable experimental features
   experimental: {
     // Optimize package imports
@@ -23,6 +47,8 @@ const nextConfig: NextConfig = {
         pathname: "/**",
       },
     ],
+    // Enable modern image formats
+    formats: ['image/webp', 'image/avif'],
   },
 
   // Environment variables validation
@@ -101,6 +127,15 @@ const nextConfig: NextConfig = {
           {
             key: 'Cache-Control',
             value: 'public, max-age=86400',
+          },
+        ],
+      },
+      {
+        source: '/api/(.*)',
+        headers: [
+          {
+            key: 'Cache-Control',
+            value: 'public, max-age=300, s-maxage=300',
           },
         ],
       },
