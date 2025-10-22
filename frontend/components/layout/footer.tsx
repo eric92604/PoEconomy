@@ -13,22 +13,8 @@ export function Footer() {
         <div className="text-sm text-muted-foreground">
           © {currentYear} {APP_NAME}. All rights reserved.
         </div>
-        <div className="flex items-center space-x-4 text-sm text-muted-foreground">
-          <span>v{APP_VERSION}</span>
-          <a
-            href="https://github.com"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:text-foreground transition-colors"
-          >
-            GitHub
-          </a>
-          <a
-            href="/docs"
-            className="hover:text-foreground transition-colors"
-          >
-            Docs
-          </a>
+        <div className="text-xs text-muted-foreground text-right">
+          This application is not affiliated with Grinding Gear Games. Path of Exile is a trademark of Grinding Gear Games Ltd.
         </div>
       </div>
     </footer>

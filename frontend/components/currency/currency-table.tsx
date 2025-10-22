@@ -29,9 +29,10 @@ import {
   formatConfidence,
   sortCurrencies,
   filterCurrencies,
-} from "@/lib/utils";
-import { cn } from "@/lib/utils";
+} from "../../lib/utils";
+import { cn } from "../../lib/utils";
 import { CurrencyFiltersComponent } from "@/components/filters/currency-filters";
+import { CurrencyIcon } from "@/components/currency/currency-icon";
 
 interface CurrencyTableProps {
   currencies: CurrencyWithPredictions[];
@@ -211,11 +212,18 @@ export function CurrencyTable({
                 onClick={() => onSelectCurrency?.(currency)}
               >
                 <TableCell className="font-medium">
-                  <div className="flex flex-col">
-                    <span>{currency.currency}</span>
-                    <span className="text-xs text-muted-foreground">
-                      {currency.league}
-                    </span>
+                  <div className="flex items-center gap-3">
+                    <CurrencyIcon 
+                      iconUrl={currency.icon_url} 
+                      currency={currency.currency} 
+                      size="md" 
+                    />
+                    <div className="flex flex-col">
+                      <span>{currency.currency}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {currency.league}
+                      </span>
+                    </div>
                   </div>
                 </TableCell>
                 <TableCell className="text-right font-mono">

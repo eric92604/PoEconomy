@@ -51,9 +51,9 @@ frontend/
 npm install
 
 # Set up environment variables
-cp .env.example .env.local
+cp .env.example .env
 
-# Edit .env.local with your API URL
+# Edit .env with your API URL
 ```
 
 ### Development
@@ -118,12 +118,13 @@ npm run format
 
 ```env
 # API Configuration
-NEXT_PUBLIC_API_URL=http://localhost:8787
+NEXT_PUBLIC_API_URL=https://api.poeconomy.com
+NEXT_PUBLIC_API_KEY=your_api_key_here
 
 # Application
 NEXT_PUBLIC_APP_NAME=PoEconomy
 NEXT_PUBLIC_APP_VERSION=0.1.0
-NEXT_PUBLIC_ENVIRONMENT=development
+NEXT_PUBLIC_ENVIRONMENT=production
 
 # Features
 NEXT_PUBLIC_ENABLE_DEVTOOLS=true

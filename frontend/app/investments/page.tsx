@@ -19,7 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { TrendingUp, Target, Clock } from "lucide-react";
-import { useCurrencies, useLeagues, useBatchPredictions } from "@/lib/hooks";
+import { useCurrencies, useLeagues, useBatchPredictions } from "../../lib/hooks";
 import type { PredictionRequest, CurrencyWithPredictions } from "@/types";
 
 export default function InvestmentsPage() {

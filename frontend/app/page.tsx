@@ -78,17 +78,6 @@ export default function Home() {
         </Card>
       </section>
 
-      {/* Quick Start */}
-      <section className="rounded-lg border border-border bg-card p-8 text-center">
-        <h2 className="text-2xl font-bold mb-4">Ready to Start Trading Smarter?</h2>
-        <p className="text-muted-foreground mb-6 max-w-[600px] mx-auto">
-          Access real-time predictions for 99+ currencies across multiple leagues.
-          No signup required.
-        </p>
-        <Button asChild size="lg">
-          <Link href="/dashboard">Get Started</Link>
-        </Button>
-      </section>
     </div>
   );
 }

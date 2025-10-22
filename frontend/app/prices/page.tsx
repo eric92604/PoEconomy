@@ -26,9 +26,9 @@ import {
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Search, RefreshCw, TrendingUp, TrendingDown } from "lucide-react";
-import { useLeagues, useLivePricesWithRefresh } from "@/lib/hooks";
-import { formatPrice, formatRelativeTime } from "@/lib/utils";
-import { cn } from "@/lib/utils";
+import { useLeagues, useLivePricesWithRefresh } from "../../lib/hooks";
+import { formatPrice, formatRelativeTime } from "../../lib/utils";
+import { cn } from "../../lib/utils";
 
 export default function PricesPage() {
   const [selectedLeague, setSelectedLeague] = useState<string>("");
