@@ -61,14 +61,6 @@ export default function DashboardPage() {
 
   // Calculate stats
   const stats = useMemo(() => {
-    // Debug logging
-    console.log('Dashboard stats calculation:', {
-      predictionsData: predictionsData ? 'present' : 'missing',
-      leaguesData: leaguesData ? 'present' : 'missing', 
-      currenciesData: currenciesData ? 'present' : 'missing',
-      results: predictionsData?.results ? predictionsData.results.length : 0
-    });
-    
     if (!predictionsData || !leaguesData || !currenciesData || !predictionsData.results) {
       return {
         totalCurrencies: 0,
@@ -80,8 +72,6 @@ export default function DashboardPage() {
 
     // Convert batch predictions data to dashboard format
     const currencies: CurrencyWithPredictions[] = predictionsData.results.map((prediction) => {
-      console.log(`Processing prediction:`, prediction);
-      
       // Get icon URL from currency metadata
       const currencyMetadata = currenciesData.currencies[prediction.currency]?.[prediction.league];
       const iconUrl = currencyMetadata?.icon_url;
@@ -102,8 +92,6 @@ export default function DashboardPage() {
         average_confidence: prediction.confidence,
       };
     });
-
-    console.log('Final currencies array:', currencies);
 
     // Sort by profit
     const sortedByProfit = [...currencies].sort(

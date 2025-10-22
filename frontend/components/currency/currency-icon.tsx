@@ -1,5 +1,6 @@
 import Image from "next/image";
 import { cn } from "@/lib/utils";
+import { memo } from "react";
 
 interface CurrencyIconProps {
   iconUrl?: string;
@@ -14,7 +15,7 @@ const sizeClasses = {
   lg: "w-8 h-8",
 };
 
-export function CurrencyIcon({ 
+export const CurrencyIcon = memo(function CurrencyIcon({ 
   iconUrl, 
   currency, 
   size = "md", 
@@ -47,4 +48,4 @@ export function CurrencyIcon({
       />
     </div>
   );
-}
+});

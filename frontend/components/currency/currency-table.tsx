@@ -4,7 +4,7 @@
  * Main Investment Table - Core feature displaying currencies with predictions
  */
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback, memo } from "react";
 import {
   Table,
   TableBody,
@@ -41,7 +41,7 @@ interface CurrencyTableProps {
   showFilters?: boolean;
 }
 
-export function CurrencyTable({
+export const CurrencyTable = memo(function CurrencyTable({
   currencies,
   onSelectCurrency,
   selectedCurrency,
@@ -67,17 +67,17 @@ export function CurrencyTable({
   }, [currencies, filters, sortField, sortDirection]);
 
   // Handle sort
-  const handleSort = (field: CurrencySortField) => {
+  const handleSort = useCallback((field: CurrencySortField) => {
     if (sortField === field) {
       setSortDirection(sortDirection === "asc" ? "desc" : "asc");
     } else {
       setSortField(field);
       setSortDirection("desc");
     }
-  };
+  }, [sortField, sortDirection]);
 
   // Get sort icon
-  const getSortIcon = (field: CurrencySortField) => {
+  const getSortIcon = useCallback((field: CurrencySortField) => {
     if (sortField !== field) {
       return <ArrowUpDown className="ml-2 h-4 w-4" />;
     }
@@ -86,10 +86,10 @@ export function CurrencyTable({
     ) : (
       <ArrowDown className="ml-2 h-4 w-4" />
     );
-  };
+  }, [sortField, sortDirection]);
 
   // Get profit color
-  const getProfitColor = (percent: number) => {
+  const getProfitColor = useCallback((percent: number) => {
     if (percent >= 5) return "text-green-600 dark:text-green-400";
     if (percent >= 2) return "text-green-500 dark:text-green-500";
     if (percent > 0) return "text-green-400 dark:text-green-600";
@@ -97,7 +97,7 @@ export function CurrencyTable({
     if (percent > -2) return "text-red-400 dark:text-red-600";
     if (percent > -5) return "text-red-500 dark:text-red-500";
     return "text-red-600 dark:text-red-400";
-  };
+  }, []);
 
   // Get confidence badge variant
   const getConfidenceVariant = (confidence: number): "default" | "secondary" | "destructive" => {
@@ -324,5 +324,5 @@ export function CurrencyTable({
       </div>
     </div>
   );
-}
+});
 
