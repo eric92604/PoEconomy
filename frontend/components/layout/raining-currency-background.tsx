@@ -47,31 +47,23 @@ export function RainingCurrencyBackground() {
       mirror: "/images/mirror-of-kalandra.png",
     };
 
-    console.log("🎨 Loading currency images from local files...");
-    console.log("Divine URL:", localUrls.divine);
-    console.log("Mirror URL:", localUrls.mirror);
-
     // Load Divine Orb image
     const divineImg = new Image();
     divineImg.onload = () => {
-      console.log("✅ Divine Orb image loaded successfully");
       setCurrencyImages((prev) => ({ ...prev, divine: divineImg }));
     };
-    divineImg.onerror = (e) => {
-      console.error("❌ Failed to load Divine Orb image:", e);
-      console.error("URL was:", localUrls.divine);
+    divineImg.onerror = () => {
+      // Silently fail - particles won't render without images
     };
     divineImg.src = localUrls.divine;
 
     // Load Mirror of Kalandra image
     const mirrorImg = new Image();
     mirrorImg.onload = () => {
-      console.log("✅ Mirror of Kalandra image loaded successfully");
       setCurrencyImages((prev) => ({ ...prev, mirror: mirrorImg }));
     };
-    mirrorImg.onerror = (e) => {
-      console.error("❌ Failed to load Mirror image:", e);
-      console.error("URL was:", localUrls.mirror);
+    mirrorImg.onerror = () => {
+      // Silently fail - particles won't render without images
     };
     mirrorImg.src = localUrls.mirror;
   }, []);

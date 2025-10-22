@@ -2,7 +2,7 @@
  * Footer component
  */
 
-import { APP_NAME, APP_VERSION } from "@/lib/constants/config";
+import { APP_NAME } from "@/lib/constants/config";
 
 export function Footer() {
   const currentYear = new Date().getFullYear();

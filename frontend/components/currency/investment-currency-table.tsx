@@ -20,15 +20,12 @@ import type {
   CurrencyWithPredictions,
   CurrencySortField,
   SortDirection,
-  CurrencyFilters,
-  CurrencyCategory,
 } from "@/types";
 import {
   formatPrice,
   formatPercentage,
   formatConfidence,
   sortCurrencies,
-  filterCurrencies,
 } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import { CurrencyIcon } from "@/components/currency/currency-icon";
@@ -48,22 +45,11 @@ export const InvestmentCurrencyTable = memo(function InvestmentCurrencyTable({
 }: InvestmentCurrencyTableProps) {
   const [sortField, setSortField] = useState<CurrencySortField>("profit_1d");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
-  const [filters, setFilters] = useState<CurrencyFilters>({});
 
-  // Get available leagues and categories for filters
-  const availableLeagues = useMemo(() => {
-    return Array.from(new Set(currencies.map(c => c.league))).sort();
-  }, [currencies]);
-
-  const availableCategories = useMemo(() => {
-    return Array.from(new Set(currencies.map(c => c.category).filter(Boolean))) as CurrencyCategory[];
-  }, [currencies]);
-
-  // Filter and sort currencies
-  const filteredAndSortedCurrencies = useMemo(() => {
-    const filtered = filterCurrencies(currencies, filters);
-    return sortCurrencies(filtered, sortField, sortDirection);
-  }, [currencies, filters, sortField, sortDirection]);
+  // Sort currencies (filtering is done at parent level)
+  const sortedCurrencies = useMemo(() => {
+    return sortCurrencies(currencies, sortField, sortDirection);
+  }, [currencies, sortField, sortDirection]);
 
   // Handle sort
   const handleSort = useCallback((field: CurrencySortField) => {
@@ -101,7 +87,7 @@ export const InvestmentCurrencyTable = memo(function InvestmentCurrencyTable({
     return "destructive";
   }, []);
 
-  if (filteredAndSortedCurrencies.length === 0) {
+  if (sortedCurrencies.length === 0) {
     return (
       <div className="flex items-center justify-center py-8">
         <p className="text-muted-foreground">No currencies found</p>
@@ -160,7 +146,7 @@ export const InvestmentCurrencyTable = memo(function InvestmentCurrencyTable({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {filteredAndSortedCurrencies.map((currency: CurrencyWithPredictions) => {
+          {sortedCurrencies.map((currency: CurrencyWithPredictions) => {
             const prediction = currency.predictions[timeframe];
 
             return (
