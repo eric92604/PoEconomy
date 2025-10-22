@@ -344,12 +344,16 @@ def _fetch_latest_predictions_from_db(
     if not available_currencies:
         raise ClientFacingError(f"No currencies found for league: {league}")
     
+    LOGGER.info(f"Found {len(available_currencies)} available currencies for league: {league}")
+    
     # Limit currencies to most popular ones for performance
     top_currencies = available_currencies[:limit]
+    LOGGER.info(f"Processing {len(top_currencies)} currencies with limit: {limit}")
     
     # Fetch predictions for each currency across all horizons
     all_predictions = {}
     prediction_timestamps = set()
+    currencies_with_predictions = 0
     
     for currency in top_currencies:
         currency_predictions = {}
@@ -376,8 +380,12 @@ def _fetch_latest_predictions_from_db(
                 LOGGER.warning(f"Failed to fetch prediction for {currency} {horizon}: {e}")
                 continue
         
+        # Include currency even if no prediction data (for complete statistics)
+        all_predictions[currency] = currency_predictions
         if currency_predictions:
-            all_predictions[currency] = currency_predictions
+            currencies_with_predictions += 1
+    
+    LOGGER.info(f"Returning {len(all_predictions)} currencies ({currencies_with_predictions} with prediction data)")
     
     # Calculate latest prediction time
     latest_timestamp = max(prediction_timestamps) if prediction_timestamps else 0
@@ -406,10 +414,20 @@ def _get_available_currencies(league: str) -> List[str]:
     
     try:
         # Get currencies from metadata table
-        response = _METADATA_TABLE.scan(
-            FilterExpression=Key('league').eq(league) if 'league' in _METADATA_TABLE.attribute_definitions else None,
-            ProjectionExpression='currency'
+        # Check if league attribute exists in table schema
+        has_league_attribute = any(
+            attr.get('AttributeName') == 'league' 
+            for attr in _METADATA_TABLE.attribute_definitions
         )
+        
+        scan_params = {
+            'ProjectionExpression': 'currency'
+        }
+        
+        if has_league_attribute:
+            scan_params['FilterExpression'] = Key('league').eq(league)
+        
+        response = _METADATA_TABLE.scan(**scan_params)
         
         currencies = [item.get('currency') for item in response.get('Items', []) if item.get('currency')]
         
@@ -507,7 +525,7 @@ def _fetch_cached_prediction(currency: str, league: Optional[str], horizon: str)
     if not league_value:
         return None
     
-    # Use the new currency-horizon-index GSI for much more efficient queries
+    # Use the currency-horizon-index GSI for efficient queries
     try:
         response = _PREDICTIONS_TABLE.query(
             IndexName='currency-horizon-index',
@@ -595,14 +613,20 @@ def _infer_latest_league(currency: str) -> Optional[str]:
     # First try to get league from cached predictions
     assert _PREDICTIONS_TABLE is not None
     try:
-        # Try GSI first
-        response = _PREDICTIONS_TABLE.query(
-            IndexName="currency-timestamp-index",
-            KeyConditionExpression=Key("currency").eq(currency),
-            ScanIndexForward=False,
-            Limit=1,
-        )
-        items = response.get("Items")
+        # Try GSI first - use currency-horizon-index with any horizon
+        # We need to query with a specific horizon, so try common ones
+        items = None
+        for horizon in ["1d", "3d", "7d"]:
+            response = _PREDICTIONS_TABLE.query(
+                IndexName="currency-horizon-index",
+                KeyConditionExpression=Key("currency").eq(currency) & Key("horizon").eq(horizon),
+                ScanIndexForward=False,
+                Limit=1,
+            )
+            items = response.get("Items")
+            if items:
+                break
+        
         if items:
             prediction_key = items[0].get("prediction_key", "")
             if "#" in prediction_key:

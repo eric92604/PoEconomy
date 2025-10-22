@@ -18,11 +18,11 @@ import {
   ArrowRight,
   BarChart3,
 } from "lucide-react";
-import { useCurrencies, useLeagues, useBatchPredictions } from "@/lib/hooks";
+import { useCurrencies, useLeagues, useLatestPredictions } from "@/lib/hooks";
 import { formatPrice, formatPercentage, formatConfidence } from "@/lib/utils";
 import { CurrencyIcon } from "@/components/currency/currency-icon";
 import { preloadAllCurrencyIcons } from "@/lib/utils/icon-preloader";
-import type { CurrencyWithPredictions, PredictionRequest } from "@/types";
+import type { CurrencyWithPredictions } from "@/types";
 
 export default function DashboardPage() {
   // Fetch data
@@ -42,34 +42,17 @@ export default function DashboardPage() {
     return Object.keys(leaguesData.leagues)[0];
   }, [leaguesData]);
 
-  // Prepare batch prediction requests for dashboard (1d horizon only)
-  const predictionRequests = useMemo((): PredictionRequest[] => {
-    if (!currenciesData || !firstLeague) return [];
-
-    const currencies = Object.keys(currenciesData.currencies);
-    const requests: PredictionRequest[] = [];
-
-    // Get 1d predictions for all currencies
-    currencies.forEach((currency) => {
-      requests.push({
-        currency,
-        league: firstLeague,
-        horizon: "1d",
-      });
-    });
-
-    return requests;
-  }, [currenciesData, firstLeague]);
-
-  // Fetch batch predictions
-  const { data: predictionsData, isLoading: predictionsLoading } = useBatchPredictions(
-    { requests: predictionRequests },
-    predictionRequests.length > 0
-  );
+  // Fetch latest predictions using the optimized endpoint
+  // Load all currencies for complete statistics
+  const { data: predictionsData, isLoading: predictionsLoading } = useLatestPredictions({
+    league: firstLeague || undefined,
+    horizons: ["1d"], // Only 1d horizon for dashboard
+    limit: 500, // Increase limit to get more currencies
+  });
 
   // Calculate stats
   const stats = useMemo(() => {
-    if (!predictionsData || !leaguesData || !currenciesData || !predictionsData.results) {
+    if (!predictionsData || !leaguesData || !currenciesData || !predictionsData.predictions) {
       return {
         totalCurrencies: 0,
         totalLeagues: 0,
@@ -78,10 +61,13 @@ export default function DashboardPage() {
       };
     }
 
-    // Convert batch predictions data to dashboard format
-    const currencies: CurrencyWithPredictions[] = predictionsData.results.map((prediction) => {
+    // Convert latest predictions data to dashboard format
+    const currencies: CurrencyWithPredictions[] = Object.entries(predictionsData.predictions).map(([currency, horizonData]) => {
+      const prediction = horizonData["1d"]; // Get 1d prediction
+      if (!prediction) return null;
+
       // Get icon URL from currency metadata
-      const currencyMetadata = currenciesData.currencies[prediction.currency]?.[prediction.league];
+      const currencyMetadata = currenciesData.currencies[currency]?.[prediction.league];
       const iconUrl = currencyMetadata?.icon_url;
       
       return {
@@ -99,20 +85,26 @@ export default function DashboardPage() {
         },
         average_confidence: prediction.confidence,
       };
-    });
+    }).filter(Boolean) as CurrencyWithPredictions[];
 
-    // Sort by profit
+    // Data is already sorted by profit from the API (highest first)
     const sortedByProfit = [...currencies].sort(
       (a, b) =>
         (b.predictions["1d"]?.price_change_percent || 0) -
         (a.predictions["1d"]?.price_change_percent || 0)
     );
 
+    // Get top gainers (first 5)
+    const topGainers = sortedByProfit.slice(0, 5);
+    
+    // Get top losers (worst 5 performers from our dataset)
+    const topLosers = sortedByProfit.slice(-5).reverse(); // Reverse to show worst first
+
     return {
-      totalCurrencies: currencies.length,
+      totalCurrencies: currencies.length, // Use actual returned count
       totalLeagues: Object.keys(leaguesData.leagues).length,
-      topGainers: sortedByProfit.slice(0, 5),
-      topLosers: sortedByProfit.slice(-5).reverse(),
+      topGainers,
+      topLosers,
     };
   }, [predictionsData, leaguesData, currenciesData]);
 
@@ -121,7 +113,6 @@ export default function DashboardPage() {
 
   return (
     <div className="py-8 space-y-8">
-
       {/* Stats Cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
@@ -240,11 +231,11 @@ export default function DashboardPage() {
                 >
                   <div className="flex items-center gap-3">
                     <Badge variant="outline">{index + 1}</Badge>
-      <CurrencyIcon 
-        iconUrl={currency.icon_url} 
-        currency={currency.currency} 
-        size="md" 
-      />
+                    <CurrencyIcon 
+                      iconUrl={currency.icon_url} 
+                      currency={currency.currency} 
+                      size="md" 
+                    />
                     <div>
                       <p className="font-medium">{currency.currency}</p>
                       <p className="text-sm text-muted-foreground">
@@ -269,7 +260,6 @@ export default function DashboardPage() {
           )}
         </CardContent>
       </Card>
-
 
       {/* Quick Actions */}
       <div className="grid gap-4 md:grid-cols-3">
@@ -300,4 +290,3 @@ export default function DashboardPage() {
     </div>
   );
 }
-

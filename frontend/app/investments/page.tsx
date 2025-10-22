@@ -22,8 +22,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { TrendingUp, Target, Clock, Search, X } from "lucide-react";
-import { useCurrencies, useLeagues, useBatchPredictions } from "@/lib/hooks";
-import type { PredictionRequest, CurrencyWithPredictions, CurrencyFilters } from "@/types";
+import { useCurrencies, useLeagues, useLatestPredictions } from "@/lib/hooks";
+import type { CurrencyWithPredictions, CurrencyFilters } from "@/types";
 import { filterCurrencies, countActiveFilters } from "@/lib/utils";
 import { preloadAllCurrencyIcons, preloadVisibleIcons } from "@/lib/utils/icon-preloader";
 
@@ -60,78 +60,59 @@ export default function InvestmentsPage() {
     }
   }, [leagues, selectedLeague]);
 
-  // Prepare batch prediction requests
-  const predictionRequests = useMemo((): PredictionRequest[] => {
-    if (!currenciesData || !selectedLeague) return [];
-
-    const currencies = Object.keys(currenciesData.currencies);
-    const requests: PredictionRequest[] = [];
-
-    currencies.forEach((currency) => {
-      ["1d", "3d", "7d"].forEach((horizon) => {
-        requests.push({
-          currency,
-          league: selectedLeague,
-          horizon: horizon as "1d" | "3d" | "7d",
-        });
-      });
-    });
-
-    return requests;
-  }, [currenciesData, selectedLeague]);
-
-  // Fetch batch predictions
-  const { data: predictionsData, isLoading: predictionsLoading } = useBatchPredictions(
-    { requests: predictionRequests },
-    predictionRequests.length > 0
-  );
+  // Fetch latest predictions using the optimized endpoint
+  // Load all currencies with all horizons for comprehensive investment analysis
+  const { data: predictionsData, isLoading: predictionsLoading } = useLatestPredictions({
+    league: selectedLeague || undefined,
+    horizons: ["1d", "3d", "7d"], // All horizons for investment analysis
+    limit: 500, // Increase limit to get more currencies
+  });
 
   // Transform predictions into currency data
   const currenciesWithPredictions = useMemo((): CurrencyWithPredictions[] => {
-    if (!predictionsData || !selectedLeague || !currenciesData) return [];
+    if (!predictionsData || !selectedLeague || !currenciesData || !predictionsData.predictions) return [];
 
-    const currencyMap = new Map<string, CurrencyWithPredictions>();
+    const currencies: CurrencyWithPredictions[] = [];
 
-    predictionsData.results.forEach((pred) => {
-      // Use currency as key since we're filtering by selectedLeague
-      const key = pred.currency;
+    // Convert latest predictions data to investment format
+    Object.entries(predictionsData.predictions).forEach(([currency, horizonData]) => {
+      // Get icon URL from currency metadata
+      const currencyMetadata = currenciesData.currencies[currency]?.[selectedLeague];
+      const iconUrl = currencyMetadata?.icon_url;
       
-      if (!currencyMap.has(key)) {
-        // Get icon URL from currency metadata
-        const currencyMetadata = currenciesData.currencies[pred.currency]?.[pred.league];
-        const iconUrl = currencyMetadata?.icon_url;
-        
-        currencyMap.set(key, {
-          currency: pred.currency,
-          league: pred.league,
-          current_price: pred.current_price,
-          icon_url: iconUrl,
-          predictions: {},
-          average_confidence: 0,
-        });
-      }
-
-      const currencyData = currencyMap.get(key)!;
-      currencyData.predictions[pred.horizon] = {
-        predicted_price: pred.predicted_price,
-        price_change_percent: pred.price_change_percent,
-        confidence: pred.confidence,
-        prediction_lower: pred.prediction_lower ?? pred.metadata?.prediction_lower,
-        prediction_upper: pred.prediction_upper ?? pred.metadata?.prediction_upper,
-        horizon: pred.horizon,
+      // Get current price from 1d prediction (most recent)
+      const currentPrice = horizonData["1d"]?.current_price || 0;
+      
+      const currencyData: CurrencyWithPredictions = {
+        currency,
+        league: selectedLeague,
+        current_price: currentPrice,
+        icon_url: iconUrl,
+        predictions: {},
+        average_confidence: 0,
       };
-    });
 
-    // Calculate average confidence
-    currencyMap.forEach((currency) => {
-      const predictions = Object.values(currency.predictions);
+      // Process each horizon
+      Object.entries(horizonData).forEach(([horizon, prediction]) => {
+        if (prediction) {
+          currencyData.predictions[horizon as "1d" | "3d" | "7d"] = {
+            predicted_price: prediction.predicted_price,
+            price_change_percent: prediction.price_change_percent,
+            confidence: prediction.confidence,
+            horizon: horizon as "1d" | "3d" | "7d",
+          };
+        }
+      });
+
+      // Calculate average confidence
+      const predictions = Object.values(currencyData.predictions);
       if (predictions.length > 0) {
-        currency.average_confidence =
+        currencyData.average_confidence =
           predictions.reduce((sum, p) => sum + p.confidence, 0) / predictions.length;
       }
-    });
 
-    const currencies = Array.from(currencyMap.values());
+      currencies.push(currencyData);
+    });
     
     // Preload icons for visible currencies
     if (currencies.length > 0) {
