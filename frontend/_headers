@@ -24,8 +24,8 @@
 /manifest.json
   Cache-Control: public, max-age=86400
 
-# HTML pages - short cache with revalidation
+# HTML pages - cache with revalidation for better performance
 /*.html
-  Cache-Control: public, max-age=0, must-revalidate
+  Cache-Control: public, max-age=300, stale-while-revalidate=600
 
 # API responses are handled by Cloudflare Worker with edge caching

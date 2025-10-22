@@ -47,10 +47,11 @@ export default {
     targetUrl.pathname += url.pathname;
     targetUrl.search = url.search;
 
-    const cacheKey = request.method + '-' + targetUrl.toString();
     const isCacheable = request.method === 'GET' && CACHEABLE_PATHS.has(url.pathname);
 
     if (isCacheable) {
+      // Generate cache key from URL and query parameters
+      const cacheKey = `${url.pathname}${url.search}`;
       const cached = await env.CACHE_KV.get(cacheKey, 'json');
       if (cached) {
         const { body, init } = cached as CachedResponse;
@@ -161,6 +162,9 @@ export default {
     headers.set('X-Cache', 'MISS'); // Helpful for debugging - fresh from origin
 
     if (isCacheable && response.ok) {
+      // Generate cache key for storage
+      const cacheKey = `${url.pathname}${url.search}`;
+      
       // Set different TTL based on endpoint type
       let ttl: number;
       let browserCacheTTL: number;
