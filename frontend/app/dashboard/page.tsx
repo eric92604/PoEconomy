@@ -206,7 +206,7 @@ export default function DashboardPage() {
               <CardDescription>Currencies with highest predicted profit</CardDescription>
             </div>
             <Button asChild variant="ghost" size="sm">
-              <Link href="/predictions">
+              <Link href="/investments">
                 View All
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Link>
@@ -266,12 +266,12 @@ export default function DashboardPage() {
       {/* Quick Actions */}
       <div className="grid gap-4 md:grid-cols-3">
         <Card className="hover:bg-muted/50 transition-colors cursor-pointer">
-          <Link href="/predictions">
+          <Link href="/investments">
             <CardHeader>
               <BarChart3 className="h-8 w-8 mb-2 text-primary" />
-              <CardTitle>View Predictions</CardTitle>
+              <CardTitle>Investment Opportunities</CardTitle>
               <CardDescription>
-                See all currency predictions with detailed analysis
+                Discover the most profitable currency investments
               </CardDescription>
             </CardHeader>
           </Link>

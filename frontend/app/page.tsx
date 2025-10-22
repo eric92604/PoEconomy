@@ -11,21 +11,20 @@ export default function Home() {
         <div className="flex items-center justify-center space-x-3">
           <TrendingUp className="h-16 w-16 text-primary" />
         </div>
-        <h1 className="text-4xl font-bold tracking-tight sm:text-5xl md:text-6xl">
-          Path of Exile
+        <h1 className="text-5xl font-bold tracking-tight sm:text-6xl md:text-7xl">
+          PoEconomy - Path of Exile
           <br />
-          <span className="text-primary">Currency Predictions</span>
+          <span className="text-primary">Market Intelligence</span>
         </h1>
         <p className="max-w-[700px] text-lg text-muted-foreground sm:text-xl">
-          Real-time currency price predictions and investment analysis powered by machine learning.
-          Make informed trading decisions with confidence.
+          Real-time currency price predictions and investment analysis.
         </p>
         <div className="flex gap-4">
           <Button asChild size="lg">
             <Link href="/dashboard">View Dashboard</Link>
           </Button>
           <Button asChild variant="outline" size="lg">
-            <Link href="/predictions">Explore Predictions</Link>
+            <Link href="/investments">Explore Investments</Link>
           </Button>
         </div>
       </section>
