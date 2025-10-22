@@ -82,41 +82,56 @@ class IconPreloader {
 export const iconPreloader = new IconPreloader();
 
 /**
- * Preload all currency icons - only preloads CDN icons that aren't bundled locally
+ * Preload all currency icons - preloads local AVIF icons for better performance
  */
 export async function preloadAllCurrencyIcons(currencyData: Record<string, Record<string, { icon_url?: string }>>): Promise<void> {
-  const cdnUrls: string[] = [];
+  const localIconUrls: string[] = [];
   
-  Object.entries(currencyData).forEach(([currencyName, leagueData]) => {
-    Object.values(leagueData).forEach((metadata) => {
-      if (metadata?.icon_url && metadata.icon_url.startsWith('https://')) {
-        // Only preload CDN URLs, not local bundled icons
-        cdnUrls.push(metadata.icon_url);
-      }
-    });
+  // Get all unique currency names to preload their local AVIF icons
+  const currencyNames = new Set<string>();
+  Object.keys(currencyData).forEach(currencyName => {
+    currencyNames.add(currencyName);
   });
 
-  if (cdnUrls.length > 0) {
-    console.log(`🔄 Preloading ${cdnUrls.length} CDN currency icons (${Object.keys(currencyData).length} total currencies found)...`);
-    await iconPreloader.preloadIcons(cdnUrls, { priority: true });
-    console.log('✅ CDN currency icons preloaded');
+  // Import the currency icon mapping to get local paths
+  const { getOptimizedCurrencyIcon } = await import('@/lib/constants/currency-icons');
+  
+  currencyNames.forEach(currencyName => {
+    const localIconPath = getOptimizedCurrencyIcon(currencyName);
+    if (localIconPath) {
+      localIconUrls.push(localIconPath);
+    }
+  });
+
+  if (localIconUrls.length > 0) {
+    console.log(`🔄 Preloading ${localIconUrls.length} local AVIF currency icons...`);
+    await iconPreloader.preloadIcons(localIconUrls, { priority: true });
+    console.log('✅ Local AVIF currency icons preloaded');
   } else {
-    console.log('✅ All currency icons are bundled locally - no CDN preloading needed');
+    console.log('⚠️ No local currency icons found to preload');
   }
 }
 
 /**
- * Preload icons for visible currencies
+ * Preload icons for visible currencies - uses local AVIF icons
  */
 export async function preloadVisibleIcons(
-  currencies: Array<{ icon_url?: string }>,
+  currencies: Array<{ currency: string; icon_url?: string }>,
   options: PreloadOptions = {}
 ): Promise<void> {
-  const iconUrls = currencies
-    .map(c => c.icon_url)
-    .filter((url): url is string => Boolean(url));
+  const localIconUrls: string[] = [];
+  
+  // Import the currency icon mapping to get local paths
+  const { getOptimizedCurrencyIcon } = await import('@/lib/constants/currency-icons');
+  
+  currencies.forEach(currency => {
+    const localIconPath = getOptimizedCurrencyIcon(currency.currency);
+    if (localIconPath) {
+      localIconUrls.push(localIconPath);
+    }
+  });
 
-  if (iconUrls.length > 0) {
-    await iconPreloader.preloadIcons(iconUrls, options);
+  if (localIconUrls.length > 0) {
+    await iconPreloader.preloadIcons(localIconUrls, options);
   }
 }

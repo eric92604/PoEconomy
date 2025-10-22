@@ -45,8 +45,7 @@ export const CurrencyIcon = memo(function CurrencyIcon({
   priority = false,
   lazy = true
 }: CurrencyIconProps) {
-  // Try optimized local icon first, fallback to CDN
-  const finalIconUrl = getOptimizedCurrencyIcon(currency) || iconUrl;
+  const finalIconUrl = getOptimizedCurrencyIcon(currency);
   const { hasError } = useIconPreloader(finalIconUrl, currency);
   const [isInView, setIsInView] = useState(!lazy);
 
@@ -115,7 +114,7 @@ export const CurrencyIcon = memo(function CurrencyIcon({
         width={size === "sm" ? 16 : size === "md" ? 24 : 32}
         height={size === "sm" ? 16 : size === "md" ? 24 : 32}
         className="rounded-sm"
-        unoptimized={finalIconUrl.startsWith('https://')} // Only unoptimize CDN images
+        unoptimized={false} // Local AVIF icons can be optimized
         priority={priority}
         loading={lazy ? "lazy" : "eager"}
         onLoad={() => {}}
