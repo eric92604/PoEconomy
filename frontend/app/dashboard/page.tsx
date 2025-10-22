@@ -41,8 +41,8 @@ export default function DashboardPage() {
     const currencies = Object.keys(currenciesData.currencies);
     const requests: PredictionRequest[] = [];
 
-    // Only get 1d predictions for dashboard (limit to top currencies for performance)
-    currencies.slice(0, 50).forEach((currency) => {
+    // Get 1d predictions for all currencies
+    currencies.forEach((currency) => {
       requests.push({
         currency,
         league: firstLeague,
@@ -75,7 +75,6 @@ export default function DashboardPage() {
         totalLeagues: 0,
         topGainers: [],
         topLosers: [],
-        highConfidence: [],
       };
     }
 
@@ -113,17 +112,11 @@ export default function DashboardPage() {
         (a.predictions["1d"]?.price_change_percent || 0)
     );
 
-    // Sort by confidence
-    const sortedByConfidence = [...currencies].sort(
-      (a, b) => b.average_confidence - a.average_confidence
-    );
-
     return {
       totalCurrencies: currencies.length,
       totalLeagues: Object.keys(leaguesData.leagues).length,
       topGainers: sortedByProfit.slice(0, 5),
       topLosers: sortedByProfit.slice(-5).reverse(),
-      highConfidence: sortedByConfidence.slice(0, 5),
     };
   }, [predictionsData, leaguesData, currenciesData]);
 
@@ -131,13 +124,6 @@ export default function DashboardPage() {
 
   return (
     <div className="py-8 space-y-8">
-      {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>
-        <p className="text-muted-foreground mt-2">
-          Market overview and key metrics for Path of Exile currencies
-        </p>
-      </div>
 
       {/* Stats Cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -287,69 +273,6 @@ export default function DashboardPage() {
         </CardContent>
       </Card>
 
-      {/* High Confidence Predictions */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle>High Confidence Predictions</CardTitle>
-              <CardDescription>Most reliable predictions</CardDescription>
-            </div>
-            <Button asChild variant="ghost" size="sm">
-              <Link href="/predictions">
-                View All
-                <ArrowRight className="ml-2 h-4 w-4" />
-              </Link>
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent>
-          {isLoading ? (
-            <div className="space-y-4">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <div key={i} className="flex items-center justify-between">
-                  <Skeleton className="h-4 w-32" />
-                  <Skeleton className="h-4 w-24" />
-                </div>
-              ))}
-            </div>
-          ) : stats.highConfidence.length > 0 ? (
-            <div className="space-y-4">
-              {stats.highConfidence.map((currency) => (
-                <div
-                  key={currency.currency}
-                  className="flex items-center justify-between"
-                >
-                  <div className="flex items-center gap-3">
-      <CurrencyIcon 
-        iconUrl={currency.icon_url} 
-        currency={currency.currency} 
-        size="md" 
-      />
-                    <div>
-                      <p className="font-medium">{currency.currency}</p>
-                      <p className="text-sm text-muted-foreground">
-                        {formatPrice(currency.current_price)}c →{" "}
-                        {formatPrice(currency.predictions["1d"]?.predicted_price || 0)}c
-                      </p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <Badge variant="default">
-                      {formatConfidence(currency.average_confidence)}
-                    </Badge>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      {formatPercentage(currency.predictions["1d"]?.price_change_percent || 0)}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">No data available</p>
-          )}
-        </CardContent>
-      </Card>
 
       {/* Quick Actions */}
       <div className="grid gap-4 md:grid-cols-3">
