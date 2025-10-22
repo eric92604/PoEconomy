@@ -25,6 +25,7 @@ import { TrendingUp, Target, Clock, Search, X } from "lucide-react";
 import { useCurrencies, useLeagues, useBatchPredictions } from "@/lib/hooks";
 import type { PredictionRequest, CurrencyWithPredictions, CurrencyFilters } from "@/types";
 import { filterCurrencies, countActiveFilters } from "@/lib/utils";
+import { preloadCriticalIcons, preloadVisibleIcons } from "@/lib/utils/icon-preloader";
 
 export default function InvestmentsPage() {
   const [selectedLeague, setSelectedLeague] = useState<string>("");
@@ -38,6 +39,13 @@ export default function InvestmentsPage() {
   // Fetch data
   const { data: currenciesData, isLoading: currenciesLoading } = useCurrencies();
   const { data: leaguesData, isLoading: leaguesLoading } = useLeagues();
+
+  // Preload critical currency icons when data is available
+  useEffect(() => {
+    if (currenciesData && !currenciesLoading) {
+      preloadCriticalIcons(currenciesData).catch(console.warn);
+    }
+  }, [currenciesData, currenciesLoading]);
 
   // Get available leagues
   const leagues = useMemo(() => {
@@ -85,6 +93,7 @@ export default function InvestmentsPage() {
     const currencyMap = new Map<string, CurrencyWithPredictions>();
 
     predictionsData.results.forEach((pred) => {
+      // Use currency as key since we're filtering by selectedLeague
       const key = pred.currency;
       
       if (!currencyMap.has(key)) {
@@ -122,7 +131,14 @@ export default function InvestmentsPage() {
       }
     });
 
-    return Array.from(currencyMap.values());
+    const currencies = Array.from(currencyMap.values());
+    
+    // Preload icons for visible currencies
+    if (currencies.length > 0) {
+      preloadVisibleIcons(currencies).catch(console.warn);
+    }
+    
+    return currencies;
   }, [predictionsData, selectedLeague, currenciesData]);
 
   // Handle filter changes

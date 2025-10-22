@@ -4,13 +4,15 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "npm run fetch-icons && next build",
     "start": "next start",
     "lint": "next lint",
     "export": "next build",
     "deploy": "npm run build",
     "preview": "npm run build && npx serve out",
-    "analyze": "ANALYZE=true npm run build"
+    "analyze": "ANALYZE=true npm run build",
+    "fetch-icons": "node scripts/fetch-currency-icons.js",
+    "fetch-icons:force": "node scripts/fetch-currency-icons.js --force"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.1.2",
