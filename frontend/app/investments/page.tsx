@@ -116,8 +116,8 @@ export default function InvestmentsPage() {
         predicted_price: pred.predicted_price,
         price_change_percent: pred.price_change_percent,
         confidence: pred.confidence,
-        prediction_lower: pred.metadata?.prediction_lower,
-        prediction_upper: pred.metadata?.prediction_upper,
+        prediction_lower: pred.prediction_lower ?? pred.metadata?.prediction_lower,
+        prediction_upper: pred.prediction_upper ?? pred.metadata?.prediction_upper,
         horizon: pred.horizon,
       };
     });
