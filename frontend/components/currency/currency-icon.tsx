@@ -18,15 +18,6 @@ const sizeClasses = {
   lg: "w-8 h-8",
 };
 
-// Preload critical currency icons
-const CRITICAL_CURRENCIES = [
-  'Divine Orb',
-  'Exalted Orb', 
-  'Chaos Orb',
-  'Mirror of Kalandra',
-  'Orb of Fusing',
-  'Chromatic Orb'
-];
 
 // Icon preloading hook
 function useIconPreloader(iconUrl?: string, currency?: string) {
@@ -37,7 +28,7 @@ function useIconPreloader(iconUrl?: string, currency?: string) {
     if (!iconUrl || !currency) return;
 
     // Check if image is already cached
-    const img = new Image();
+    const img = new window.Image();
     img.onload = () => setIsLoaded(true);
     img.onerror = () => setHasError(true);
     img.src = iconUrl;
@@ -56,7 +47,7 @@ export const CurrencyIcon = memo(function CurrencyIcon({
 }: CurrencyIconProps) {
   // Try optimized local icon first, fallback to CDN
   const finalIconUrl = getOptimizedCurrencyIcon(currency) || iconUrl;
-  const { isLoaded, hasError } = useIconPreloader(finalIconUrl, currency);
+  const { hasError } = useIconPreloader(finalIconUrl, currency);
   const [isInView, setIsInView] = useState(!lazy);
 
   // Intersection Observer for lazy loading
@@ -127,8 +118,8 @@ export const CurrencyIcon = memo(function CurrencyIcon({
         unoptimized={finalIconUrl.startsWith('https://')} // Only unoptimize CDN images
         priority={priority}
         loading={lazy ? "lazy" : "eager"}
-        onLoad={() => setIsLoaded(true)}
-        onError={() => setHasError(true)}
+        onLoad={() => {}}
+        onError={() => {}}
       />
     </div>
   );

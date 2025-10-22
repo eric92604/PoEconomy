@@ -4,7 +4,7 @@
  * Dashboard Page - Market overview and key metrics
  */
 
-import { useMemo } from "react";
+import { useMemo, useEffect } from "react";
 import Link from "next/link";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -21,12 +21,20 @@ import {
 import { useCurrencies, useLeagues, useBatchPredictions } from "@/lib/hooks";
 import { formatPrice, formatPercentage, formatConfidence } from "@/lib/utils";
 import { CurrencyIcon } from "@/components/currency/currency-icon";
+import { preloadAllCurrencyIcons } from "@/lib/utils/icon-preloader";
 import type { CurrencyWithPredictions, PredictionRequest } from "@/types";
 
 export default function DashboardPage() {
   // Fetch data
   const { data: currenciesData, isLoading: currenciesLoading } = useCurrencies();
   const { data: leaguesData, isLoading: leaguesLoading } = useLeagues();
+
+  // Preload all currency icons when data is available
+  useEffect(() => {
+    if (currenciesData && !currenciesLoading) {
+      preloadAllCurrencyIcons(currenciesData.currencies).catch(console.warn);
+    }
+  }, [currenciesData, currenciesLoading]);
 
   // Get first league for initial data
   const firstLeague = useMemo(() => {

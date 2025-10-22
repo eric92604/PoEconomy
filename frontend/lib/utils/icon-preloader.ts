@@ -82,38 +82,26 @@ class IconPreloader {
 export const iconPreloader = new IconPreloader();
 
 /**
- * Critical currency icons that should be preloaded immediately
+ * Preload all currency icons - only preloads CDN icons that aren't bundled locally
  */
-export const CRITICAL_CURRENCY_ICONS = [
-  'Divine Orb',
-  'Exalted Orb', 
-  'Chaos Orb',
-  'Mirror of Kalandra',
-  'Orb of Fusing',
-  'Chromatic Orb',
-  'Orb of Alchemy',
-  'Vaal Orb'
-];
-
-/**
- * Preload critical currency icons
- */
-export async function preloadCriticalIcons(currencyData: any): Promise<void> {
-  const criticalUrls: string[] = [];
+export async function preloadAllCurrencyIcons(currencyData: Record<string, Record<string, { icon_url?: string }>>): Promise<void> {
+  const cdnUrls: string[] = [];
   
-  CRITICAL_CURRENCY_ICONS.forEach(currency => {
-    const metadata = currencyData.currencies?.[currency];
-    if (metadata) {
-      Object.values(metadata).forEach((leagueData: any) => {
-        if (leagueData?.icon_url) {
-          criticalUrls.push(leagueData.icon_url);
-        }
-      });
-    }
+  Object.entries(currencyData).forEach(([currencyName, leagueData]) => {
+    Object.values(leagueData).forEach((metadata) => {
+      if (metadata?.icon_url && metadata.icon_url.startsWith('https://')) {
+        // Only preload CDN URLs, not local bundled icons
+        cdnUrls.push(metadata.icon_url);
+      }
+    });
   });
 
-  if (criticalUrls.length > 0) {
-    await iconPreloader.preloadIcons(criticalUrls, { priority: true });
+  if (cdnUrls.length > 0) {
+    console.log(`🔄 Preloading ${cdnUrls.length} CDN currency icons (${Object.keys(currencyData).length} total currencies found)...`);
+    await iconPreloader.preloadIcons(cdnUrls, { priority: true });
+    console.log('✅ CDN currency icons preloaded');
+  } else {
+    console.log('✅ All currency icons are bundled locally - no CDN preloading needed');
   }
 }
 

@@ -25,7 +25,7 @@ import { TrendingUp, Target, Clock, Search, X } from "lucide-react";
 import { useCurrencies, useLeagues, useBatchPredictions } from "@/lib/hooks";
 import type { PredictionRequest, CurrencyWithPredictions, CurrencyFilters } from "@/types";
 import { filterCurrencies, countActiveFilters } from "@/lib/utils";
-import { preloadCriticalIcons, preloadVisibleIcons } from "@/lib/utils/icon-preloader";
+import { preloadAllCurrencyIcons, preloadVisibleIcons } from "@/lib/utils/icon-preloader";
 
 export default function InvestmentsPage() {
   const [selectedLeague, setSelectedLeague] = useState<string>("");
@@ -40,10 +40,10 @@ export default function InvestmentsPage() {
   const { data: currenciesData, isLoading: currenciesLoading } = useCurrencies();
   const { data: leaguesData, isLoading: leaguesLoading } = useLeagues();
 
-  // Preload critical currency icons when data is available
+  // Preload all currency icons when data is available
   useEffect(() => {
     if (currenciesData && !currenciesLoading) {
-      preloadCriticalIcons(currenciesData).catch(console.warn);
+      preloadAllCurrencyIcons(currenciesData.currencies).catch(console.warn);
     }
   }, [currenciesData, currenciesLoading]);
 

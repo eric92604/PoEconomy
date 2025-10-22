@@ -12,8 +12,8 @@ const { createHash } = require('crypto');
 const ICONS_DIR = path.join(__dirname, '../public/images/currency');
 const ICON_SIZE = 32; // Standard PoE icon size
 const TIMEOUT = 15000; // 15 second timeout per icon
-const BATCH_SIZE = 10; // Smaller batches to avoid rate limiting
-const DELAY_BETWEEN_BATCHES = 2000; // 2 second delay between batches
+const BATCH_SIZE = 100;
+const DELAY_BETWEEN_BATCHES = 1000; // 2 second delay between batches
 
 // Cloudflare Pages API configuration
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.poeconomy.com';
@@ -191,11 +191,11 @@ function generateIconMapping(downloadedIcons) {
   });
 
   const mappingContent = `// Auto-generated currency icon mapping with Cloudflare optimizations
-export const CURRENCY_ICON_MAP = ${JSON.stringify(mapping, null, 2)};
+export const CURRENCY_ICON_MAP: Record<string, string> = ${JSON.stringify(mapping, null, 2)};
 
-export const CURRENCY_ICON_WEBP_MAP = ${JSON.stringify(webpMapping, null, 2)};
+export const CURRENCY_ICON_WEBP_MAP: Record<string, string> = ${JSON.stringify(webpMapping, null, 2)};
 
-export const CURRENCY_ICON_AVIF_MAP = ${JSON.stringify(avifMapping, null, 2)};
+export const CURRENCY_ICON_AVIF_MAP: Record<string, string> = ${JSON.stringify(avifMapping, null, 2)};
 
 export function getCurrencyIconPath(currencyName: string, format: 'png' | 'webp' | 'avif' = 'png'): string | undefined {
   const key = currencyName.toLowerCase().replace(/\\s+/g, '_');

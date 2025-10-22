@@ -10,7 +10,7 @@ export function registerServiceWorker() {
   return navigator.serviceWorker
     .register('/sw.js')
     .then((registration) => {
-      console.log('Service Worker registered successfully:', registration);
+      // Service Worker registered successfully
       return registration;
     })
     .catch((error) => {
