@@ -68,7 +68,7 @@ export function ThemeProvider({
     // Apply the resolved theme
     root.classList.add(resolved);
     setResolvedTheme(resolved);
-  }, [theme]);
+  }, [theme, mounted]);
 
   // Listen for system theme changes
   useEffect(() => {

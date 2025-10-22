@@ -40,12 +40,14 @@ export const MAX_RETRIES = 3;
 export const RETRY_DELAY = 1000;
 
 /**
- * Default cache time for React Query (5 minutes)
+ * Default cache time for React Query (10 minutes)
+ * This is longer than browser cache to avoid unnecessary re-fetches
  */
-export const DEFAULT_CACHE_TIME = 5 * 60 * 1000;
+export const DEFAULT_CACHE_TIME = 10 * 60 * 1000;
 
 /**
  * Default stale time for React Query (5 minutes)
+ * Data is considered fresh for 5 minutes, matching browser cache
  */
 export const DEFAULT_STALE_TIME = 5 * 60 * 1000;
 

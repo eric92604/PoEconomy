@@ -17,21 +17,27 @@ export const currencyKeys = {
 
 /**
  * Hook to fetch all currencies
+ * Metadata changes rarely, so we cache for longer
  */
 export function useCurrencies(): UseQueryResult<CurrenciesResponse> {
   return useQuery({
     queryKey: currencyKeys.list(),
     queryFn: () => currencyApi.getCurrencies(),
+    staleTime: 30 * 60 * 1000, // 30 minutes - metadata rarely changes
+    gcTime: 60 * 60 * 1000, // 1 hour
   });
 }
 
 /**
  * Hook to fetch all leagues
+ * Metadata changes rarely, so we cache for longer
  */
 export function useLeagues(): UseQueryResult<LeaguesResponse> {
   return useQuery({
     queryKey: currencyKeys.leagues(),
     queryFn: () => currencyApi.getLeagues(),
+    staleTime: 30 * 60 * 1000, // 30 minutes - metadata rarely changes
+    gcTime: 60 * 60 * 1000, // 1 hour
   });
 }
 

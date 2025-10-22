@@ -20,15 +20,12 @@ import type {
   CurrencyWithPredictions,
   CurrencySortField,
   SortDirection,
-  CurrencyFilters,
-  CurrencyCategory,
 } from "@/types";
 import {
   formatPrice,
   formatPercentage,
   formatConfidence,
   sortCurrencies,
-  filterCurrencies,
 } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import { CurrencyIcon } from "@/components/currency/currency-icon";
@@ -46,22 +43,11 @@ export const CurrencyTable = memo(function CurrencyTable({
 }: CurrencyTableProps) {
   const [sortField, setSortField] = useState<CurrencySortField>("profit_1d");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
-  const [filters, setFilters] = useState<CurrencyFilters>({});
 
-  // Get available leagues and categories for filters
-  const availableLeagues = useMemo(() => {
-    return Array.from(new Set(currencies.map(c => c.league))).sort();
-  }, [currencies]);
-
-  const availableCategories = useMemo(() => {
-    return Array.from(new Set(currencies.map(c => c.category).filter(Boolean))) as CurrencyCategory[];
-  }, [currencies]);
-
-  // Filter and sort currencies
-  const filteredAndSortedCurrencies = useMemo(() => {
-    const filtered = filterCurrencies(currencies, filters);
-    return sortCurrencies(filtered, sortField, sortDirection);
-  }, [currencies, filters, sortField, sortDirection]);
+  // Sort currencies (filtering is done at parent level if needed)
+  const sortedCurrencies = useMemo(() => {
+    return sortCurrencies(currencies, sortField, sortDirection);
+  }, [currencies, sortField, sortDirection]);
 
   // Handle sort
   const handleSort = useCallback((field: CurrencySortField) => {
@@ -182,7 +168,7 @@ export const CurrencyTable = memo(function CurrencyTable({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {filteredAndSortedCurrencies.map((currency: CurrencyWithPredictions) => {
+          {sortedCurrencies.map((currency: CurrencyWithPredictions) => {
             const pred1d = currency.predictions["1d"];
             const pred3d = currency.predictions["3d"];
             const pred7d = currency.predictions["7d"];

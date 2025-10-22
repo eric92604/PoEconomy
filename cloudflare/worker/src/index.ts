@@ -58,6 +58,23 @@ export default {
         headers.set('Access-Control-Allow-Origin', '*');
         headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key');
         headers.set('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+        
+        // Add cache headers for cached responses too
+        let browserCacheTTL: number;
+        if (url.pathname === '/predict/currencies' || url.pathname === '/predict/leagues') {
+          browserCacheTTL = 1800; // 30 minutes for metadata
+        } else if (url.pathname.includes('/predict/')) {
+          browserCacheTTL = 600; // 10 minutes for predictions
+        } else {
+          browserCacheTTL = 600; // 10 minutes default
+        }
+        
+        headers.set(
+          'Cache-Control', 
+          `public, max-age=${browserCacheTTL}, stale-while-revalidate=${browserCacheTTL * 2}`
+        );
+        headers.set('X-Cache', 'HIT'); // Helpful for debugging
+        
         return new Response(JSON.stringify(body), { ...init, headers });
       }
     }
@@ -141,19 +158,40 @@ export default {
     headers.set('Access-Control-Allow-Origin', '*');
     headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key');
     headers.set('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    headers.set('X-Cache', 'MISS'); // Helpful for debugging - fresh from origin
 
     if (isCacheable && response.ok) {
       // Set different TTL based on endpoint type
       let ttl: number;
+      let browserCacheTTL: number;
+      
       if (url.pathname === '/predict/latest') {
         ttl = 600; // 10 minutes for latest predictions (optimal for fresh data)
+        browserCacheTTL = 300; // 5 minutes browser cache
       } else if (url.pathname === '/predict/currency') {
         ttl = 600; // 10 minutes for currency-specific predictions (optimal for fresh data)
+        browserCacheTTL = 300; // 5 minutes browser cache
       } else if (url.pathname === '/predict/batch') {
         ttl = 600; // 10 minutes for batch predictions (optimal for fresh data)
+        browserCacheTTL = 300; // 5 minutes browser cache
+      } else if (url.pathname === '/predict/currencies' || url.pathname === '/predict/leagues') {
+        ttl = Number(env.CACHE_TTL ?? '1800'); // 30 minutes for metadata endpoints
+        browserCacheTTL = 1800; // 30 minutes browser cache - metadata changes rarely
       } else {
-        ttl = Number(env.CACHE_TTL ?? '1800'); // 1 hour for metadata endpoints
+        ttl = Number(env.CACHE_TTL ?? '1800'); // 1 hour for other endpoints
+        browserCacheTTL = 600; // 10 minutes browser cache
       }
+      
+      // Add Cache-Control headers for browser caching
+      // stale-while-revalidate allows serving stale content while fetching fresh data
+      headers.set(
+        'Cache-Control', 
+        `public, max-age=${browserCacheTTL}, stale-while-revalidate=${browserCacheTTL * 2}`
+      );
+      
+      // Add ETag for conditional requests (optional but recommended)
+      const etag = `W/"${Date.now()}-${cacheKey.substring(0, 8)}"`;
+      headers.set('ETag', etag);
       
       const headersArray: [string, string][] = [];
       headers.forEach((value, key) => { headersArray.push([key, value]); });
@@ -166,6 +204,9 @@ export default {
         },
       };
       await env.CACHE_KV.put(cacheKey, JSON.stringify(cacheData), { expirationTtl: ttl });
+    } else if (!response.ok) {
+      // Don't cache errors in browser
+      headers.set('Cache-Control', 'no-store');
     }
 
     return new Response(respBody, { status: response.status, headers });
