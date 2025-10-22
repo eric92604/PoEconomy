@@ -189,7 +189,7 @@ def _trigger_prediction_refresh(app_env: AppEnvironment, logger: MLLogger) -> No
             InvocationType="Event",  # Asynchronous invocation
             Payload=json.dumps({
                 "currencies": None,  # Let it select default currencies
-                "horizons": ["1d"],  # Default horizon
+                "horizons": ["1d", "3d", "7d"],  # All available horizons
                 "ttl_hours": int(os.getenv("PREDICTION_CACHE_TTL_HOURS", "2")),  # Use env var for TTL
             })
         )
