@@ -278,18 +278,6 @@ export default function DashboardPage() {
         </Card>
 
         <Card className="hover:bg-muted/50 transition-colors cursor-pointer">
-          <Link href="/investments">
-            <CardHeader>
-              <Target className="h-8 w-8 mb-2 text-primary" />
-              <CardTitle>Investment Opportunities</CardTitle>
-              <CardDescription>
-                Discover the most profitable investment options
-              </CardDescription>
-            </CardHeader>
-          </Link>
-        </Card>
-
-        <Card className="hover:bg-muted/50 transition-colors cursor-pointer">
           <Link href="/prices">
             <CardHeader>
               <Activity className="h-8 w-8 mb-2 text-primary" />

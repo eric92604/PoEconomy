@@ -5,7 +5,6 @@ const nextConfig: NextConfig = {
   
   // Static export configuration for Cloudflare Pages
   output: 'export',
-  trailingSlash: true,
   
   // Performance optimizations
   compiler: {
