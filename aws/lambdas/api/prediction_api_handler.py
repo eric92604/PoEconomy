@@ -318,9 +318,26 @@ def _fetch_latest_predictions_from_db(
     
     # Auto-detect league if not provided
     if not league:
+        LOGGER.info("No league specified, attempting to auto-detect...")
         league = _infer_latest_league("Divine Orb")  # Use a common currency for league detection
         if not league:
-            raise ClientFacingError("Unable to determine current league")
+            LOGGER.info("Divine Orb failed, trying Chaos Orb...")
+            # Try with a different common currency
+            league = _infer_latest_league("Chaos Orb")
+            if not league:
+                LOGGER.warning("All league inference attempts failed")
+                # Get available leagues for better error message
+                try:
+                    leagues_data = _list_leagues()
+                    available_leagues = list(leagues_data.get("leagues", {}).keys())
+                    if available_leagues:
+                        raise ClientFacingError(f"Unable to determine current league. Available leagues: {', '.join(available_leagues)}. Please specify a league parameter.")
+                    else:
+                        raise ClientFacingError("Unable to determine current league. No leagues found in metadata. Please ensure data is properly loaded.")
+                except Exception as e:
+                    raise ClientFacingError("Unable to determine current league. Please specify a league parameter or ensure prediction data is available.")
+        else:
+            LOGGER.info(f"Auto-detected league: {league}")
     
     # Get list of available currencies from metadata table
     available_currencies = _get_available_currencies(league)
@@ -364,22 +381,19 @@ def _fetch_latest_predictions_from_db(
     
     # Calculate latest prediction time
     latest_timestamp = max(prediction_timestamps) if prediction_timestamps else 0
-    latest_time_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(latest_timestamp)) if latest_timestamp else "unknown"
+    # Convert Decimal to int for time.gmtime()
+    latest_timestamp_int = int(latest_timestamp) if latest_timestamp else 0
+    latest_time_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(latest_timestamp_int)) if latest_timestamp_int else "unknown"
     
     # Organize data for frontend consumption
     organized_data = {
-        "league": league,
-        "latest_prediction_time": latest_time_str,
-        "latest_timestamp": latest_timestamp,
-        "horizons": horizons,
-        "currencies": all_predictions,
+        "predictions": all_predictions,
         "metadata": {
+            "league": league,
             "total_currencies": len(all_predictions),
-            "total_currencies_available": len(available_currencies),
-            "horizons_requested": len(horizons),
-            "source": "cache",
-            "query_efficiency": "GSI-optimized",
-            "cache_handled_by": "Cloudflare Worker"
+            "horizons_requested": horizons,
+            "latest_prediction_time": latest_time_str,
+            "query_efficiency": "GSI-optimized"
         }
     }
     
@@ -452,15 +466,36 @@ def _format_prediction_item(item: Dict[str, Any], currency: str, league: str, ho
             "features_used": item.get("features_used", []),
         }
     
-    # Set common fields
+    # Set common fields and ensure frontend compatibility
     prediction_dict.update({
         "currency": currency,
         "league": league,
         "horizon": horizon,
         "source": "cache",
-        "prediction_timestamp": item.get("prediction_timestamp", item.get("created_at", "")),
-        "timestamp": item.get("timestamp", 0)
     })
+    
+    # Convert timestamp to string format expected by frontend
+    timestamp = item.get("prediction_timestamp", item.get("created_at", item.get("timestamp", "")))
+    if isinstance(timestamp, (int, float, Decimal)):
+        # Convert Unix timestamp to ISO string (handle Decimal from DynamoDB)
+        import datetime
+        timestamp_value = float(timestamp) if isinstance(timestamp, Decimal) else timestamp
+        prediction_dict["timestamp"] = datetime.datetime.fromtimestamp(timestamp_value, tz=datetime.timezone.utc).isoformat()
+    else:
+        prediction_dict["timestamp"] = str(timestamp) if timestamp else ""
+    
+    # Calculate price_change if not present
+    if "price_change" not in prediction_dict:
+        current_price = prediction_dict.get("current_price", 0)
+        predicted_price = prediction_dict.get("predicted_price", 0)
+        if current_price and predicted_price:
+            prediction_dict["price_change"] = predicted_price - current_price
+        else:
+            prediction_dict["price_change"] = 0
+    
+    # Ensure confidence field name matches frontend expectation
+    if "confidence_score" in prediction_dict and "confidence" not in prediction_dict:
+        prediction_dict["confidence"] = prediction_dict["confidence_score"]
     
     return prediction_dict
 
@@ -523,21 +558,44 @@ def _fetch_cached_prediction(currency: str, league: Optional[str], horizon: str)
             "features_used": item.get("features_used", []),
         }
     
-    # Set common fields
+    # Set common fields and ensure frontend compatibility
     payload_dict.setdefault("currency", currency)
     payload_dict.setdefault("league", league_value)
     payload_dict.setdefault("horizon", horizon)
     payload_dict["source"] = "cache"
-    payload_dict["prediction_timestamp"] = item.get("prediction_timestamp", item.get("created_at", ""))
+    
+    # Convert timestamp to string format expected by frontend
+    timestamp = item.get("prediction_timestamp", item.get("created_at", ""))
+    if isinstance(timestamp, (int, float, Decimal)):
+        # Convert Unix timestamp to ISO string (handle Decimal from DynamoDB)
+        import datetime
+        timestamp_value = float(timestamp) if isinstance(timestamp, Decimal) else timestamp
+        payload_dict["timestamp"] = datetime.datetime.fromtimestamp(timestamp_value, tz=datetime.timezone.utc).isoformat()
+    else:
+        payload_dict["timestamp"] = str(timestamp) if timestamp else ""
+    
+    # Calculate price_change if not present
+    if "price_change" not in payload_dict:
+        current_price = payload_dict.get("current_price", 0)
+        predicted_price = payload_dict.get("predicted_price", 0)
+        if current_price and predicted_price:
+            payload_dict["price_change"] = predicted_price - current_price
+        else:
+            payload_dict["price_change"] = 0
+    
+    # Ensure confidence field name matches frontend expectation
+    if "confidence_score" in payload_dict and "confidence" not in payload_dict:
+        payload_dict["confidence"] = payload_dict["confidence_score"]
     
     return payload_dict
 
 
 def _infer_latest_league(currency: str) -> Optional[str]:
     """Simple league inference without ML dependencies."""
-    # Try to get league from cached predictions
+    # First try to get league from cached predictions
     assert _PREDICTIONS_TABLE is not None
     try:
+        # Try GSI first
         response = _PREDICTIONS_TABLE.query(
             IndexName="currency-timestamp-index",
             KeyConditionExpression=Key("currency").eq(currency),
@@ -545,19 +603,58 @@ def _infer_latest_league(currency: str) -> Optional[str]:
             Limit=1,
         )
         items = response.get("Items")
-        if not items:
-            return None
-        prediction_key = items[0].get("prediction_key", "")
-        if "#" in prediction_key:
-            try:
-                _, league, _ = prediction_key.split("#", 2)
+        if items:
+            prediction_key = items[0].get("prediction_key", "")
+            if "#" in prediction_key:
+                try:
+                    _, league, _ = prediction_key.split("#", 2)
+                    return league
+                except ValueError:
+                    pass
+            league = items[0].get("league")
+            if league:
                 return league
-            except ValueError:
-                return None
-        return items[0].get("league")
     except Exception as e:
-        LOGGER.warning(f"Failed to infer league: {e}")
-        return None
+        LOGGER.warning(f"GSI query failed for league inference: {e}")
+    
+    # Fallback: try main table query
+    try:
+        response = _PREDICTIONS_TABLE.scan(
+            FilterExpression=Key("currency").eq(currency),
+            Limit=1
+        )
+        items = response.get("Items")
+        if items:
+            prediction_key = items[0].get("prediction_key", "")
+            if "#" in prediction_key:
+                try:
+                    _, league, _ = prediction_key.split("#", 2)
+                    return league
+                except ValueError:
+                    pass
+            league = items[0].get("league")
+            if league:
+                return league
+    except Exception as e:
+        LOGGER.warning(f"Main table query failed for league inference: {e}")
+    
+    # Final fallback: get any available league from metadata
+    try:
+        assert _METADATA_TABLE is not None
+        response = _METADATA_TABLE.scan(
+            ProjectionExpression="league",
+            Limit=1
+        )
+        items = response.get("Items")
+        if items:
+            league = items[0].get("league")
+            if league:
+                LOGGER.info(f"Using fallback league from metadata: {league}")
+                return league
+    except Exception as e:
+        LOGGER.warning(f"Metadata table query failed for league inference: {e}")
+    
+    return None
 
 
 def _require_string(payload: Dict[str, Any], key: str) -> str:
@@ -822,7 +919,9 @@ def _get_latest_price_update_time() -> str:
         if items:
             timestamp = items[0].get("timestamp")
             if timestamp:
-                return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(timestamp))
+                # Convert Decimal to int for time.gmtime()
+                timestamp_int = int(timestamp) if timestamp else 0
+                return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(timestamp_int))
     except Exception as e:
         LOGGER.warning(f"Could not determine latest update time: {e}")
     
