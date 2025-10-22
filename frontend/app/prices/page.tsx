@@ -7,6 +7,7 @@
 import { useState, useMemo, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import {
@@ -27,10 +28,12 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Search, RefreshCw, TrendingUp, TrendingDown } from "lucide-react";
 import { useLeagues, useLivePricesWithRefresh } from "@/lib/hooks";
+import { useQueryClient } from "@tanstack/react-query";
 import { formatPrice, formatRelativeTime } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 
 export default function PricesPage() {
+  const queryClient = useQueryClient();
   const [selectedLeague, setSelectedLeague] = useState<string>("");
   const [searchTerm, setSearchTerm] = useState("");
   const [timeRange, setTimeRange] = useState("24");
@@ -116,16 +119,32 @@ export default function PricesPage() {
     });
   }, [filteredPrices, pricesData]);
 
+  // Manual cache clear function - invalidates React Query cache only
+  const clearCache = () => {
+    queryClient.invalidateQueries({ queryKey: ["prices"] });
+  };
+
   const isLoading = leaguesLoading || pricesLoading;
 
   return (
     <div className="py-8 space-y-8">
-      {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Live Prices</h1>
-        <p className="text-muted-foreground mt-2">
-          Real-time currency prices with automatic updates
-        </p>
+      {/* Header with Refresh Button */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Live Prices</h1>
+          <p className="text-muted-foreground mt-2">
+            Real-time currency prices with automatic updates
+          </p>
+        </div>
+        <Button 
+          onClick={clearCache}
+          variant="outline"
+          size="sm"
+          className="flex items-center gap-2"
+        >
+          <RefreshCw className="h-4 w-4" />
+          Refresh
+        </Button>
       </div>
 
       {/* Stats */}

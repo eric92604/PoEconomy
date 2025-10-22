@@ -72,7 +72,7 @@ export default function InvestmentsPage() {
     enabled: !!selectedLeague, // Only fetch when we have a selected league
   });
 
-  // Manual cache clear function
+  // Manual cache clear function - invalidates React Query cache only
   const clearCache = () => {
     queryClient.invalidateQueries({ queryKey: ["latest-predictions"] });
   };

@@ -1,0 +1,33 @@
+User-agent: *
+Allow: /
+
+# Disallow API endpoints and admin areas
+Disallow: /api/
+Disallow: /_next/
+Disallow: /admin/
+Disallow: /private/
+
+# Allow all main pages
+Allow: /dashboard
+Allow: /investments
+Allow: /prices
+Allow: /images/
+Allow: /static/
+
+# Crawl delay for respectful crawling
+Crawl-delay: 1
+
+# Sitemap location
+Sitemap: https://poeconomy.com/sitemap.xml
+
+# Additional sitemaps for different content types
+Sitemap: https://poeconomy.com/sitemap-images.xml
+
+# SEO and metadata files
+Allow: /robots.txt
+Allow: /sitemap.xml
+Allow: /sitemap-images.xml
+Allow: /og-image.png
+Allow: /og-dashboard.png
+Allow: /og-investments.png
+Allow: /og-prices.png

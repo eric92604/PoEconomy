@@ -125,7 +125,7 @@ export default function DashboardPage() {
   const isLoading = currenciesLoading || leaguesLoading || predictionsLoading;
   const isInitialLoad = currenciesLoading || leaguesLoading;
 
-  // Manual cache clear function for testing
+  // Manual cache clear function - invalidates React Query cache only
   const clearCache = () => {
     queryClient.invalidateQueries({ queryKey: ["latest-predictions"] });
   };

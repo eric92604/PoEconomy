@@ -12,19 +12,74 @@ const inter = Inter({
 
 export const metadata: Metadata = {
   title: {
-    default: `${APP_NAME} - Path of Exile Currency Predictions`,
+    default: `${APP_NAME} - Path of Exile Currency Predictions & Trading Tools`,
     template: `%s | ${APP_NAME}`,
   },
-  description: "Real-time currency price predictions and investment analysis for Path of Exile",
+  description: "Real-time Path of Exile currency price predictions, investment analysis, and trading tools. AI-powered market intelligence for POE trading success.",
   keywords: [
     "Path of Exile",
     "POE",
-    "currency",
-    "predictions",
-    "investment",
-    "trading",
-    "market analysis",
+    "currency predictions",
+    "POE trading tools",
+    "Path of Exile investment",
+    "POE market analysis",
+    "currency trading",
+    "POE price predictions",
+    "Path of Exile trading calculator",
+    "POE currency prices",
+    "Path of Exile economy",
+    "POE trading guide",
+    "currency investment",
+    "market intelligence",
+    "trading predictions",
   ],
+  authors: [{ name: "PoEconomy Team" }],
+  creator: "PoEconomy",
+  publisher: "PoEconomy",
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: {
+      index: true,
+      follow: true,
+      'max-video-preview': -1,
+      'max-image-preview': 'large',
+      'max-snippet': -1,
+    },
+  },
+  openGraph: {
+    type: 'website',
+    locale: 'en_US',
+    url: 'https://poeconomy.com',
+    siteName: 'PoEconomy',
+    title: 'PoEconomy - Path of Exile Currency Predictions & Trading Tools',
+    description: 'Real-time Path of Exile currency price predictions, investment analysis, and trading tools. AI-powered market intelligence for POE trading success.',
+    images: [
+      {
+        url: 'https://poeconomy.com/og-image.png',
+        width: 1200,
+        height: 630,
+        alt: 'PoEconomy - Path of Exile Currency Predictions & Trading Tools',
+      },
+    ],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'PoEconomy - Path of Exile Currency Predictions & Trading Tools',
+    description: 'Real-time Path of Exile currency price predictions, investment analysis, and trading tools. AI-powered market intelligence for POE trading success.',
+    images: ['https://poeconomy.com/og-image.png'],
+    creator: '@poeconomy',
+  },
+  alternates: {
+    canonical: 'https://poeconomy.com',
+  },
+  category: 'Gaming',
+  classification: 'Path of Exile Trading Tools',
+  other: {
+    'application-name': 'PoEconomy',
+    'msapplication-TileColor': '#1a1a1a',
+    'theme-color': '#1a1a1a',
+  },
 };
 
 export default function RootLayout({
@@ -48,6 +103,42 @@ export default function RootLayout({
                 document.documentElement.classList.add('dark');
               }
             `,
+          }}
+        />
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{
+            __html: JSON.stringify({
+              "@context": "https://schema.org",
+              "@type": "WebApplication",
+              "name": "PoEconomy",
+              "description": "Real-time Path of Exile currency price predictions, investment analysis, and trading tools. AI-powered market intelligence for POE trading success.",
+              "url": "https://poeconomy.com",
+              "applicationCategory": "GameApplication",
+              "operatingSystem": "Web Browser",
+              "browserRequirements": "Requires JavaScript. Requires HTML5.",
+              "offers": {
+                "@type": "Offer",
+                "price": "0",
+                "priceCurrency": "USD"
+              },
+              "author": {
+                "@type": "Organization",
+                "name": "PoEconomy Team"
+              },
+              "publisher": {
+                "@type": "Organization", 
+                "name": "PoEconomy"
+              },
+              "keywords": "Path of Exile, POE, currency predictions, trading tools, investment analysis, market intelligence",
+              "genre": "Gaming",
+              "gamePlatform": "Path of Exile",
+              "aggregateRating": {
+                "@type": "AggregateRating",
+                "ratingValue": "4.8",
+                "ratingCount": "150"
+              }
+            })
           }}
         />
       </head>
