@@ -1,0 +1,10 @@
+# Cloudflare Pages Redirects Configuration
+
+# WWW to non-WWW redirect (handled by Next.js redirects, but keeping as backup)
+https://www.poeconomy.com/* https://poeconomy.com/:splat 301!
+
+# API redirects to subdomain
+/api/* https://api.poeconomy.com/:splat 301!
+
+# Fallback for SPA routing - serve index.html for all non-API routes
+/* /index.html 200

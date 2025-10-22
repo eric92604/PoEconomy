@@ -44,6 +44,35 @@ export interface LeaguesResponse {
 }
 
 /**
+ * Prediction data for a specific horizon
+ */
+export interface PredictionData {
+  currency: string;
+  league: string;
+  horizon: string;
+  current_price: number;
+  predicted_price: number;
+  price_change_percent: number;
+  confidence: number;
+  timestamp: number;
+  source: PredictionSource;
+}
+
+/**
+ * Latest predictions response for dashboard
+ */
+export interface LatestPredictionsResponse {
+  predictions: Record<string, Record<string, PredictionData>>;
+  metadata: {
+    league: string;
+    total_currencies: number;
+    horizons_requested: string[];
+    latest_prediction_time: string;
+    query_efficiency: string;
+  };
+}
+
+/**
  * Request body for single prediction
  */
 export interface PredictionRequest {

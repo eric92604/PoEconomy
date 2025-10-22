@@ -20,7 +20,8 @@ import {
 } from "lucide-react";
 import { useCurrencies, useLeagues, useBatchPredictions } from "@/lib/hooks";
 import { formatPrice, formatPercentage, formatConfidence } from "@/lib/utils";
-import type { PredictionRequest, CurrencyWithPredictions } from "@/types";
+import { CurrencyIcon } from "@/components/currency/currency-icon";
+import type { CurrencyWithPredictions, PredictionRequest } from "@/types";
 
 export default function DashboardPage() {
   // Fetch data
@@ -33,13 +34,14 @@ export default function DashboardPage() {
     return Object.keys(leaguesData.leagues)[0];
   }, [leaguesData]);
 
-  // Prepare batch prediction requests (limited for dashboard)
+  // Prepare batch prediction requests for dashboard (1d horizon only)
   const predictionRequests = useMemo((): PredictionRequest[] => {
     if (!currenciesData || !firstLeague) return [];
 
-    const currencies = Object.keys(currenciesData.currencies).slice(0, 20); // Limit to 20 for dashboard
+    const currencies = Object.keys(currenciesData.currencies);
     const requests: PredictionRequest[] = [];
 
+    // Get 1d predictions for all currencies
     currencies.forEach((currency) => {
       requests.push({
         currency,
@@ -51,7 +53,7 @@ export default function DashboardPage() {
     return requests;
   }, [currenciesData, firstLeague]);
 
-  // Fetch predictions
+  // Fetch batch predictions
   const { data: predictionsData, isLoading: predictionsLoading } = useBatchPredictions(
     { requests: predictionRequests },
     predictionRequests.length > 0
@@ -59,30 +61,49 @@ export default function DashboardPage() {
 
   // Calculate stats
   const stats = useMemo(() => {
-    if (!predictionsData || !leaguesData || !currenciesData) {
+    // Debug logging
+    console.log('Dashboard stats calculation:', {
+      predictionsData: predictionsData ? 'present' : 'missing',
+      leaguesData: leaguesData ? 'present' : 'missing', 
+      currenciesData: currenciesData ? 'present' : 'missing',
+      results: predictionsData?.results ? predictionsData.results.length : 0
+    });
+    
+    if (!predictionsData || !leaguesData || !currenciesData || !predictionsData.results) {
       return {
         totalCurrencies: 0,
         totalLeagues: 0,
         topGainers: [],
         topLosers: [],
-        highConfidence: [],
       };
     }
 
-    const currencies: CurrencyWithPredictions[] = predictionsData.results.map((pred) => ({
-      currency: pred.currency,
-      league: pred.league,
-      current_price: pred.current_price,
-      predictions: {
-        "1d": {
-          predicted_price: pred.predicted_price,
-          price_change_percent: pred.price_change_percent,
-          confidence: pred.confidence,
-          horizon: "1d",
+    // Convert batch predictions data to dashboard format
+    const currencies: CurrencyWithPredictions[] = predictionsData.results.map((prediction) => {
+      console.log(`Processing prediction:`, prediction);
+      
+      // Get icon URL from currency metadata
+      const currencyMetadata = currenciesData.currencies[prediction.currency]?.[prediction.league];
+      const iconUrl = currencyMetadata?.icon_url;
+      
+      return {
+        currency: prediction.currency,
+        league: prediction.league,
+        current_price: prediction.current_price,
+        icon_url: iconUrl,
+        predictions: {
+          "1d": {
+            predicted_price: prediction.predicted_price,
+            price_change_percent: prediction.price_change_percent,
+            confidence: prediction.confidence,
+            horizon: "1d",
+          },
         },
-      },
-      average_confidence: pred.confidence,
-    }));
+        average_confidence: prediction.confidence,
+      };
+    });
+
+    console.log('Final currencies array:', currencies);
 
     // Sort by profit
     const sortedByProfit = [...currencies].sort(
@@ -91,17 +112,11 @@ export default function DashboardPage() {
         (a.predictions["1d"]?.price_change_percent || 0)
     );
 
-    // Sort by confidence
-    const sortedByConfidence = [...currencies].sort(
-      (a, b) => b.average_confidence - a.average_confidence
-    );
-
     return {
-      totalCurrencies: Object.keys(currenciesData.currencies).length,
+      totalCurrencies: currencies.length,
       totalLeagues: Object.keys(leaguesData.leagues).length,
       topGainers: sortedByProfit.slice(0, 5),
       topLosers: sortedByProfit.slice(-5).reverse(),
-      highConfidence: sortedByConfidence.slice(0, 5),
     };
   }, [predictionsData, leaguesData, currenciesData]);
 
@@ -109,13 +124,6 @@ export default function DashboardPage() {
 
   return (
     <div className="py-8 space-y-8">
-      {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>
-        <p className="text-muted-foreground mt-2">
-          Market overview and key metrics for Path of Exile currencies
-        </p>
-      </div>
 
       {/* Stats Cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -235,6 +243,11 @@ export default function DashboardPage() {
                 >
                   <div className="flex items-center gap-3">
                     <Badge variant="outline">{index + 1}</Badge>
+      <CurrencyIcon 
+        iconUrl={currency.icon_url} 
+        currency={currency.currency} 
+        size="md" 
+      />
                     <div>
                       <p className="font-medium">{currency.currency}</p>
                       <p className="text-sm text-muted-foreground">
@@ -260,62 +273,6 @@ export default function DashboardPage() {
         </CardContent>
       </Card>
 
-      {/* High Confidence Predictions */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle>High Confidence Predictions</CardTitle>
-              <CardDescription>Most reliable predictions</CardDescription>
-            </div>
-            <Button asChild variant="ghost" size="sm">
-              <Link href="/predictions">
-                View All
-                <ArrowRight className="ml-2 h-4 w-4" />
-              </Link>
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent>
-          {isLoading ? (
-            <div className="space-y-4">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <div key={i} className="flex items-center justify-between">
-                  <Skeleton className="h-4 w-32" />
-                  <Skeleton className="h-4 w-24" />
-                </div>
-              ))}
-            </div>
-          ) : stats.highConfidence.length > 0 ? (
-            <div className="space-y-4">
-              {stats.highConfidence.map((currency) => (
-                <div
-                  key={currency.currency}
-                  className="flex items-center justify-between"
-                >
-                  <div>
-                    <p className="font-medium">{currency.currency}</p>
-                    <p className="text-sm text-muted-foreground">
-                      {formatPrice(currency.current_price)}c →{" "}
-                      {formatPrice(currency.predictions["1d"]?.predicted_price || 0)}c
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <Badge variant="default">
-                      {formatConfidence(currency.average_confidence)}
-                    </Badge>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      {formatPercentage(currency.predictions["1d"]?.price_change_percent || 0)}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">No data available</p>
-          )}
-        </CardContent>
-      </Card>
 
       {/* Quick Actions */}
       <div className="grid gap-4 md:grid-cols-3">
