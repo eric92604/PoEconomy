@@ -1,12 +1,13 @@
 /**
  * Script to fetch and bundle currency icons from PoE CDN
- * Downloads all currencies from the API and optimizes them for Cloudflare Pages
+ * Downloads all currencies from the API and converts them to optimized AVIF format
  */
 
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const { createHash } = require('crypto');
+const sharp = require('sharp');
 
 // Configuration
 const ICONS_DIR = path.join(__dirname, '../public/images/currency');
@@ -19,11 +20,11 @@ const DELAY_BETWEEN_BATCHES = 1000; // 2 second delay between batches
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.poeconomy.com';
 const API_KEY = process.env.NEXT_PUBLIC_API_KEY;
 
-// Image optimization settings for Cloudflare
+// Image optimization settings
 const IMAGE_OPTIMIZATION = {
-  // Cloudflare recommended formats
-  formats: ['webp', 'avif'], // Modern formats with better compression
+  format: 'avif', // AVIF provides best compression (~50% smaller than PNG)
   quality: 85, // Good balance between quality and file size
+  effort: 9, // Maximum compression effort (0-9)
   maxWidth: 64, // 2x the display size for retina support
   maxHeight: 64,
 };
@@ -103,7 +104,26 @@ function extractCurrencyData(currencyData) {
 }
 
 /**
- * Download a single icon from the provided URL
+ * Convert PNG to AVIF format with optimization
+ */
+async function convertToAvif(pngPath, avifPath) {
+  try {
+    await sharp(pngPath)
+      .avif({
+        quality: 85,
+        effort: 9, // Maximum compression effort
+        chromaSubsampling: '4:4:4', // Best quality
+      })
+      .toFile(avifPath);
+    return true;
+  } catch (error) {
+    console.error(`Failed to convert ${pngPath} to AVIF:`, error.message);
+    return false;
+  }
+}
+
+/**
+ * Download a single icon from the provided URL and convert to AVIF
  */
 function downloadIcon(currencyName, iconUrl, retries = 3) {
   return new Promise((resolve, reject) => {
@@ -114,25 +134,39 @@ function downloadIcon(currencyName, iconUrl, retries = 3) {
       .replace(/_+/g, '_')
       .replace(/^_|_$/g, '');
     
-    const filename = `${safeName}.png`;
-    const filepath = path.join(ICONS_DIR, filename);
+    const pngFilename = `${safeName}.png`;
+    const avifFilename = `${safeName}.avif`;
+    const pngFilepath = path.join(ICONS_DIR, pngFilename);
+    const avifFilepath = path.join(ICONS_DIR, avifFilename);
     
-    // Check if file already exists
-    if (fs.existsSync(filepath)) {
+    // Check if AVIF file already exists
+    if (fs.existsSync(avifFilepath)) {
       console.log(`✓ ${currencyName} (already exists)`);
-      resolve({ currencyName, filename, filepath, iconUrl });
+      resolve({ currencyName, filename: avifFilename, filepath: avifFilepath, iconUrl });
       return;
     }
 
-    const file = fs.createWriteStream(filepath);
+    const file = fs.createWriteStream(pngFilepath);
     
     const request = https.get(iconUrl, (response) => {
       if (response.statusCode === 200) {
         response.pipe(file);
-        file.on('finish', () => {
+        file.on('finish', async () => {
           file.close();
           console.log(`✓ ${currencyName} downloaded`);
-          resolve({ currencyName, filename, filepath, iconUrl });
+          
+          // Convert to AVIF
+          const converted = await convertToAvif(pngFilepath, avifFilepath);
+          
+          if (converted) {
+            // Delete the original PNG to save space
+            fs.unlinkSync(pngFilepath);
+            resolve({ currencyName, filename: avifFilename, filepath: avifFilepath, iconUrl });
+          } else {
+            // Keep PNG if AVIF conversion failed
+            console.log(`  ⚠️  Using PNG fallback`);
+            resolve({ currencyName, filename: pngFilename, filepath: pngFilepath, iconUrl });
+          }
         });
       } else if (response.statusCode === 404 && retries > 0) {
         console.log(`⚠️  ${currencyName} not found, retrying... (${retries} attempts left)`);
@@ -147,7 +181,7 @@ function downloadIcon(currencyName, iconUrl, retries = 3) {
     });
 
     request.on('error', (err) => {
-      fs.unlink(filepath, () => {}); // Delete partial file
+      fs.unlink(pngFilepath, () => {}); // Delete partial file
       if (retries > 0) {
         console.log(`Retrying ${currencyName}... (${retries} attempts left)`);
         setTimeout(() => {
@@ -162,7 +196,7 @@ function downloadIcon(currencyName, iconUrl, retries = 3) {
 
     request.setTimeout(TIMEOUT, () => {
       request.destroy();
-      fs.unlink(filepath, () => {}); // Delete partial file
+      fs.unlink(pngFilepath, () => {}); // Delete partial file
       reject(new Error(`Timeout: ${currencyName}`));
     });
   });
@@ -173,51 +207,24 @@ function downloadIcon(currencyName, iconUrl, retries = 3) {
  */
 function generateIconMapping(downloadedIcons) {
   const mapping = {};
-  const webpMapping = {};
-  const avifMapping = {};
   
   downloadedIcons.forEach(({ currencyName, filename }) => {
     const key = currencyName.toLowerCase().replace(/\s+/g, '_');
-    const baseName = filename.replace('.png', '');
     
-    // Original PNG mapping
     mapping[key] = `/images/currency/${filename}`;
-    
-    // WebP mapping for better compression
-    webpMapping[key] = `/images/currency/${baseName}.webp`;
-    
-    // AVIF mapping for best compression (Cloudflare recommended)
-    avifMapping[key] = `/images/currency/${baseName}.avif`;
   });
 
-  const mappingContent = `// Auto-generated currency icon mapping with Cloudflare optimizations
+  const mappingContent = `// Auto-generated currency icon mapping
 export const CURRENCY_ICON_MAP: Record<string, string> = ${JSON.stringify(mapping, null, 2)};
 
-export const CURRENCY_ICON_WEBP_MAP: Record<string, string> = ${JSON.stringify(webpMapping, null, 2)};
-
-export const CURRENCY_ICON_AVIF_MAP: Record<string, string> = ${JSON.stringify(avifMapping, null, 2)};
-
-export function getCurrencyIconPath(currencyName: string, format: 'png' | 'webp' | 'avif' = 'png'): string | undefined {
+export function getCurrencyIconPath(currencyName: string): string | undefined {
   const key = currencyName.toLowerCase().replace(/\\s+/g, '_');
-  
-  switch (format) {
-    case 'webp':
-      return CURRENCY_ICON_WEBP_MAP[key] || CURRENCY_ICON_MAP[key];
-    case 'avif':
-      return CURRENCY_ICON_AVIF_MAP[key] || CURRENCY_ICON_WEBP_MAP[key] || CURRENCY_ICON_MAP[key];
-    default:
-      return CURRENCY_ICON_MAP[key];
-  }
+  return CURRENCY_ICON_MAP[key];
 }
 
-// Cloudflare Pages optimization helper
+// Helper function (currently returns PNG, can be extended for WebP/AVIF when conversion is implemented)
 export function getOptimizedCurrencyIcon(currencyName: string): string | undefined {
-  const key = currencyName.toLowerCase().replace(/\\s+/g, '_');
-  
-  // Try AVIF first (best compression), then WebP, then PNG
-  return CURRENCY_ICON_AVIF_MAP[key] || 
-         CURRENCY_ICON_WEBP_MAP[key] || 
-         CURRENCY_ICON_MAP[key];
+  return getCurrencyIconPath(currencyName);
 }
 `;
 
@@ -293,11 +300,12 @@ async function main() {
     }
     
     console.log('\n🎉 Currency icon bundling complete!');
-    console.log('💡 Icons are now available locally and optimized for Cloudflare Pages.');
+    console.log('💡 Icons are now available in optimized AVIF format.');
+    console.log('📊 AVIF provides ~50% smaller file sizes compared to PNG with same quality.');
     console.log('🚀 Next steps:');
     console.log('   1. Run "npm run build" to include icons in deployment');
-    console.log('   2. Deploy to Cloudflare Pages for automatic image optimization');
-    console.log('   3. Icons will be served in WebP/AVIF formats for better performance');
+    console.log('   2. Deploy to Cloudflare Pages');
+    console.log('   3. Icons will load faster due to smaller file sizes');
     
   } catch (error) {
     console.error('❌ Failed to fetch currencies from API:', error.message);
