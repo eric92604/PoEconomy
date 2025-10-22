@@ -8,6 +8,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { TrendingUp } from "lucide-react";
 import { ThemeToggle } from "./theme-toggle";
+import { BackgroundEffectToggle } from "./background-effect-toggle";
 import { APP_NAME } from "@/lib/constants/config";
 import { cn } from "@/lib/utils";
 
@@ -45,8 +46,9 @@ export function Header() {
           ))}
         </nav>
 
-        {/* Theme Toggle */}
+        {/* Controls */}
         <div className="flex items-center justify-end space-x-2">
+          <BackgroundEffectToggle />
           <ThemeToggle />
         </div>
       </div>

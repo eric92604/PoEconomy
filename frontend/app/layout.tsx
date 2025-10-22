@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
-import { QueryProvider, ThemeProvider } from "@/lib/providers";
-import { Header, Footer } from "@/components/layout";
+import { QueryProvider, ThemeProvider, BackgroundEffectProvider } from "@/lib/providers";
+import { Header, Footer, RainingCurrencyBackground } from "@/components/layout";
 import { APP_NAME } from "@/lib/constants/config";
 
 const inter = Inter({
@@ -36,17 +36,20 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={`${inter.variable} font-sans antialiased`}>
         <ThemeProvider defaultTheme="dark" storageKey="poe-theme">
-          <QueryProvider>
-            <div className="relative flex min-h-screen flex-col">
-              <Header />
-              <main className="flex-1 w-full">
-                <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-                  {children}
-                </div>
-              </main>
-              <Footer />
-            </div>
-          </QueryProvider>
+          <BackgroundEffectProvider>
+            <QueryProvider>
+              <RainingCurrencyBackground />
+              <div className="relative flex min-h-screen flex-col z-10">
+                <Header />
+                <main className="flex-1 w-full">
+                  <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+                    {children}
+                  </div>
+                </main>
+                <Footer />
+              </div>
+            </QueryProvider>
+          </BackgroundEffectProvider>
         </ThemeProvider>
       </body>
     </html>
