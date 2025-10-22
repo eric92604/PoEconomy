@@ -148,7 +148,7 @@ export default function InvestmentsPage() {
   const handleProfitChange = (value: number[]) => {
     setFilters((prev) => ({
       ...prev,
-      minProfit: value[0] === 0 ? undefined : value[0],
+      minProfit: value[0] === -50 ? undefined : value[0],
     }));
   };
 
@@ -170,19 +170,19 @@ export default function InvestmentsPage() {
 
   const activeFilterCount = countActiveFilters(filters);
 
-  // Filter by timeframe and profit, then apply additional filters
+  // Filter by timeframe (include all currencies with predictions), then apply additional filters
   const filteredCurrencies = useMemo(() => {
-    // First filter by timeframe and profit
+    // First filter by timeframe - include all currencies with predictions (both positive and negative profit)
     const timeframeFiltered = currenciesWithPredictions.filter((currency) => {
       const horizon = selectedTab === "short" ? "1d" : selectedTab === "medium" ? "3d" : "7d";
       const prediction = currency.predictions[horizon];
-      return prediction && prediction.price_change_percent > 0;
+      return prediction; // Include all currencies with predictions, regardless of profit direction
     });
 
     // Then apply additional filters
     const filtered = filterCurrencies(timeframeFiltered, filters);
 
-    // Sort by profit percentage
+    // Sort by profit percentage (highest to lowest, so negative profits appear at the bottom)
     return filtered.sort((a, b) => {
       const horizon: "1d" | "3d" | "7d" = selectedTab === "short" ? "1d" : selectedTab === "medium" ? "3d" : "7d";
       const aProfit = a.predictions[horizon]?.price_change_percent || 0;
@@ -199,6 +199,9 @@ export default function InvestmentsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Investment Opportunities</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            Analyze all currency predictions including profitable and declining opportunities
+          </p>
         </div>
         <Button 
           onClick={clearCache}
@@ -223,11 +226,11 @@ export default function InvestmentsPage() {
               <div className="text-2xl font-bold">-</div>
             ) : (
               <div className="text-2xl font-bold">
-                {currenciesWithPredictions.filter((c) => (c.predictions["1d"]?.price_change_percent ?? 0) > 0).length}
+                {currenciesWithPredictions.filter((c) => c.predictions["1d"]).length}
               </div>
             )}
             <p className="text-xs text-muted-foreground mt-1">
-              Profitable opportunities
+              Total opportunities
             </p>
           </CardContent>
         </Card>
@@ -242,11 +245,11 @@ export default function InvestmentsPage() {
               <div className="text-2xl font-bold">-</div>
             ) : (
               <div className="text-2xl font-bold">
-                {currenciesWithPredictions.filter((c) => (c.predictions["3d"]?.price_change_percent ?? 0) > 0).length}
+                {currenciesWithPredictions.filter((c) => c.predictions["3d"]).length}
               </div>
             )}
             <p className="text-xs text-muted-foreground mt-1">
-              Profitable opportunities
+              Total opportunities
             </p>
           </CardContent>
         </Card>
@@ -261,11 +264,11 @@ export default function InvestmentsPage() {
               <div className="text-2xl font-bold">-</div>
             ) : (
               <div className="text-2xl font-bold">
-                {currenciesWithPredictions.filter((c) => (c.predictions["7d"]?.price_change_percent ?? 0) > 0).length}
+                {currenciesWithPredictions.filter((c) => c.predictions["7d"]).length}
               </div>
             )}
             <p className="text-xs text-muted-foreground mt-1">
-              Profitable opportunities
+              Total opportunities
             </p>
           </CardContent>
         </Card>
@@ -348,16 +351,17 @@ export default function InvestmentsPage() {
                 <Label>Profit</Label>
                 <div className="space-y-2">
                   <Slider
-                    value={[filters.minProfit || 0]}
+                    value={[filters.minProfit || -50]}
                     onValueChange={handleProfitChange}
+                    min={-50}
                     max={200}
                     step={1}
                     className="w-full"
                   />
                   <div className="flex justify-between text-sm text-muted-foreground">
-                    <span>0%</span>
+                    <span>-50%</span>
                     <span className="font-medium">
-                      {filters.minProfit ? `${filters.minProfit}%` : "Any"}
+                      {filters.minProfit !== undefined ? `${filters.minProfit}%` : "Any"}
                     </span>
                     <span>200%</span>
                   </div>
@@ -396,7 +400,7 @@ export default function InvestmentsPage() {
                       ({currenciesWithPredictions.filter((c) => {
                         const horizon = selectedTab === "short" ? "1d" : selectedTab === "medium" ? "3d" : "7d";
                         const prediction = c.predictions[horizon];
-                        return prediction && prediction.price_change_percent > 0;
+                        return prediction;
                       }).length} total)
                     </span>
                   )}
@@ -421,7 +425,7 @@ export default function InvestmentsPage() {
             <div>
               <h2 className="text-2xl font-semibold">Short-Term Investments</h2>
               <p className="text-sm text-muted-foreground mt-1">
-                Best opportunities for 1-day profit
+                Investment opportunities for 1-day timeframe (includes both profitable and declining currencies)
               </p>
             </div>
             <Badge variant="secondary">
@@ -440,7 +444,7 @@ export default function InvestmentsPage() {
             <div>
               <h2 className="text-2xl font-semibold">Medium-Term Investments</h2>
               <p className="text-sm text-muted-foreground mt-1">
-                Best opportunities for 3-day profit
+                Investment opportunities for 3-day timeframe (includes both profitable and declining currencies)
               </p>
             </div>
             <Badge variant="secondary">
@@ -459,7 +463,7 @@ export default function InvestmentsPage() {
             <div>
               <h2 className="text-2xl font-semibold">Long-Term Investments</h2>
               <p className="text-sm text-muted-foreground mt-1">
-                Best opportunities for 7-day profit
+                Investment opportunities for 7-day timeframe (includes both profitable and declining currencies)
               </p>
             </div>
             <Badge variant="secondary">
