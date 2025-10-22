@@ -58,10 +58,10 @@ class DailyPriceAggregator:
         
         # Get table names from environment or config
         config = MLConfig()
-        self.live_prices_table_name = os.getenv("DYNAMO_LIVE_PRICES_TABLE", config.dynamo.currency_prices_table)
-        self.daily_prices_table_name = os.getenv("DYNAMO_DAILY_PRICES_TABLE", "poeconomy-daily-prices")
-        self.league_metadata_table_name = os.getenv("DYNAMO_LEAGUE_METADATA_TABLE", config.dynamo.league_metadata_table)
-        self.currency_metadata_table_name = os.getenv("DYNAMO_CURRENCY_METADATA_TABLE", config.dynamo.currency_metadata_table)
+        self.live_prices_table_name = os.getenv("LIVE_PRICES_TABLE", os.getenv("DYNAMO_CURRENCY_PRICES_TABLE", config.dynamo.currency_prices_table))
+        self.daily_prices_table_name = os.getenv("DAILY_PRICES_TABLE", "poeconomy-daily-prices")
+        self.league_metadata_table_name = os.getenv("LEAGUE_METADATA_TABLE", os.getenv("DYNAMO_LEAGUE_METADATA_TABLE", config.dynamo.league_metadata_table))
+        self.currency_metadata_table_name = os.getenv("CURRENCY_METADATA_TABLE", os.getenv("DYNAMO_CURRENCY_METADATA_TABLE", config.dynamo.currency_metadata_table))
         
         self.live_prices_table = self.dynamodb.Table(self.live_prices_table_name)
         self.daily_prices_table = self.dynamodb.Table(self.daily_prices_table_name)
