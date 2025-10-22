@@ -29,6 +29,7 @@ import {
 } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import { CurrencyIcon } from "@/components/currency/currency-icon";
+import { ChaosPrice } from "@/components/currency/chaos-price";
 
 interface CurrencyTableProps {
   currencies: CurrencyWithPredictions[];
@@ -197,15 +198,13 @@ export const CurrencyTable = memo(function CurrencyTable({
                     </div>
                   </div>
                 </TableCell>
-                <TableCell className="text-right font-mono">
-                  {formatPrice(currency.current_price)}c
+                <TableCell className="text-right">
+                  <ChaosPrice price={currency.current_price} />
                 </TableCell>
                 <TableCell className="text-right">
                   {pred1d ? (
                     <div className="flex flex-col items-end">
-                      <span className="font-mono">
-                        {formatPrice(pred1d.predicted_price)}c
-                      </span>
+                      <ChaosPrice price={pred1d.predicted_price} />
                       <span
                         className={cn(
                           "text-sm font-semibold flex items-center gap-1",
@@ -227,9 +226,7 @@ export const CurrencyTable = memo(function CurrencyTable({
                 <TableCell className="text-right">
                   {pred3d ? (
                     <div className="flex flex-col items-end">
-                      <span className="font-mono">
-                        {formatPrice(pred3d.predicted_price)}c
-                      </span>
+                      <ChaosPrice price={pred3d.predicted_price} />
                       <span
                         className={cn(
                           "text-sm font-semibold flex items-center gap-1",
@@ -251,9 +248,7 @@ export const CurrencyTable = memo(function CurrencyTable({
                 <TableCell className="text-right">
                   {pred7d ? (
                     <div className="flex flex-col items-end">
-                      <span className="font-mono">
-                        {formatPrice(pred7d.predicted_price)}c
-                      </span>
+                      <ChaosPrice price={pred7d.predicted_price} />
                       <span
                         className={cn(
                           "text-sm font-semibold flex items-center gap-1",
@@ -282,10 +277,14 @@ export const CurrencyTable = memo(function CurrencyTable({
 
                     if (predictionWithRange) {
                       return (
-                        <span className="text-sm text-muted-foreground font-mono">
-                          {formatPrice(predictionWithRange.prediction_lower!)} -{" "}
-                          {formatPrice(predictionWithRange.prediction_upper!)}
-                        </span>
+                        <div className="text-sm text-muted-foreground font-mono flex items-center gap-1">
+                          <span>{formatPrice(predictionWithRange.prediction_lower!)} - {formatPrice(predictionWithRange.prediction_upper!)}</span>
+                          <CurrencyIcon 
+                            iconUrl="/images/chaos-orb.png" 
+                            currency="Chaos Orb" 
+                            size="sm" 
+                          />
+                        </div>
                       );
                     }
 

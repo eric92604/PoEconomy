@@ -45,7 +45,7 @@ export const CurrencyIcon = memo(function CurrencyIcon({
   priority = false,
   lazy = true
 }: CurrencyIconProps) {
-  const finalIconUrl = getOptimizedCurrencyIcon(currency);
+  const finalIconUrl = iconUrl || getOptimizedCurrencyIcon(currency);
   const { hasError } = useIconPreloader(finalIconUrl, currency);
   const [isInView, setIsInView] = useState(!lazy);
 
