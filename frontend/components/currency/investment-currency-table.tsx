@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Main Investment Table - Core feature displaying currencies with predictions
+ * Investment Currency Table - Shows only relevant profit column for selected timeframe
  */
 
 import { useState, useMemo, useCallback, memo } from "react";
@@ -33,17 +33,19 @@ import {
 import { cn } from "@/lib/utils";
 import { CurrencyIcon } from "@/components/currency/currency-icon";
 
-interface CurrencyTableProps {
+interface InvestmentCurrencyTableProps {
   currencies: CurrencyWithPredictions[];
   onSelectCurrency?: (currency: CurrencyWithPredictions) => void;
   selectedCurrency?: string;
+  timeframe: "1d" | "3d" | "7d";
 }
 
-export const CurrencyTable = memo(function CurrencyTable({
+export const InvestmentCurrencyTable = memo(function InvestmentCurrencyTable({
   currencies,
   onSelectCurrency,
   selectedCurrency,
-}: CurrencyTableProps) {
+  timeframe,
+}: InvestmentCurrencyTableProps) {
   const [sortField, setSortField] = useState<CurrencySortField>("profit_1d");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [filters, setFilters] = useState<CurrencyFilters>({});
@@ -86,26 +88,22 @@ export const CurrencyTable = memo(function CurrencyTable({
   }, [sortField, sortDirection]);
 
   // Get profit color
-  const getProfitColor = useCallback((percent: number) => {
-    if (percent >= 5) return "text-green-600 dark:text-green-400";
-    if (percent >= 2) return "text-green-500 dark:text-green-500";
-    if (percent > 0) return "text-green-400 dark:text-green-600";
-    if (percent === 0) return "text-muted-foreground";
-    if (percent > -2) return "text-red-400 dark:text-red-600";
-    if (percent > -5) return "text-red-500 dark:text-red-500";
-    return "text-red-600 dark:text-red-400";
+  const getProfitColor = useCallback((profit: number) => {
+    if (profit > 0) return "text-green-600";
+    if (profit < 0) return "text-red-600";
+    return "text-muted-foreground";
   }, []);
 
-  // Get confidence badge variant
-  const getConfidenceVariant = (confidence: number): "default" | "secondary" | "destructive" => {
+  // Get confidence variant
+  const getConfidenceVariant = useCallback((confidence: number): "default" | "secondary" | "destructive" => {
     if (confidence >= 0.8) return "default";
     if (confidence >= 0.6) return "secondary";
     return "destructive";
-  };
+  }, []);
 
-  if (currencies.length === 0) {
+  if (filteredAndSortedCurrencies.length === 0) {
     return (
-      <div className="flex items-center justify-center h-64 border rounded-lg">
+      <div className="flex items-center justify-center py-8">
         <p className="text-muted-foreground">No currencies found</p>
       </div>
     );
@@ -141,31 +139,11 @@ export const CurrencyTable = memo(function CurrencyTable({
             <TableHead className="text-right">
               <Button
                 variant="ghost"
-                onClick={() => handleSort("profit_1d")}
+                onClick={() => handleSort(`profit_${timeframe}` as CurrencySortField)}
                 className="h-8 px-2"
               >
-                1d Profit
-                {getSortIcon("profit_1d")}
-              </Button>
-            </TableHead>
-            <TableHead className="text-right">
-              <Button
-                variant="ghost"
-                onClick={() => handleSort("profit_3d")}
-                className="h-8 px-2"
-              >
-                3d Profit
-                {getSortIcon("profit_3d")}
-              </Button>
-            </TableHead>
-            <TableHead className="text-right">
-              <Button
-                variant="ghost"
-                onClick={() => handleSort("profit_7d")}
-                className="h-8 px-2"
-              >
-                7d Profit
-                {getSortIcon("profit_7d")}
+                {timeframe === "1d" ? "1d" : timeframe === "3d" ? "3d" : "7d"} Profit
+                {getSortIcon(`profit_${timeframe}` as CurrencySortField)}
               </Button>
             </TableHead>
             <TableHead className="text-right">Price Range</TableHead>
@@ -183,9 +161,7 @@ export const CurrencyTable = memo(function CurrencyTable({
         </TableHeader>
         <TableBody>
           {filteredAndSortedCurrencies.map((currency: CurrencyWithPredictions) => {
-            const pred1d = currency.predictions["1d"];
-            const pred3d = currency.predictions["3d"];
-            const pred7d = currency.predictions["7d"];
+            const prediction = currency.predictions[timeframe];
 
             return (
               <TableRow
@@ -196,90 +172,42 @@ export const CurrencyTable = memo(function CurrencyTable({
                 )}
                 onClick={() => onSelectCurrency?.(currency)}
               >
-                <TableCell className="font-medium">
+                <TableCell>
                   <div className="flex items-center gap-3">
-                    <CurrencyIcon 
-                      iconUrl={currency.icon_url} 
-                      currency={currency.currency} 
-                      size="md" 
+                    <CurrencyIcon
+                      iconUrl={currency.icon_url}
+                      currency={currency.currency}
+                      size="sm"
                     />
-                    <div className="flex flex-col">
-                      <span>{currency.currency}</span>
-                      <span className="text-xs text-muted-foreground">
-                        {currency.league}
-                      </span>
+                    <div>
+                      <div className="font-medium">{currency.currency}</div>
+                      <div className="text-sm text-muted-foreground">{currency.league}</div>
                     </div>
                   </div>
                 </TableCell>
-                <TableCell className="text-right font-mono">
-                  {formatPrice(currency.current_price)}c
+                <TableCell className="text-right">
+                  <span className="font-mono">
+                    {formatPrice(currency.current_price)}c
+                  </span>
                 </TableCell>
                 <TableCell className="text-right">
-                  {pred1d ? (
+                  {prediction ? (
                     <div className="flex flex-col items-end">
                       <span className="font-mono">
-                        {formatPrice(pred1d.predicted_price)}c
+                        {formatPrice(prediction.predicted_price)}c
                       </span>
                       <span
                         className={cn(
                           "text-sm font-semibold flex items-center gap-1",
-                          getProfitColor(pred1d.price_change_percent)
+                          getProfitColor(prediction.price_change_percent)
                         )}
                       >
-                        {pred1d.price_change_percent > 0 ? (
+                        {prediction.price_change_percent > 0 ? (
                           <TrendingUp className="h-3 w-3" />
-                        ) : pred1d.price_change_percent < 0 ? (
+                        ) : prediction.price_change_percent < 0 ? (
                           <TrendingDown className="h-3 w-3" />
                         ) : null}
-                        {formatPercentage(pred1d.price_change_percent)}
-                      </span>
-                    </div>
-                  ) : (
-                    <span className="text-muted-foreground">-</span>
-                  )}
-                </TableCell>
-                <TableCell className="text-right">
-                  {pred3d ? (
-                    <div className="flex flex-col items-end">
-                      <span className="font-mono">
-                        {formatPrice(pred3d.predicted_price)}c
-                      </span>
-                      <span
-                        className={cn(
-                          "text-sm font-semibold flex items-center gap-1",
-                          getProfitColor(pred3d.price_change_percent)
-                        )}
-                      >
-                        {pred3d.price_change_percent > 0 ? (
-                          <TrendingUp className="h-3 w-3" />
-                        ) : pred3d.price_change_percent < 0 ? (
-                          <TrendingDown className="h-3 w-3" />
-                        ) : null}
-                        {formatPercentage(pred3d.price_change_percent)}
-                      </span>
-                    </div>
-                  ) : (
-                    <span className="text-muted-foreground">-</span>
-                  )}
-                </TableCell>
-                <TableCell className="text-right">
-                  {pred7d ? (
-                    <div className="flex flex-col items-end">
-                      <span className="font-mono">
-                        {formatPrice(pred7d.predicted_price)}c
-                      </span>
-                      <span
-                        className={cn(
-                          "text-sm font-semibold flex items-center gap-1",
-                          getProfitColor(pred7d.price_change_percent)
-                        )}
-                      >
-                        {pred7d.price_change_percent > 0 ? (
-                          <TrendingUp className="h-3 w-3" />
-                        ) : pred7d.price_change_percent < 0 ? (
-                          <TrendingDown className="h-3 w-3" />
-                        ) : null}
-                        {formatPercentage(pred7d.price_change_percent)}
+                        {formatPercentage(prediction.price_change_percent)}
                       </span>
                     </div>
                   ) : (
@@ -288,10 +216,11 @@ export const CurrencyTable = memo(function CurrencyTable({
                 </TableCell>
                 <TableCell className="text-right">
                   {(() => {
-                    // Try to find a prediction with price range data (prefer 1d, then 3d, then 7d)
-                    const predictionWithRange = pred1d?.prediction_lower !== undefined && pred1d?.prediction_upper !== undefined ? pred1d :
-                                             pred3d?.prediction_lower !== undefined && pred3d?.prediction_upper !== undefined ? pred3d :
-                                             pred7d?.prediction_lower !== undefined && pred7d?.prediction_upper !== undefined ? pred7d :
+                    // Try to find a prediction with price range data (prefer current timeframe, then others)
+                    const predictionWithRange = prediction?.prediction_lower !== undefined && prediction?.prediction_upper !== undefined ? prediction :
+                                             currency.predictions["1d"]?.prediction_lower !== undefined && currency.predictions["1d"]?.prediction_upper !== undefined ? currency.predictions["1d"] :
+                                             currency.predictions["3d"]?.prediction_lower !== undefined && currency.predictions["3d"]?.prediction_upper !== undefined ? currency.predictions["3d"] :
+                                             currency.predictions["7d"]?.prediction_lower !== undefined && currency.predictions["7d"]?.prediction_upper !== undefined ? currency.predictions["7d"] :
                                              null;
 
                     if (predictionWithRange) {
@@ -305,14 +234,6 @@ export const CurrencyTable = memo(function CurrencyTable({
 
                     return <span className="text-muted-foreground">-</span>;
                   })()}
-                  {/* Debug info for Chaos Orb */}
-                  {currency.currency === "Chaos Orb" && (
-                    <div className="text-xs text-red-500 mt-1">
-                      Debug: 1d=({pred1d?.prediction_lower}, {pred1d?.prediction_upper}) 
-                      3d=({pred3d?.prediction_lower}, {pred3d?.prediction_upper}) 
-                      7d=({pred7d?.prediction_lower}, {pred7d?.prediction_upper})
-                    </div>
-                  )}
                 </TableCell>
                 <TableCell className="text-right">
                   <Badge variant={getConfidenceVariant(currency.average_confidence)}>
@@ -328,4 +249,3 @@ export const CurrencyTable = memo(function CurrencyTable({
     </div>
   );
 });
-
