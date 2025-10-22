@@ -25,6 +25,7 @@ import {
   formatPrice,
   formatPercentage,
   formatConfidence,
+  formatChaosPrice,
   sortCurrencies,
 } from "@/lib/utils";
 import { cn } from "@/lib/utils";
@@ -155,14 +156,14 @@ export const CurrencyTable = memo(function CurrencyTable({
                 {getSortIcon("profit_7d")}
               </Button>
             </TableHead>
-            <TableHead className="text-right">Price Range</TableHead>
-            <TableHead className="text-right">
+            <TableHead>Price Range</TableHead>
+            <TableHead className="text-right w-24">
               <Button
                 variant="ghost"
                 onClick={() => handleSort("average_confidence")}
                 className="h-8 px-2"
               >
-                Avg Confidence
+                Confidence
                 {getSortIcon("average_confidence")}
               </Button>
             </TableHead>
@@ -277,8 +278,8 @@ export const CurrencyTable = memo(function CurrencyTable({
 
                     if (predictionWithRange) {
                       return (
-                        <div className="text-sm text-muted-foreground font-mono flex items-center gap-1">
-                          <span>{formatPrice(predictionWithRange.prediction_lower!)} - {formatPrice(predictionWithRange.prediction_upper!)}</span>
+                        <div className="text-sm text-muted-foreground font-mono flex items-center justify-end gap-1">
+                          <span>{formatChaosPrice(predictionWithRange.prediction_lower!)} - {formatChaosPrice(predictionWithRange.prediction_upper!)}</span>
                           <CurrencyIcon 
                             iconUrl="/images/chaos-orb.png" 
                             currency="Chaos Orb" 

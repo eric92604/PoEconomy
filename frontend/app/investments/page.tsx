@@ -21,19 +21,22 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { TrendingUp, Target, Clock, Search, X } from "lucide-react";
+import { TrendingUp, Target, Clock, Search, X, RefreshCw } from "lucide-react";
 import { useCurrencies, useLeagues, useLatestPredictions } from "@/lib/hooks";
+import { useQueryClient } from "@tanstack/react-query";
 import type { CurrencyWithPredictions, CurrencyFilters } from "@/types";
 import { filterCurrencies, countActiveFilters } from "@/lib/utils";
 import { preloadAllCurrencyIcons, preloadVisibleIcons } from "@/lib/utils/icon-preloader";
 
 export default function InvestmentsPage() {
+  const queryClient = useQueryClient();
   const [selectedLeague, setSelectedLeague] = useState<string>("");
   const [selectedTab, setSelectedTab] = useState<string>("short");
   const [filters, setFilters] = useState<CurrencyFilters>({
     search: "",
     minConfidence: undefined,
     minProfit: undefined,
+    minPrice: undefined,
   });
 
   // Fetch data
@@ -68,6 +71,11 @@ export default function InvestmentsPage() {
     limit: 500, // Increase limit to get more currencies
     enabled: !!selectedLeague, // Only fetch when we have a selected league
   });
+
+  // Manual cache clear function
+  const clearCache = () => {
+    queryClient.invalidateQueries({ queryKey: ["latest-predictions"] });
+  };
 
   // Transform predictions into currency data
   const currenciesWithPredictions = useMemo((): CurrencyWithPredictions[] => {
@@ -144,11 +152,19 @@ export default function InvestmentsPage() {
     }));
   };
 
+  const handlePriceChange = (value: number[]) => {
+    setFilters((prev) => ({
+      ...prev,
+      minPrice: value[0] === 0 ? undefined : value[0],
+    }));
+  };
+
   const clearFilters = () => {
     setFilters({
       search: "",
       minConfidence: undefined,
       minProfit: undefined,
+      minPrice: undefined,
     });
   };
 
@@ -179,9 +195,20 @@ export default function InvestmentsPage() {
 
   return (
     <div className="py-8 space-y-8">
-      {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Investment Opportunities</h1>
+      {/* Header with Refresh Button */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold">Investment Opportunities</h1>
+        </div>
+        <Button 
+          onClick={clearCache}
+          variant="outline"
+          size="sm"
+          className="flex items-center gap-2"
+        >
+          <RefreshCw className="h-4 w-4" />
+          Refresh
+        </Button>
       </div>
 
       {/* Stats */}
@@ -253,7 +280,6 @@ export default function InvestmentsPage() {
               <div className="flex items-center justify-between">
                 <div>
                   <CardTitle>Filters</CardTitle>
-                  <CardDescription>Refine your search</CardDescription>
                 </div>
                 {activeFilterCount > 0 && (
                   <Button variant="ghost" size="sm" onClick={clearFilters}>
@@ -296,30 +322,30 @@ export default function InvestmentsPage() {
                 </div>
               </div>
 
-              {/* Min Confidence Slider */}
+              {/* Price Slider */}
               <div className="space-y-2">
-                <Label>Min Confidence</Label>
+                <Label>Price</Label>
                 <div className="space-y-2">
                   <Slider
-                    value={[filters.minConfidence ? Math.round(filters.minConfidence * 100) : 0]}
-                    onValueChange={handleConfidenceChange}
-                    max={100}
-                    step={5}
+                    value={[filters.minPrice || 0]}
+                    onValueChange={handlePriceChange}
+                    max={1000}
+                    step={10}
                     className="w-full"
                   />
                   <div className="flex justify-between text-sm text-muted-foreground">
-                    <span>0%</span>
+                    <span>0</span>
                     <span className="font-medium">
-                      {filters.minConfidence ? `${Math.round(filters.minConfidence * 100)}%` : "Any"}
+                      {filters.minPrice ? `${filters.minPrice}` : "Any"}
                     </span>
-                    <span>100%</span>
+                    <span>1000</span>
                   </div>
                 </div>
               </div>
 
-              {/* Min Profit Slider */}
+              {/* Profit Slider */}
               <div className="space-y-2">
-                <Label>Min Profit</Label>
+                <Label>Profit</Label>
                 <div className="space-y-2">
                   <Slider
                     value={[filters.minProfit || 0]}
@@ -334,6 +360,27 @@ export default function InvestmentsPage() {
                       {filters.minProfit ? `${filters.minProfit}%` : "Any"}
                     </span>
                     <span>200%</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Confidence Slider */}
+              <div className="space-y-2">
+                <Label>Confidence</Label>
+                <div className="space-y-2">
+                  <Slider
+                    value={[filters.minConfidence ? Math.round(filters.minConfidence * 100) : 0]}
+                    onValueChange={handleConfidenceChange}
+                    max={100}
+                    step={5}
+                    className="w-full"
+                  />
+                  <div className="flex justify-between text-sm text-muted-foreground">
+                    <span>0%</span>
+                    <span className="font-medium">
+                      {filters.minConfidence ? `${Math.round(filters.minConfidence * 100)}%` : "Any"}
+                    </span>
+                    <span>100%</span>
                   </div>
                 </div>
               </div>

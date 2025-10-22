@@ -10,6 +10,16 @@ export function formatPrice(price: number, decimals = 2): string {
 }
 
 /**
+ * Format a chaos price with "k" for thousands (same as ChaosPrice component)
+ */
+export function formatChaosPrice(price: number): string {
+  if (price >= 1000) {
+    return (price / 1000).toFixed(1) + 'k';
+  }
+  return price.toFixed(2);
+}
+
+/**
  * Format a percentage with sign
  */
 export function formatPercentage(value: number, decimals = 2, includeSign = true): string {

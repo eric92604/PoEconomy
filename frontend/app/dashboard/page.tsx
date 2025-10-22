@@ -17,10 +17,11 @@ import {
   Target,
   ArrowRight,
   BarChart3,
+  RefreshCw,
 } from "lucide-react";
 import { useCurrencies, useLeagues, useLatestPredictions } from "@/lib/hooks";
 import { useQueryClient } from "@tanstack/react-query";
-import { formatPrice, formatPercentage, formatConfidence } from "@/lib/utils";
+import { formatPrice, formatPercentage, formatConfidence, formatChaosPrice } from "@/lib/utils";
 import { CurrencyIcon } from "@/components/currency/currency-icon";
 import { ChaosPrice } from "@/components/currency/chaos-price";
 import { preloadAllCurrencyIcons } from "@/lib/utils/icon-preloader";
@@ -70,19 +71,6 @@ export default function DashboardPage() {
       };
     }
 
-    // Debug: Log the raw data structure
-    console.log("🔍 Full API response:", predictionsData);
-    console.log("🔍 Predictions structure:", {
-      totalCurrencies: Object.keys(predictionsData.predictions).length,
-      sampleCurrencies: Object.keys(predictionsData.predictions).slice(0, 5),
-      sampleData: Object.entries(predictionsData.predictions).slice(0, 3).map(([currency, horizonData]) => ({
-        currency,
-        has1d: !!horizonData["1d"],
-        horizons: Object.keys(horizonData),
-        prediction: horizonData["1d"]
-      })),
-      metadata: predictionsData.metadata
-    });
 
     // Convert latest predictions data to dashboard format
     const currencies: CurrencyWithPredictions[] = Object.entries(predictionsData.predictions).map(([currency, horizonData]) => {
@@ -112,15 +100,6 @@ export default function DashboardPage() {
       };
     }).filter(Boolean) as CurrencyWithPredictions[];
 
-    // Debug: Log processed currencies
-    console.log("🔍 Processed currencies:", {
-      totalProcessed: currencies.length,
-      sampleProcessed: currencies.slice(0, 3).map(c => ({
-        currency: c.currency,
-        hasPrediction: !!c.predictions["1d"],
-        priceChange: c.predictions["1d"]?.price_change_percent
-      }))
-    });
 
     // Data is already sorted by profit from the API (highest first)
     const sortedByProfit = [...currencies].sort(
@@ -149,22 +128,25 @@ export default function DashboardPage() {
   // Manual cache clear function for testing
   const clearCache = () => {
     queryClient.invalidateQueries({ queryKey: ["latest-predictions"] });
-    console.log("🔄 Manually cleared predictions cache");
   };
 
   return (
     <div className="py-8 space-y-8">
-      {/* Debug Controls */}
-      <div className="flex gap-2 mb-4">
-        <button 
-          onClick={clearCache}
-          className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-        >
-          Refresh Data
-        </button>
-        <div className="text-sm text-gray-600">
-          Total Currencies in Response: {predictionsData?.predictions ? Object.keys(predictionsData.predictions).length : 0}
+      {/* Header with Refresh Button */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold">Dashboard</h1>
+          <p className="text-muted-foreground">Market overview and key metrics</p>
         </div>
+        <Button 
+          onClick={clearCache}
+          variant="outline"
+          size="sm"
+          className="flex items-center gap-2"
+        >
+          <RefreshCw className="h-4 w-4" />
+          Refresh
+        </Button>
       </div>
 
       {/* Stats Cards */}
@@ -277,7 +259,7 @@ export default function DashboardPage() {
               ))}
             </div>
           ) : stats.topGainers.length > 0 ? (
-            <div className="space-y-4">
+            <div className="space-y-2">
               {stats.topGainers.map((currency, index) => (
                 <div
                   key={currency.currency}
@@ -309,7 +291,7 @@ export default function DashboardPage() {
                         if (prediction?.prediction_lower !== undefined && prediction?.prediction_upper !== undefined) {
                           return (
                             <>
-                              <span>{formatPrice(prediction.prediction_lower)} - {formatPrice(prediction.prediction_upper)}</span>
+                              <span>{formatChaosPrice(prediction.prediction_lower)} - {formatChaosPrice(prediction.prediction_upper)}</span>
                               <CurrencyIcon 
                                 iconUrl="/images/chaos-orb.png" 
                                 currency="Chaos Orb" 
