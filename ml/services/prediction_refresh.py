@@ -160,23 +160,29 @@ class DirectModelPredictor(ModelPredictor):
         
         # Log details about discovered models for debugging
         for currency, bundle in registry.items():
-            self.logger.debug(f"Currency '{currency}': primary={bundle.primary is not None}, horizons={list(bundle.horizons.keys())}")
+            self.logger.info(f"Currency '{currency}': primary={bundle.primary is not None}, horizons={list(bundle.horizons.keys())}")
+            # Log detailed information about each horizon model
+            for horizon, artifact in bundle.horizons.items():
+                self.logger.info(f"  Horizon '{horizon}': {artifact.model_dir}")
         
         return registry
     
     def _select_model(self, currency: str, horizon: str) -> Optional[DirectModelArtifact]:
         """Select the appropriate model artifact for the given currency and horizon."""
-        self.logger.debug(f"Selecting model for {currency} with horizon {horizon}")
+        self.logger.info(f"Selecting model for {currency} with horizon {horizon}")
         
         # Try exact currency name first
         bundle = self.model_registry.get(currency)
-        self.logger.debug(f"Bundle for exact currency '{currency}': {bundle is not None}")
+        self.logger.info(f"Bundle for exact currency '{currency}': {bundle is not None}")
+        
+        if bundle:
+            self.logger.info(f"Found bundle for {currency}: primary={bundle.primary is not None}, horizons={list(bundle.horizons.keys())}")
         
         # If not found, try with horizon suffix (for models named like "Currency_1d")
         if not bundle:
             currency_with_horizon = f"{currency}_{horizon}"
             bundle = self.model_registry.get(currency_with_horizon)
-            self.logger.debug(f"Bundle for currency with horizon '{currency_with_horizon}': {bundle is not None}")
+            self.logger.info(f"Bundle for currency with horizon '{currency_with_horizon}': {bundle is not None}")
             if bundle:
                 # If we found a bundle with horizon suffix, return the primary model
                 self.logger.info(f"Found model for {currency} using key {currency_with_horizon}")
@@ -518,8 +524,8 @@ def _write_predictions(
         with table.batch_writer(overwrite_by_pkeys=key_names) as batch:
             for result in predictions:
                 try:
-                    # Create the primary key for DynamoDB
-                    currency_league = f"{result.currency}#{result.league}"
+                    # Create the primary key for DynamoDB - include horizon to ensure unique records per horizon
+                    currency_league_horizon = f"{result.currency}#{result.league}#{result.horizon}"
                     
                     # Get the base payload from the result
                     payload = result.to_dict()
@@ -549,7 +555,7 @@ def _write_predictions(
                             return None
                     
                     item = {
-                        "currency_league": currency_league,  # Primary key (partition key)
+                        "currency_league_horizon": currency_league_horizon,  # Primary key (partition key) - includes horizon
                         "timestamp": timestamp_epoch,  # Sort key (epoch seconds)
                         "horizon": result.horizon,  # Additional field for filtering
                         "currency": result.currency,
@@ -706,6 +712,7 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
         
         for currency in target_currencies:
             for horizon in options.horizons:
+                logger.info(f"Processing {currency} for horizon {horizon}")
                 try:
                     # Pre-validate model availability to provide better error messages
                     available_currencies = predictor.list_available_currencies()
@@ -714,6 +721,7 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
                         failed_predictions += 1
                         continue
                     
+                    logger.info(f"Attempting to generate prediction for {currency} ({horizon})")
                     prediction = predictor.predict_currency(
                         currency=currency,
                         horizon=horizon,
@@ -721,6 +729,9 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
                     )
                     
                     # Validate prediction result with more robust checks
+                    if prediction is not None:
+                        logger.info(f"Prediction generated for {currency} ({horizon}): {prediction.predicted_price if hasattr(prediction, 'predicted_price') else 'N/A'}")
+                    
                     if (prediction and 
                         hasattr(prediction, 'currency') and 
                         hasattr(prediction, 'league') and
@@ -733,7 +744,7 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
                         prediction.current_price > 0 and  # Ensure positive current price
                         prediction.predicted_price > 0):  # Ensure positive predicted price
                         predictions.append(prediction)
-                        logger.debug(f"Successfully generated prediction for {currency} ({horizon})")
+                        logger.info(f"Successfully generated prediction for {currency} ({horizon})")
                     else:
                         # Log more detailed information about why the prediction failed
                         failure_reasons = []

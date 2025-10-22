@@ -25,7 +25,7 @@ Resources:
       TableName: !Sub 'poeconomy-${EnvironmentName}-predictions'
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - AttributeName: currency_league
+        - AttributeName: currency_league_horizon
           AttributeType: S
         - AttributeName: timestamp
           AttributeType: N
@@ -34,7 +34,7 @@ Resources:
         - AttributeName: horizon
           AttributeType: S
       KeySchema:
-        - AttributeName: currency_league
+        - AttributeName: currency_league_horizon
           KeyType: HASH
         - AttributeName: timestamp
           KeyType: RANGE
