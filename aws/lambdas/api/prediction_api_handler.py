@@ -519,10 +519,10 @@ def _fetch_cached_prediction(currency: str, league: Optional[str], horizon: str)
     except Exception as e:
         LOGGER.warning(f"GSI query failed, falling back to main table query: {e}")
         # Fallback to original query method if GSI is not available yet
-        currency_league = f"{currency}#{league_value}"
+        # Use new key structure that includes horizon
+        currency_league_horizon = f"{currency}#{league_value}#{horizon}"
         response = _PREDICTIONS_TABLE.query(
-            KeyConditionExpression=Key("currency_league").eq(currency_league),
-            FilterExpression=Key("horizon").eq(horizon),
+            KeyConditionExpression=Key("currency_league_horizon").eq(currency_league_horizon),
             ScanIndexForward=False,
             Limit=1
         )

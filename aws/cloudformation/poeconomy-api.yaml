@@ -586,6 +586,7 @@ Resources:
   # Usage Plan for rate limiting and quotas
   UsagePlan:
     Type: AWS::ApiGateway::UsagePlan
+    DependsOn: ApiGatewayDeployment
     Properties:
       UsagePlanName: !Sub 'poeconomy-${EnvironmentName}-usage-plan'
       Description: 'Usage plan for PoEconomy API with rate limiting'
@@ -602,6 +603,7 @@ Resources:
   # Link external API Key to Usage Plan
   ApiKeyUsagePlan:
     Type: AWS::ApiGateway::UsagePlanKey
+    DependsOn: UsagePlan
     Properties:
       KeyId: "16rsyury4g"  # External API key ID
       KeyType: API_KEY
