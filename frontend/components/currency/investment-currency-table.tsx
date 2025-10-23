@@ -4,7 +4,7 @@
  * Investment Currency Table - Shows only relevant profit column for selected timeframe
  */
 
-import { useState, useMemo, useCallback, memo } from "react";
+import React, { useState, useMemo, useCallback, memo } from "react";
 import {
   Table,
   TableBody,
@@ -37,6 +37,7 @@ interface InvestmentCurrencyTableProps {
   onSelectCurrency?: (currency: CurrencyWithPredictions) => void;
   selectedCurrency?: string;
   timeframe: "1d" | "3d" | "7d";
+  expandedContent?: React.ReactNode;
 }
 
 export const InvestmentCurrencyTable = memo(function InvestmentCurrencyTable({
@@ -44,6 +45,7 @@ export const InvestmentCurrencyTable = memo(function InvestmentCurrencyTable({
   onSelectCurrency,
   selectedCurrency,
   timeframe,
+  expandedContent,
 }: InvestmentCurrencyTableProps) {
   const [sortField, setSortField] = useState<CurrencySortField>("profit_1d");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
@@ -150,85 +152,96 @@ export const InvestmentCurrencyTable = memo(function InvestmentCurrencyTable({
         <TableBody>
           {sortedCurrencies.map((currency: CurrencyWithPredictions) => {
             const prediction = currency.predictions[timeframe];
+            const isExpanded = selectedCurrency === currency.currency;
 
             return (
-              <TableRow
-                key={`${currency.currency}-${currency.league}`}
-                className={cn(
-                  "cursor-pointer hover:bg-muted/50",
-                  selectedCurrency === currency.currency && "bg-muted"
-                )}
-                onClick={() => onSelectCurrency?.(currency)}
-              >
-                <TableCell>
-                  <div className="flex items-center gap-3">
-                    <CurrencyIcon
-                      iconUrl={currency.icon_url}
-                      currency={currency.currency}
-                      size="sm"
-                    />
-                    <div>
-                      <div className="font-medium">{currency.currency}</div>
-                      <div className="text-sm text-muted-foreground">{currency.league}</div>
-                    </div>
-                  </div>
-                </TableCell>
-                <TableCell className="text-right">
-                  <ChaosPrice price={currency.current_price} />
-                </TableCell>
-                <TableCell className="text-right">
-                  {prediction ? (
-                    <div className="flex flex-col items-end">
-                      <ChaosPrice price={prediction.predicted_price} />
-                      <span
-                        className={cn(
-                          "text-sm font-semibold flex items-center gap-1",
-                          getProfitColor(prediction.price_change_percent)
-                        )}
-                      >
-                        {prediction.price_change_percent > 0 ? (
-                          <TrendingUp className="h-3 w-3" />
-                        ) : prediction.price_change_percent < 0 ? (
-                          <TrendingDown className="h-3 w-3" />
-                        ) : null}
-                        {formatPercentage(prediction.price_change_percent)}
-                      </span>
-                    </div>
-                  ) : (
-                    <span className="text-muted-foreground">-</span>
+              <React.Fragment key={`${currency.currency}-${currency.league}`}>
+                <TableRow
+                  className={cn(
+                    "cursor-pointer hover:bg-muted/50 transition-colors",
+                    isExpanded && "bg-muted"
                   )}
-                </TableCell>
-                <TableCell className="text-right">
-                  {(() => {
-                    // Try to find a prediction with price range data (prefer current timeframe, then others)
-                    const predictionWithRange = prediction?.prediction_lower !== undefined && prediction?.prediction_upper !== undefined ? prediction :
-                                             currency.predictions["1d"]?.prediction_lower !== undefined && currency.predictions["1d"]?.prediction_upper !== undefined ? currency.predictions["1d"] :
-                                             currency.predictions["3d"]?.prediction_lower !== undefined && currency.predictions["3d"]?.prediction_upper !== undefined ? currency.predictions["3d"] :
-                                             currency.predictions["7d"]?.prediction_lower !== undefined && currency.predictions["7d"]?.prediction_upper !== undefined ? currency.predictions["7d"] :
-                                             null;
+                  onClick={() => onSelectCurrency?.(isExpanded ? null as any : currency)}
+                >
+                  <TableCell>
+                    <div className="flex items-center gap-3">
+                      <CurrencyIcon
+                        iconUrl={currency.icon_url}
+                        currency={currency.currency}
+                        size="sm"
+                      />
+                      <div>
+                        <div className="font-medium">{currency.currency}</div>
+                        <div className="text-sm text-muted-foreground">{currency.league}</div>
+                      </div>
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <ChaosPrice price={currency.current_price} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {prediction ? (
+                      <div className="flex flex-col items-end">
+                        <ChaosPrice price={prediction.predicted_price} />
+                        <span
+                          className={cn(
+                            "text-sm font-semibold flex items-center gap-1",
+                            getProfitColor(prediction.price_change_percent)
+                          )}
+                        >
+                          {prediction.price_change_percent > 0 ? (
+                            <TrendingUp className="h-3 w-3" />
+                          ) : prediction.price_change_percent < 0 ? (
+                            <TrendingDown className="h-3 w-3" />
+                          ) : null}
+                          {formatPercentage(prediction.price_change_percent)}
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-muted-foreground">-</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {(() => {
+                      // Try to find a prediction with price range data (prefer current timeframe, then others)
+                      const predictionWithRange = prediction?.prediction_lower !== undefined && prediction?.prediction_upper !== undefined ? prediction :
+                                               currency.predictions["1d"]?.prediction_lower !== undefined && currency.predictions["1d"]?.prediction_upper !== undefined ? currency.predictions["1d"] :
+                                               currency.predictions["3d"]?.prediction_lower !== undefined && currency.predictions["3d"]?.prediction_upper !== undefined ? currency.predictions["3d"] :
+                                               currency.predictions["7d"]?.prediction_lower !== undefined && currency.predictions["7d"]?.prediction_upper !== undefined ? currency.predictions["7d"] :
+                                               null;
 
-                    if (predictionWithRange) {
-                      return (
-                        <div className="text-sm text-muted-foreground font-mono flex items-center justify-end gap-1">
-                          <span>{formatChaosPrice(predictionWithRange.prediction_lower!)} - {formatChaosPrice(predictionWithRange.prediction_upper!)}</span>
-                          <CurrencyIcon 
-                            iconUrl="/images/chaos-orb.png" 
-                            currency="Chaos Orb" 
-                            size="sm" 
-                          />
-                        </div>
-                      );
-                    }
+                      if (predictionWithRange) {
+                        return (
+                          <div className="text-sm text-muted-foreground font-mono flex items-center justify-end gap-1">
+                            <span>{formatChaosPrice(predictionWithRange.prediction_lower!)} - {formatChaosPrice(predictionWithRange.prediction_upper!)}</span>
+                            <CurrencyIcon 
+                              iconUrl="/images/chaos-orb.png" 
+                              currency="Chaos Orb" 
+                              size="sm" 
+                            />
+                          </div>
+                        );
+                      }
 
-                    return <span className="text-muted-foreground">-</span>;
-                  })()}
-                </TableCell>
-                <TableCell className="text-right">
-                  <Badge variant={getConfidenceVariant(currency.average_confidence)}>
-                    {formatConfidence(currency.average_confidence)}
-                  </Badge>
-                </TableCell>
-              </TableRow>
+                      return <span className="text-muted-foreground">-</span>;
+                    })()}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Badge variant={getConfidenceVariant(currency.average_confidence)}>
+                      {formatConfidence(currency.average_confidence)}
+                    </Badge>
+                  </TableCell>
+                </TableRow>
+                {isExpanded && expandedContent && (
+                  <TableRow>
+                    <TableCell colSpan={5} className="p-0">
+                      <div className="animate-in slide-in-from-top-2 duration-300">
+                        {expandedContent}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )}
+              </React.Fragment>
             );
           })}
         </TableBody>

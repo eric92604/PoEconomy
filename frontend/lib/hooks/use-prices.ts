@@ -13,7 +13,7 @@ import type { HistoricalPricesResponse } from "@/lib/api/prices";
 export const priceKeys = {
   all: ["prices"] as const,
   live: (params: LivePricesParams) => [...priceKeys.all, "live", params] as const,
-  historical: (params: { currency: string; league: string; start_date: string; end_date?: string; limit?: number }) => 
+  historical: (params: { currency: string; league: string; start_date?: string; end_date?: string; limit?: number }) => 
     [...priceKeys.all, "historical", params] as const,
 };
 

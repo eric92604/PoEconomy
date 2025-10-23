@@ -5,6 +5,7 @@
  */
 
 import { useState, useMemo, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { InvestmentCurrencyTable } from "@/components/currency/investment-currency-table";
 import { CurrencyTableSkeleton } from "@/components/currency/currency-table-skeleton";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -22,16 +23,24 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { TrendingUp, Target, Clock, Search, X, RefreshCw } from "lucide-react";
-import { useCurrencies, useLeagues, useLatestPredictions } from "@/lib/hooks";
+import { useCurrencies, useLeagues, useLatestPredictions, useHistoricalPrices, useBatchPredictions } from "@/lib/hooks";
 import { useQueryClient } from "@tanstack/react-query";
-import type { CurrencyWithPredictions, CurrencyFilters } from "@/types";
+import type { CurrencyWithPredictions, CurrencyFilters, ChartDataPoint } from "@/types";
 import { filterCurrencies, countActiveFilters } from "@/lib/utils";
 import { preloadAllCurrencyIcons, preloadVisibleIcons } from "@/lib/utils/icon-preloader";
+import { PriceChart } from "@/components/charts";
 
 export default function InvestmentsPage() {
+  const router = useRouter();
   const queryClient = useQueryClient();
   const [selectedLeague, setSelectedLeague] = useState<string>("");
   const [selectedTab, setSelectedTab] = useState<string>("short");
+  const [selectedCurrencyForChart, setSelectedCurrencyForChart] = useState<CurrencyWithPredictions | null>(null);
+
+  // Handle currency selection toggle
+  const handleCurrencySelect = (currency: CurrencyWithPredictions | null) => {
+    setSelectedCurrencyForChart(currency);
+  };
   const [filters, setFilters] = useState<CurrencyFilters>({
     search: "",
     minConfidence: undefined,
@@ -76,6 +85,88 @@ export default function InvestmentsPage() {
   const clearCache = () => {
     queryClient.invalidateQueries({ queryKey: ["latest-predictions"] });
   };
+
+  // Fetch historical prices for selected currency in dialog
+  const { data: historicalData } = useHistoricalPrices(
+    {
+      currency: selectedCurrencyForChart?.currency || "",
+      league: selectedCurrencyForChart?.league || "",
+      limit: 1000,
+    },
+    !!selectedCurrencyForChart
+  );
+
+  // Fetch predictions for selected currency in dialog
+  const { data: batchPredictionsData } = useBatchPredictions(
+    {
+      requests: [
+        { currency: selectedCurrencyForChart?.currency || "", league: selectedCurrencyForChart?.league || "", horizon: "1d" },
+        { currency: selectedCurrencyForChart?.currency || "", league: selectedCurrencyForChart?.league || "", horizon: "3d" },
+        { currency: selectedCurrencyForChart?.currency || "", league: selectedCurrencyForChart?.league || "", horizon: "7d" },
+      ],
+    },
+    !!selectedCurrencyForChart
+  );
+
+  // Prepare chart data
+  const chartData = useMemo((): ChartDataPoint[] => {
+    if (!historicalData?.prices || !batchPredictionsData?.results) return [];
+
+    const data: ChartDataPoint[] = [];
+
+    // Helper function to normalize dates to midnight UTC
+    const normalizeToMidnightUTC = (dateString: string): Date => {
+      const date = new Date(dateString);
+      return new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+    };
+
+    // Add all historical data
+    historicalData.prices.forEach((price) => {
+      const date = normalizeToMidnightUTC(price.date);
+      const timestamp = date.getTime();
+      data.push({
+        timestamp,
+        date,
+        price: price.avg_price,
+        confidence: undefined,
+        predicted: false,
+      });
+    });
+
+    // Add predictions from batch response
+    const predictionHorizons = [
+      { horizon: "1d", days: 1 },
+      { horizon: "3d", days: 3 },
+      { horizon: "7d", days: 7 },
+    ];
+
+    predictionHorizons.forEach(({ horizon, days }) => {
+      const prediction = batchPredictionsData.results.find(
+        (p) => p.horizon === horizon && p.currency === selectedCurrencyForChart?.currency
+      );
+      if (prediction && prediction.timestamp) {
+        // Use the prediction timestamp (when it was generated) as the base date
+        const predictionGeneratedDate = normalizeToMidnightUTC(prediction.timestamp);
+        
+        // Add the horizon days to get the actual predicted date
+        const predictedDate = new Date(predictionGeneratedDate);
+        predictedDate.setUTCDate(predictedDate.getUTCDate() + days);
+        const predictedTimestamp = predictedDate.getTime();
+        
+        data.push({
+          timestamp: predictedTimestamp,
+          date: predictedDate,
+          price: prediction.predicted_price,
+          confidence: prediction.confidence,
+          predicted: true,
+          prediction_lower: prediction.prediction_lower,
+          prediction_upper: prediction.prediction_upper,
+        });
+      }
+    });
+
+    return data.sort((a, b) => a.timestamp - b.timestamp);
+  }, [historicalData, batchPredictionsData, selectedCurrencyForChart]);
 
   // Transform predictions into currency data
   const currenciesWithPredictions = useMemo((): CurrencyWithPredictions[] => {
@@ -444,7 +535,22 @@ export default function InvestmentsPage() {
           {isLoading ? (
             <CurrencyTableSkeleton />
           ) : (
-            <InvestmentCurrencyTable currencies={filteredCurrencies} timeframe="1d" />
+            <InvestmentCurrencyTable 
+              currencies={filteredCurrencies} 
+              timeframe="1d"
+              onSelectCurrency={handleCurrencySelect}
+              selectedCurrency={selectedCurrencyForChart?.currency}
+              expandedContent={selectedCurrencyForChart ? (
+                <div className="p-6 bg-muted/30">
+                  <PriceChart
+                    data={chartData}
+                    currencyName={selectedCurrencyForChart.currency}
+                    timeRange="30d"
+                    showPredictionBands={true}
+                  />
+                </div>
+              ) : undefined}
+            />
           )}
         </TabsContent>
 
@@ -463,7 +569,22 @@ export default function InvestmentsPage() {
           {isLoading ? (
             <CurrencyTableSkeleton />
           ) : (
-            <InvestmentCurrencyTable currencies={filteredCurrencies} timeframe="3d" />
+            <InvestmentCurrencyTable 
+              currencies={filteredCurrencies} 
+              timeframe="3d"
+              onSelectCurrency={handleCurrencySelect}
+              selectedCurrency={selectedCurrencyForChart?.currency}
+              expandedContent={selectedCurrencyForChart ? (
+                <div className="p-6 bg-muted/30">
+                  <PriceChart
+                    data={chartData}
+                    currencyName={selectedCurrencyForChart.currency}
+                    timeRange="30d"
+                    showPredictionBands={true}
+                  />
+                </div>
+              ) : undefined}
+            />
           )}
         </TabsContent>
 
@@ -482,12 +603,28 @@ export default function InvestmentsPage() {
           {isLoading ? (
             <CurrencyTableSkeleton />
           ) : (
-            <InvestmentCurrencyTable currencies={filteredCurrencies} timeframe="7d" />
+            <InvestmentCurrencyTable 
+              currencies={filteredCurrencies} 
+              timeframe="7d"
+              onSelectCurrency={handleCurrencySelect}
+              selectedCurrency={selectedCurrencyForChart?.currency}
+              expandedContent={selectedCurrencyForChart ? (
+                <div className="p-6 bg-muted/30">
+                  <PriceChart
+                    data={chartData}
+                    currencyName={selectedCurrencyForChart.currency}
+                    timeRange="30d"
+                    showPredictionBands={true}
+                  />
+                </div>
+              ) : undefined}
+            />
           )}
         </TabsContent>
         </Tabs>
         </div>
       </div>
+
     </div>
   );
 }
