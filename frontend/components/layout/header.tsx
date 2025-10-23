@@ -16,7 +16,6 @@ const navigation = [
   { name: "Dashboard", href: "/dashboard" },
   { name: "Investments", href: "/investments" },
   { name: "Live Prices", href: "/prices" },
-  { name: "Contact", href: "mailto:contact@poeconomy.com" },
 ];
 
 export function Header() {
