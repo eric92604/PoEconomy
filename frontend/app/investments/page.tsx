@@ -226,7 +226,10 @@ export default function InvestmentsPage() {
               <div className="text-2xl font-bold">-</div>
             ) : (
               <div className="text-2xl font-bold">
-                {currenciesWithPredictions.filter((c) => c.predictions["1d"]).length}
+                {currenciesWithPredictions.filter((c) => {
+                  const prediction = c.predictions["1d"];
+                  return prediction && prediction.price_change_percent > 0;
+                }).length}
               </div>
             )}
             <p className="text-xs text-muted-foreground mt-1">
@@ -245,7 +248,10 @@ export default function InvestmentsPage() {
               <div className="text-2xl font-bold">-</div>
             ) : (
               <div className="text-2xl font-bold">
-                {currenciesWithPredictions.filter((c) => c.predictions["3d"]).length}
+                {currenciesWithPredictions.filter((c) => {
+                  const prediction = c.predictions["3d"];
+                  return prediction && prediction.price_change_percent > 0;
+                }).length}
               </div>
             )}
             <p className="text-xs text-muted-foreground mt-1">
@@ -264,7 +270,10 @@ export default function InvestmentsPage() {
               <div className="text-2xl font-bold">-</div>
             ) : (
               <div className="text-2xl font-bold">
-                {currenciesWithPredictions.filter((c) => c.predictions["7d"]).length}
+                {currenciesWithPredictions.filter((c) => {
+                  const prediction = c.predictions["7d"];
+                  return prediction && prediction.price_change_percent > 0;
+                }).length}
               </div>
             )}
             <p className="text-xs text-muted-foreground mt-1">

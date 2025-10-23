@@ -22,6 +22,7 @@ export const CURRENCY_ICON_MAP: Record<string, string> = {
   "echo_of_trauma": "/images/currency/echo_of_trauma.avif",
   "awakener's_orb": "/images/currency/awakener_s_orb.avif",
   "facetor's_lens": "/images/currency/facetor_s_lens.avif",
+  "vial_of_the_ghost": "/images/currency/vial_of_the_ghost.avif",
   "echo_of_reverence": "/images/currency/echo_of_reverence.avif",
   "omen_of_refreshment": "/images/currency/omen_of_refreshment.avif",
   "gift_to_the_goddess": "/images/currency/gift_to_the_goddess.avif",
@@ -99,7 +100,6 @@ export const CURRENCY_ICON_MAP: Record<string, string> = {
   "tainted_catalyst": "/images/currency/tainted_catalyst.avif",
   "blacksmith's_whetstone": "/images/currency/blacksmith_s_whetstone.avif",
   "delirious_scouting_report": "/images/currency/delirious_scouting_report.avif",
-  "vial_of_the_ghost": "/images/currency/vial_of_the_ghost.avif",
   "chromatic_orb": "/images/currency/chromatic_orb.avif",
   "tattoo_of_the_valako_stormrider": "/images/currency/tattoo_of_the_valako_stormrider.avif",
   "tainted_divine_teardrop": "/images/currency/tainted_divine_teardrop.avif",
@@ -255,6 +255,7 @@ export const CURRENCY_ICON_MAP: Record<string, string> = {
   "tul's_breachstone": "/images/currency/tul_s_breachstone.avif",
   "devouring_fragment": "/images/currency/devouring_fragment.avif",
   "second_piece_of_brutality": "/images/currency/second_piece_of_brutality.avif",
+  "imprint": "/images/currency/imprint.avif",
   "orb_of_alteration": "/images/currency/orb_of_alteration.avif",
   "tattoo_of_the_arohongui_moonwarden": "/images/currency/tattoo_of_the_arohongui_moonwarden.avif",
   "omen_of_death-dancing": "/images/currency/omen_of_death_dancing.avif",
@@ -279,8 +280,7 @@ export const CURRENCY_ICON_MAP: Record<string, string> = {
   "vial_of_summoning": "/images/currency/vial_of_summoning.avif",
   "redeemer's_exalted_orb": "/images/currency/redeemer_s_exalted_orb.avif",
   "tattoo_of_the_kitava_heart_eater": "/images/currency/tattoo_of_the_kitava_heart_eater.avif",
-  "runegraft_of_recompense": "/images/currency/runegraft_of_recompense.avif",
-  "imprint": "/images/currency/imprint.avif"
+  "runegraft_of_recompense": "/images/currency/runegraft_of_recompense.avif"
 };
 
 export function getCurrencyIconPath(currencyName: string): string | undefined {
