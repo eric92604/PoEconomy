@@ -28,9 +28,6 @@ export default function Home() {
               <Link href="/investments">Explore Investments</Link>
             </Button>
           </div>
-          <div className="text-sm text-muted-foreground">
-            Questions? <a href="mailto:contact@poeconomy.com" className="text-primary hover:underline">contact@poeconomy.com</a>
-          </div>
         </div>
       </section>
 
