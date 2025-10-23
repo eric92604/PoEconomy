@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Prices Page - Live currency prices with auto-refresh
+ * Prices Page - Live currency prices with interactive historical charts
  */
 
 import { useState, useMemo, useEffect } from "react";
@@ -26,17 +26,22 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Search, RefreshCw, TrendingUp, TrendingDown } from "lucide-react";
-import { useLeagues, useLivePricesWithRefresh } from "@/lib/hooks";
+import { Search, RefreshCw, TrendingUp, TrendingDown, BarChart3 } from "lucide-react";
+import { useLeagues, useLivePricesWithRefresh, useHistoricalPrices, useLatestPredictions } from "@/lib/hooks";
 import { useQueryClient } from "@tanstack/react-query";
+import { PriceChart } from "@/components/charts";
 import { formatPrice, formatRelativeTime } from "@/lib/utils";
 import { cn } from "@/lib/utils";
+import type { ChartDataPoint } from "@/types";
 
 export default function PricesPage() {
   const queryClient = useQueryClient();
   const [selectedLeague, setSelectedLeague] = useState<string>("");
   const [searchTerm, setSearchTerm] = useState("");
   const [timeRange, setTimeRange] = useState("24");
+  const [selectedCurrency, setSelectedCurrency] = useState<string>("Divine Orb");
+  const [showChart, setShowChart] = useState(false);
+  const [chartTimeRange, setChartTimeRange] = useState("30d");
 
   // Fetch leagues
   const { data: leaguesData, isLoading: leaguesLoading } = useLeagues();
@@ -62,6 +67,24 @@ export default function PricesPage() {
       limit: 1000,
     },
     5 * 60 * 1000 // Refresh every 5 minutes
+  );
+
+  // Fetch predictions for the selected currency
+  const { data: predictionsData, isLoading: predictionsLoading } = useLatestPredictions({
+    league: selectedLeague || undefined,
+    horizons: ["1d", "3d", "7d"],
+    limit: 500,
+    enabled: !!selectedLeague && showChart,
+  });
+
+  // Fetch historical prices for the selected currency (no date filtering - get all available data)
+  const { data: historicalData, isLoading: historicalLoading } = useHistoricalPrices(
+    {
+      currency: selectedCurrency,
+      league: selectedLeague,
+      limit: 1000, // Get more data points
+    },
+    showChart && !!selectedCurrency && !!selectedLeague
   );
 
   // Group prices by currency and get latest
@@ -119,12 +142,63 @@ export default function PricesPage() {
     });
   }, [filteredPrices, pricesData]);
 
-  // Manual cache clear function - invalidates React Query cache only
+  // Prepare chart data combining historical and predicted data
+  const chartData = useMemo((): ChartDataPoint[] => {
+    if (!historicalData?.prices || !predictionsData?.predictions) return [];
+
+    const data: ChartDataPoint[] = [];
+    const now = Date.now();
+
+    // Add historical data
+    historicalData.prices.forEach((price) => {
+      const timestamp = new Date(price.date).getTime();
+      data.push({
+        timestamp,
+        date: new Date(price.date),
+        price: price.avg_price,
+        confidence: undefined,
+        predicted: false,
+      });
+    });
+
+    // Add predictions if available
+    const currencyPredictions = predictionsData.predictions[selectedCurrency];
+    if (currencyPredictions) {
+      // Add 1d, 3d, 7d predictions
+      const predictionHorizons = [
+        { horizon: "1d", days: 1 },
+        { horizon: "3d", days: 3 },
+        { horizon: "7d", days: 7 },
+      ];
+
+      predictionHorizons.forEach(({ horizon, days }) => {
+        const prediction = currencyPredictions[horizon];
+        if (prediction) {
+          const futureTimestamp = now + (days * 24 * 60 * 60 * 1000);
+          data.push({
+            timestamp: futureTimestamp,
+            date: new Date(futureTimestamp),
+            price: prediction.predicted_price,
+            confidence: prediction.confidence,
+            predicted: true,
+            prediction_lower: prediction.prediction_lower,
+            prediction_upper: prediction.prediction_upper,
+          });
+        }
+      });
+    }
+
+    return data.sort((a, b) => a.timestamp - b.timestamp);
+  }, [historicalData, predictionsData, selectedCurrency]);
+
+  // Manual cache clear function
   const clearCache = () => {
     queryClient.invalidateQueries({ queryKey: ["prices"] });
+    queryClient.invalidateQueries({ queryKey: ["latest-predictions"] });
   };
 
   const isLoading = leaguesLoading || pricesLoading;
+  const isChartLoading = historicalLoading || predictionsLoading;
 
   return (
     <div className="py-8 space-y-8">
@@ -133,7 +207,7 @@ export default function PricesPage() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Live Prices</h1>
           <p className="text-muted-foreground mt-2">
-            Real-time currency prices with automatic updates
+            Real-time currency prices with interactive historical charts and predictions
           </p>
         </div>
         <Button 
@@ -214,7 +288,7 @@ export default function PricesPage() {
           <CardDescription>Customize your view</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-4">
             {/* League Select */}
             <div className="space-y-2">
               <Label htmlFor="league">League</Label>
@@ -261,6 +335,19 @@ export default function PricesPage() {
                 />
               </div>
             </div>
+
+            {/* Chart Toggle */}
+            <div className="space-y-2">
+              <Label htmlFor="chart">Interactive Chart</Label>
+              <Button
+                variant={showChart ? "default" : "outline"}
+                onClick={() => setShowChart(!showChart)}
+                className="w-full"
+              >
+                <BarChart3 className="h-4 w-4 mr-2" />
+                {showChart ? "Hide Chart" : "Show Chart"}
+              </Button>
+            </div>
           </div>
 
           <div className="mt-4">
@@ -270,6 +357,79 @@ export default function PricesPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Interactive Chart */}
+      {showChart && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Price History & Predictions</CardTitle>
+            <CardDescription>
+              Interactive chart showing historical prices and future predictions for {selectedCurrency}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {/* Currency and Time Range Selectors for Chart */}
+              <div className="grid gap-4 md:grid-cols-3">
+                <div className="space-y-2">
+                  <Label htmlFor="chart-currency">Currency</Label>
+                  <Select value={selectedCurrency} onValueChange={setSelectedCurrency}>
+                    <SelectTrigger id="chart-currency">
+                      <SelectValue placeholder="Select currency" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {filteredPrices.map((price) => (
+                        <SelectItem key={price.currency} value={price.currency}>
+                          {price.currency}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="chart-timerange">Chart Time Range</Label>
+                  <Select value={chartTimeRange} onValueChange={setChartTimeRange}>
+                    <SelectTrigger id="chart-timerange">
+                      <SelectValue placeholder="Select time range" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="7d">Last 7 days</SelectItem>
+                      <SelectItem value="30d">Last 30 days</SelectItem>
+                      <SelectItem value="90d">Last 90 days</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Chart Info</Label>
+                  <div className="text-sm text-muted-foreground">
+                    {isChartLoading ? "Loading..." : `${chartData.length} data points`}
+                  </div>
+                </div>
+              </div>
+
+              {/* Chart */}
+              {isChartLoading ? (
+                <div className="flex items-center justify-center h-64">
+                  <Skeleton className="h-64 w-full" />
+                </div>
+              ) : chartData.length > 0 ? (
+                <PriceChart
+                  data={chartData}
+                  currencyName={selectedCurrency}
+                  timeRange={chartTimeRange}
+                  showPredictionBands={true}
+                />
+              ) : (
+                <div className="flex items-center justify-center h-64">
+                  <p className="text-muted-foreground">No chart data available for {selectedCurrency}</p>
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Prices Table */}
       <Card>
@@ -294,6 +454,7 @@ export default function PricesPage() {
                     <TableHead className="text-right">Change</TableHead>
                     <TableHead className="text-right">Confidence</TableHead>
                     <TableHead className="text-right">Last Updated</TableHead>
+                    <TableHead className="text-center">Chart</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -343,6 +504,18 @@ export default function PricesPage() {
                       <TableCell className="text-right text-sm text-muted-foreground">
                         {formatRelativeTime(price.timestamp)}
                       </TableCell>
+                      <TableCell className="text-center">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setSelectedCurrency(price.currency);
+                            setShowChart(true);
+                          }}
+                        >
+                          <BarChart3 className="h-4 w-4" />
+                        </Button>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -358,4 +531,3 @@ export default function PricesPage() {
     </div>
   );
 }
-
