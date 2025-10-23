@@ -12,10 +12,10 @@ const inter = Inter({
 
 export const metadata: Metadata = {
   title: {
-    default: `${APP_NAME} - Path of Exile Currency Predictions & Trading Tools`,
+    default: `${APP_NAME} - PoEconomy - Path of Exile Market Intelligence`,
     template: `%s | ${APP_NAME}`,
   },
-  description: "Real-time Path of Exile currency price predictions, investment analysis, and trading tools. AI-powered market intelligence for POE trading success.",
+  description: "Real-time Path of Exile currency price investment analysis powered by machine learning and AI.",
   keywords: [
     "Path of Exile",
     "POE",
@@ -52,8 +52,8 @@ export const metadata: Metadata = {
     locale: 'en_US',
     url: 'https://poeconomy.com',
     siteName: 'PoEconomy',
-    title: 'PoEconomy - Path of Exile Currency Predictions & Trading Tools',
-    description: 'Real-time Path of Exile currency price predictions, investment analysis, and trading tools. AI-powered market intelligence for POE trading success.',
+    title: 'PoEconomy - Path of Exile Market Intelligence',
+    description: 'Real-time Path of Exile currency price investment analysis powered by machine learning and AI.',
     images: [
       {
         url: 'https://poeconomy.com/og-image.png',
@@ -65,8 +65,8 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'PoEconomy - Path of Exile Currency Predictions & Trading Tools',
-    description: 'Real-time Path of Exile currency price predictions, investment analysis, and trading tools. AI-powered market intelligence for POE trading success.',
+    title: 'PoEconomy - Path of Exile Market Intelligence',
+    description: 'Real-time Path of Exile currency price investment analysis powered by machine learning and AI.',
     images: ['https://poeconomy.com/og-image.png'],
     creator: '@poeconomy',
   },
@@ -112,7 +112,7 @@ export default function RootLayout({
               "@context": "https://schema.org",
               "@type": "WebApplication",
               "name": "PoEconomy",
-              "description": "Real-time Path of Exile currency price predictions, investment analysis, and trading tools. AI-powered market intelligence for POE trading success.",
+              "description": "Real-time Path of Exile currency price investment analysis powered by machine learning and AI.",
               "url": "https://poeconomy.com",
               "applicationCategory": "GameApplication",
               "operatingSystem": "Web Browser",
