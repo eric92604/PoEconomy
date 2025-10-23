@@ -27,12 +27,12 @@ export const API_ENDPOINTS = {
 /**
  * API request timeout in milliseconds
  */
-export const API_TIMEOUT = 30000;
+export const API_TIMEOUT = 15000;
 
 /**
  * Maximum retries for failed requests
  */
-export const MAX_RETRIES = 3;
+export const MAX_RETRIES = 1;
 
 /**
  * Retry delay in milliseconds (exponential backoff)
@@ -40,16 +40,16 @@ export const MAX_RETRIES = 3;
 export const RETRY_DELAY = 1000;
 
 /**
- * Default cache time for React Query (10 minutes)
- * This is longer than browser cache to avoid unnecessary re-fetches
+ * Default cache time for React Query (30 minutes)
+ * Longer cache for historical data to reduce API calls
  */
-export const DEFAULT_CACHE_TIME = 10 * 60 * 1000;
+export const DEFAULT_CACHE_TIME = 30 * 60 * 1000;
 
 /**
- * Default stale time for React Query (5 minutes)
- * Data is considered fresh for 5 minutes, matching browser cache
+ * Default stale time for React Query (15 minutes)
+ * Data is considered fresh for 15 minutes to reduce unnecessary requests
  */
-export const DEFAULT_STALE_TIME = 5 * 60 * 1000;
+export const DEFAULT_STALE_TIME = 15 * 60 * 1000;
 
 /**
  * Maximum items per batch request

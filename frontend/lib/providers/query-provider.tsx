@@ -25,8 +25,8 @@ function makeQueryClient() {
         gcTime: DEFAULT_CACHE_TIME,
         refetchOnWindowFocus: false,
         refetchOnReconnect: true,
-        retry: 3,
-        retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
+        retry: 1,
+        retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 10000),
       },
       mutations: {
         retry: 1,
