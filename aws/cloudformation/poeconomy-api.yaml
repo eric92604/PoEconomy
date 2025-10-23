@@ -629,7 +629,7 @@ Resources:
     Properties:
       RestApiId: !Ref PredictionApiRestApi
       StageName: !Ref ApiGatewayStageName
-      Description: !Sub "Deployment with API key authentication and CORS - ${AWS::StackName}"
+      Description: !Sub "Deployment ${LambdaVersion} - ${AWS::StackName}"
 
   # Reference to external API key (created manually to prevent resets)
   # API Key ID: 16rsyury4g

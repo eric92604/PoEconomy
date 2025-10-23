@@ -91,7 +91,7 @@ export function formatDate(timestamp: number | string | Date, includeTime = fals
  * Format a timestamp for chart display
  */
 export function formatChartDate(timestamp: number, range: string): string {
-  const date = new Date(timestamp * 1000);
+  const date = new Date(timestamp);
 
   switch (range) {
     case "24h":

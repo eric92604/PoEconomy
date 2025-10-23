@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
+import { Slider } from "@/components/ui/slider";
 import {
   Select,
   SelectContent,
@@ -18,33 +19,42 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Search, RefreshCw, TrendingUp, TrendingDown, BarChart3 } from "lucide-react";
-import { useLeagues, useLivePricesWithRefresh, useHistoricalPrices, useLatestPredictions } from "@/lib/hooks";
+import { Search, RefreshCw, TrendingUp, X, Check, ChevronsUpDown } from "lucide-react";
+import { useLeagues, useCurrencies, useHistoricalPrices, useBatchPredictions, useLatestPredictions } from "@/lib/hooks";
 import { useQueryClient } from "@tanstack/react-query";
 import { PriceChart } from "@/components/charts";
 import { formatPrice, formatRelativeTime } from "@/lib/utils";
 import { cn } from "@/lib/utils";
-import type { ChartDataPoint } from "@/types";
+import type { ChartDataPoint, CurrencyFilters } from "@/types";
 
 export default function PricesPage() {
   const queryClient = useQueryClient();
   const [selectedLeague, setSelectedLeague] = useState<string>("");
-  const [searchTerm, setSearchTerm] = useState("");
-  const [timeRange, setTimeRange] = useState("24");
   const [selectedCurrency, setSelectedCurrency] = useState<string>("Divine Orb");
-  const [showChart, setShowChart] = useState(false);
-  const [chartTimeRange, setChartTimeRange] = useState("30d");
+  const [open, setOpen] = useState(false);
+  const [searchValue, setSearchValue] = useState("");
+  const [filters, setFilters] = useState<CurrencyFilters>({
+    search: "",
+    minConfidence: undefined,
+    minPrice: undefined,
+  });
 
-  // Fetch leagues
+  // Fetch leagues and currencies
   const { data: leaguesData, isLoading: leaguesLoading } = useLeagues();
+  const { data: currenciesData, isLoading: currenciesLoading } = useCurrencies();
 
   // Get available leagues
   const leagues = useMemo(() => {
@@ -59,23 +69,27 @@ export default function PricesPage() {
     }
   }, [leagues, selectedLeague]);
 
-  // Fetch live prices with auto-refresh
-  const { data: pricesData, isLoading: pricesLoading } = useLivePricesWithRefresh(
+  // Fetch all latest predictions for the league to get list of currencies with predictions
+  const { data: latestPredictionsData, isLoading: latestPredictionsLoading } = useLatestPredictions(
     {
       league: selectedLeague,
-      hours: parseInt(timeRange),
-      limit: 1000,
-    },
-    5 * 60 * 1000 // Refresh every 5 minutes
+      horizons: ["1d"],
+      limit: 500,
+      enabled: !!selectedLeague,
+    }
   );
 
-  // Fetch predictions for the selected currency
-  const { data: predictionsData, isLoading: predictionsLoading } = useLatestPredictions({
-    league: selectedLeague || undefined,
-    horizons: ["1d", "3d", "7d"],
-    limit: 500,
-    enabled: !!selectedLeague && showChart,
-  });
+  // Fetch predictions for the selected currency only (1d, 3d, 7d)
+  const { data: batchPredictionsData, isLoading: predictionsLoading } = useBatchPredictions(
+    {
+      requests: [
+        { currency: selectedCurrency, league: selectedLeague, horizon: "1d" },
+        { currency: selectedCurrency, league: selectedLeague, horizon: "3d" },
+        { currency: selectedCurrency, league: selectedLeague, horizon: "7d" },
+      ],
+    },
+    !!selectedLeague && !!selectedCurrency
+  );
 
   // Fetch historical prices for the selected currency (no date filtering - get all available data)
   const { data: historicalData, isLoading: historicalLoading } = useHistoricalPrices(
@@ -84,112 +98,138 @@ export default function PricesPage() {
       league: selectedLeague,
       limit: 1000, // Get more data points
     },
-    showChart && !!selectedCurrency && !!selectedLeague
+    !!selectedCurrency && !!selectedLeague
   );
 
-  // Group prices by currency and get latest
-  const latestPrices = useMemo(() => {
-    if (!pricesData) return [];
+  // Get available currencies - only those with predictions
+  const availableCurrencies = useMemo(() => {
+    if (!latestPredictionsData?.predictions || !selectedLeague) return [];
 
-    const priceMap = new Map<string, { price: number; timestamp: number; confidence: number }>();
-
-    pricesData.prices.forEach((price) => {
-      const existing = priceMap.get(price.currency);
-      if (!existing || price.timestamp > existing.timestamp) {
-        priceMap.set(price.currency, {
-          price: price.price,
-          timestamp: price.timestamp,
-          confidence: price.confidence,
+    const currencies: Array<{ currency: string; price: number; confidence: number }> = [];
+    
+    // Extract currencies from the predictions data
+    Object.entries(latestPredictionsData.predictions).forEach(([currency, horizonData]) => {
+      // Check if this currency has at least one prediction
+      const has1dPrediction = horizonData["1d"];
+      if (has1dPrediction) {
+        currencies.push({
+          currency,
+          price: has1dPrediction.predicted_price || 0,
+          confidence: has1dPrediction.confidence || 0,
         });
       }
     });
 
-    return Array.from(priceMap.entries())
-      .map(([currency, data]) => ({
-        currency,
-        ...data,
-      }))
-      .sort((a, b) => a.currency.localeCompare(b.currency));
-  }, [pricesData]);
+    return currencies.sort((a, b) => a.currency.localeCompare(b.currency));
+  }, [latestPredictionsData, selectedLeague]);
 
-  // Filter by search term
-  const filteredPrices = useMemo(() => {
-    if (!searchTerm) return latestPrices;
-    return latestPrices.filter((price) =>
-      price.currency.toLowerCase().includes(searchTerm.toLowerCase())
-    );
-  }, [latestPrices, searchTerm]);
 
-  // Calculate price changes (if we have historical data)
-  const pricesWithChanges = useMemo(() => {
-    if (!pricesData) return filteredPrices.map(p => ({ ...p, priceChange: 0, priceChangePercent: 0 }));
+  // Filter currencies (price and confidence filters only, search is handled by Command component)
+  const filteredCurrencies = useMemo(() => {
+    let filtered = availableCurrencies;
 
-    return filteredPrices.map((latest) => {
-      // Find older price for comparison
-      const historicalPrices = pricesData.prices
-        .filter((p) => p.currency === latest.currency)
-        .sort((a, b) => a.timestamp - b.timestamp);
+    // Price filter
+    if (filters.minPrice !== undefined) {
+      filtered = filtered.filter((currency) => currency.price >= filters.minPrice!);
+    }
 
-      if (historicalPrices.length < 2) {
-        return { ...latest, priceChange: 0, priceChangePercent: 0 };
-      }
+    // Confidence filter
+    if (filters.minConfidence !== undefined) {
+      filtered = filtered.filter((currency) => currency.confidence >= filters.minConfidence!);
+    }
 
-      const oldPrice = historicalPrices[0].price;
-      const priceChange = latest.price - oldPrice;
-      const priceChangePercent = (priceChange / oldPrice) * 100;
-
-      return { ...latest, priceChange, priceChangePercent };
-    });
-  }, [filteredPrices, pricesData]);
+    return filtered;
+  }, [availableCurrencies, filters]);
 
   // Prepare chart data combining historical and predicted data
   const chartData = useMemo((): ChartDataPoint[] => {
-    if (!historicalData?.prices || !predictionsData?.predictions) return [];
+    if (!historicalData?.prices || !batchPredictionsData?.results) return [];
 
     const data: ChartDataPoint[] = [];
-    const now = Date.now();
 
-    // Add historical data
+    // Helper function to normalize dates to midnight UTC
+    const normalizeToMidnightUTC = (dateString: string): Date => {
+      const date = new Date(dateString);
+      return new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+    };
+
+    // Add all historical data
     historicalData.prices.forEach((price) => {
-      const timestamp = new Date(price.date).getTime();
+      const date = normalizeToMidnightUTC(price.date);
+      const timestamp = date.getTime();
       data.push({
         timestamp,
-        date: new Date(price.date),
+        date,
         price: price.avg_price,
         confidence: undefined,
         predicted: false,
       });
     });
 
-    // Add predictions if available
-    const currencyPredictions = predictionsData.predictions[selectedCurrency];
-    if (currencyPredictions) {
-      // Add 1d, 3d, 7d predictions
-      const predictionHorizons = [
-        { horizon: "1d", days: 1 },
-        { horizon: "3d", days: 3 },
-        { horizon: "7d", days: 7 },
-      ];
+    // Add predictions from batch response
+    const predictionHorizons = [
+      { horizon: "1d", days: 1 },
+      { horizon: "3d", days: 3 },
+      { horizon: "7d", days: 7 },
+    ];
 
-      predictionHorizons.forEach(({ horizon, days }) => {
-        const prediction = currencyPredictions[horizon];
-        if (prediction) {
-          const futureTimestamp = now + (days * 24 * 60 * 60 * 1000);
-          data.push({
-            timestamp: futureTimestamp,
-            date: new Date(futureTimestamp),
-            price: prediction.predicted_price,
-            confidence: prediction.confidence,
-            predicted: true,
-            prediction_lower: prediction.prediction_lower,
-            prediction_upper: prediction.prediction_upper,
-          });
-        }
-      });
-    }
+    predictionHorizons.forEach(({ horizon, days }) => {
+      const prediction = batchPredictionsData.results.find(
+        (p) => p.horizon === horizon && p.currency === selectedCurrency
+      );
+      if (prediction && prediction.timestamp) {
+        // Use the prediction timestamp (when it was generated) as the base date
+        const predictionGeneratedDate = normalizeToMidnightUTC(prediction.timestamp);
+        
+        // Add the horizon days to get the actual predicted date
+        const predictedDate = new Date(predictionGeneratedDate);
+        predictedDate.setUTCDate(predictedDate.getUTCDate() + days);
+        const predictedTimestamp = predictedDate.getTime();
+        
+        data.push({
+          timestamp: predictedTimestamp,
+          date: predictedDate,
+          price: prediction.predicted_price,
+          confidence: prediction.confidence,
+          predicted: true,
+          prediction_lower: prediction.prediction_lower,
+          prediction_upper: prediction.prediction_upper,
+        });
+      }
+    });
 
     return data.sort((a, b) => a.timestamp - b.timestamp);
-  }, [historicalData, predictionsData, selectedCurrency]);
+  }, [historicalData, batchPredictionsData, selectedCurrency]);
+
+  // Filter handlers
+  const handlePriceChange = (value: number[]) => {
+    setFilters((prev) => ({
+      ...prev,
+      minPrice: value[0] === 0 ? undefined : value[0],
+    }));
+  };
+
+  const handleConfidenceChange = (value: number[]) => {
+    setFilters((prev) => ({
+      ...prev,
+      minConfidence: value[0] === 0 ? undefined : value[0] / 100,
+    }));
+  };
+
+  const clearFilters = () => {
+    setFilters({
+      search: "",
+      minConfidence: undefined,
+      minPrice: undefined,
+    });
+  };
+
+  const activeFilterCount = useMemo(() => {
+    let count = 0;
+    if (filters.minPrice !== undefined) count++;
+    if (filters.minConfidence !== undefined) count++;
+    return count;
+  }, [filters]);
 
   // Manual cache clear function
   const clearCache = () => {
@@ -197,7 +237,7 @@ export default function PricesPage() {
     queryClient.invalidateQueries({ queryKey: ["latest-predictions"] });
   };
 
-  const isLoading = leaguesLoading || pricesLoading;
+  const isLoading = leaguesLoading || latestPredictionsLoading;
   const isChartLoading = historicalLoading || predictionsLoading;
 
   return (
@@ -206,9 +246,6 @@ export default function PricesPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Live Prices</h1>
-          <p className="text-muted-foreground mt-2">
-            Real-time currency prices with interactive historical charts and predictions
-          </p>
         </div>
         <Button 
           onClick={clearCache}
@@ -221,313 +258,162 @@ export default function PricesPage() {
         </Button>
       </div>
 
-      {/* Stats */}
-      <div className="grid gap-4 md:grid-cols-3">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total Currencies</CardTitle>
-            <RefreshCw className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <Skeleton className="h-8 w-16" />
-            ) : (
-              <div className="text-2xl font-bold">{latestPrices.length}</div>
-            )}
-            <p className="text-xs text-muted-foreground mt-1">
-              With price data
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Last Updated</CardTitle>
-            <RefreshCw className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <Skeleton className="h-8 w-24" />
-            ) : pricesData?.metadata.last_updated ? (
-              <div className="text-sm font-medium">
-                {formatRelativeTime(new Date(pricesData.metadata.last_updated))}
-              </div>
-            ) : (
-              <div className="text-sm text-muted-foreground">-</div>
-            )}
-            <p className="text-xs text-muted-foreground mt-1">
-              Auto-refreshes every 5 min
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Data Points</CardTitle>
-            <RefreshCw className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <Skeleton className="h-8 w-16" />
-            ) : (
-              <div className="text-2xl font-bold">
-                {pricesData?.metadata.total_count || 0}
-              </div>
-            )}
-            <p className="text-xs text-muted-foreground mt-1">
-              In selected timeframe
-            </p>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Filters */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Filters</CardTitle>
-          <CardDescription>Customize your view</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-4 md:grid-cols-4">
-            {/* League Select */}
-            <div className="space-y-2">
-              <Label htmlFor="league">League</Label>
-              <Select value={selectedLeague} onValueChange={setSelectedLeague}>
-                <SelectTrigger id="league">
-                  <SelectValue placeholder="Select league" />
-                </SelectTrigger>
-                <SelectContent>
-                  {leagues.map((league) => (
-                    <SelectItem key={league} value={league}>
-                      {league}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Time Range */}
-            <div className="space-y-2">
-              <Label htmlFor="timerange">Time Range</Label>
-              <Select value={timeRange} onValueChange={setTimeRange}>
-                <SelectTrigger id="timerange">
-                  <SelectValue placeholder="Select time range" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="24">Last 24 hours</SelectItem>
-                  <SelectItem value="72">Last 3 days</SelectItem>
-                  <SelectItem value="168">Last 7 days</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Search */}
-            <div className="space-y-2">
-              <Label htmlFor="search">Search Currency</Label>
-              <div className="relative">
-                <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
-                <Input
-                  id="search"
-                  placeholder="Search..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="pl-8"
-                />
-              </div>
-            </div>
-
-            {/* Chart Toggle */}
-            <div className="space-y-2">
-              <Label htmlFor="chart">Interactive Chart</Label>
-              <Button
-                variant={showChart ? "default" : "outline"}
-                onClick={() => setShowChart(!showChart)}
-                className="w-full"
-              >
-                <BarChart3 className="h-4 w-4 mr-2" />
-                {showChart ? "Hide Chart" : "Show Chart"}
-              </Button>
-            </div>
-          </div>
-
-          <div className="mt-4">
-            <Badge variant="secondary">
-              {filteredPrices.length} currencies shown
-            </Badge>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Interactive Chart */}
-      {showChart && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Price History & Predictions</CardTitle>
-            <CardDescription>
-              Interactive chart showing historical prices and future predictions for {selectedCurrency}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              {/* Currency and Time Range Selectors for Chart */}
-              <div className="grid gap-4 md:grid-cols-3">
-                <div className="space-y-2">
-                  <Label htmlFor="chart-currency">Currency</Label>
-                  <Select value={selectedCurrency} onValueChange={setSelectedCurrency}>
-                    <SelectTrigger id="chart-currency">
-                      <SelectValue placeholder="Select currency" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {filteredPrices.map((price) => (
-                        <SelectItem key={price.currency} value={price.currency}>
-                          {price.currency}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+      {/* Main Layout */}
+      <div className="flex gap-6">
+        {/* Left Sidebar - Filters */}
+        <div className="w-64 flex-shrink-0">
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle>Filters</CardTitle>
                 </div>
+                {activeFilterCount > 0 && (
+                  <Button variant="ghost" size="sm" onClick={clearFilters}>
+                    <X className="h-4 w-4 mr-2" />
+                    Clear ({activeFilterCount})
+                  </Button>
+                )}
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {/* League Select */}
+              <div className="space-y-2">
+                <Label htmlFor="league">League</Label>
+                <Select value={selectedLeague} onValueChange={setSelectedLeague}>
+                  <SelectTrigger id="league">
+                    <SelectValue placeholder="Select league" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {leagues.map((league) => (
+                      <SelectItem key={league} value={league}>
+                        {league}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="chart-timerange">Chart Time Range</Label>
-                  <Select value={chartTimeRange} onValueChange={setChartTimeRange}>
-                    <SelectTrigger id="chart-timerange">
-                      <SelectValue placeholder="Select time range" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="7d">Last 7 days</SelectItem>
-                      <SelectItem value="30d">Last 30 days</SelectItem>
-                      <SelectItem value="90d">Last 90 days</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+              {/* Currency Search with Autocomplete */}
+              <div className="space-y-2">
+                <Label>Search Currency</Label>
+                <Popover open={open} onOpenChange={setOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      aria-expanded={open}
+                      className="w-full justify-between"
+                    >
+                      {selectedCurrency || "Select currency..."}
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[280px] p-0">
+                    <Command>
+                      <CommandInput 
+                        placeholder="Search currency..." 
+                        value={searchValue}
+                        onValueChange={setSearchValue}
+                      />
+                      <CommandList>
+                        <CommandEmpty>No currency found.</CommandEmpty>
+                        <CommandGroup>
+                          {filteredCurrencies.map((currency) => (
+                            <CommandItem
+                              key={currency.currency}
+                              value={currency.currency}
+                              onSelect={(currentValue) => {
+                                setSelectedCurrency(currentValue === selectedCurrency ? "" : currentValue);
+                                setOpen(false);
+                                setSearchValue("");
+                              }}
+                            >
+                              <Check
+                                className={cn(
+                                  "mr-2 h-4 w-4",
+                                  selectedCurrency === currency.currency ? "opacity-100" : "opacity-0"
+                                )}
+                              />
+                              {currency.currency}
+                            </CommandItem>
+                          ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+              </div>
 
+              {/* Price Slider */}
+              <div className="space-y-2">
+                <Label>Min Price</Label>
                 <div className="space-y-2">
-                  <Label>Chart Info</Label>
-                  <div className="text-sm text-muted-foreground">
-                    {isChartLoading ? "Loading..." : `${chartData.length} data points`}
+                  <Slider
+                    value={[filters.minPrice || 0]}
+                    onValueChange={handlePriceChange}
+                    max={1000}
+                    step={10}
+                    className="w-full"
+                  />
+                  <div className="flex justify-between text-sm text-muted-foreground">
+                    <span>0</span>
+                    <span className="font-medium">
+                      {filters.minPrice ? `${filters.minPrice}c` : "Any"}
+                    </span>
+                    <span>1000c</span>
                   </div>
                 </div>
               </div>
 
-              {/* Chart */}
-              {isChartLoading ? (
-                <div className="flex items-center justify-center h-64">
-                  <Skeleton className="h-64 w-full" />
+              {/* Confidence Slider */}
+              <div className="space-y-2">
+                <Label>Min Confidence</Label>
+                <div className="space-y-2">
+                  <Slider
+                    value={[filters.minConfidence ? Math.round(filters.minConfidence * 100) : 0]}
+                    onValueChange={handleConfidenceChange}
+                    max={100}
+                    step={5}
+                    className="w-full"
+                  />
+                  <div className="flex justify-between text-sm text-muted-foreground">
+                    <span>0%</span>
+                    <span className="font-medium">
+                      {filters.minConfidence ? `${Math.round(filters.minConfidence * 100)}%` : "Any"}
+                    </span>
+                    <span>100%</span>
+                  </div>
                 </div>
-              ) : chartData.length > 0 ? (
-                <PriceChart
-                  data={chartData}
-                  currencyName={selectedCurrency}
-                  timeRange={chartTimeRange}
-                  showPredictionBands={true}
-                />
-              ) : (
-                <div className="flex items-center justify-center h-64">
-                  <p className="text-muted-foreground">No chart data available for {selectedCurrency}</p>
-                </div>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+              </div>
 
-      {/* Prices Table */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Current Prices</CardTitle>
-          <CardDescription>Latest prices for all currencies</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {isLoading ? (
-            <div className="space-y-4">
-              {Array.from({ length: 10 }).map((_, i) => (
-                <Skeleton key={i} className="h-12 w-full" />
-              ))}
-            </div>
-          ) : pricesWithChanges.length > 0 ? (
-            <div className="rounded-md border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Currency</TableHead>
-                    <TableHead className="text-right">Current Price</TableHead>
-                    <TableHead className="text-right">Change</TableHead>
-                    <TableHead className="text-right">Confidence</TableHead>
-                    <TableHead className="text-right">Last Updated</TableHead>
-                    <TableHead className="text-center">Chart</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {pricesWithChanges.map((price) => (
-                    <TableRow key={price.currency}>
-                      <TableCell className="font-medium">{price.currency}</TableCell>
-                      <TableCell className="text-right font-mono">
-                        {formatPrice(price.price)}c
-                      </TableCell>
-                      <TableCell className="text-right">
-                        {price.priceChangePercent !== 0 ? (
-                          <div
-                            className={cn(
-                              "flex items-center justify-end gap-1",
-                              price.priceChangePercent > 0
-                                ? "text-green-600 dark:text-green-400"
-                                : "text-red-600 dark:text-red-400"
-                            )}
-                          >
-                            {price.priceChangePercent > 0 ? (
-                              <TrendingUp className="h-3 w-3" />
-                            ) : (
-                              <TrendingDown className="h-3 w-3" />
-                            )}
-                            <span className="font-semibold">
-                              {price.priceChangePercent > 0 ? "+" : ""}
-                              {price.priceChangePercent.toFixed(2)}%
-                            </span>
-                          </div>
-                        ) : (
-                          <span className="text-muted-foreground">-</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Badge
-                          variant={
-                            price.confidence >= 0.8
-                              ? "default"
-                              : price.confidence >= 0.6
-                              ? "secondary"
-                              : "destructive"
-                          }
-                        >
-                          {(price.confidence * 100).toFixed(0)}%
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-right text-sm text-muted-foreground">
-                        {formatRelativeTime(price.timestamp)}
-                      </TableCell>
-                      <TableCell className="text-center">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => {
-                            setSelectedCurrency(price.currency);
-                            setShowChart(true);
-                          }}
-                        >
-                          <BarChart3 className="h-4 w-4" />
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          ) : (
-            <div className="flex items-center justify-center h-64">
-              <p className="text-muted-foreground">No prices found</p>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+              {/* Results count */}
+              <div className="pt-4 border-t">
+                <div className="flex items-center gap-2">
+                  <Badge variant="secondary">
+                    {filteredCurrencies.length} currencies
+                  </Badge>
+                  {activeFilterCount > 0 && (
+                    <span className="text-sm text-muted-foreground">
+                      ({availableCurrencies.length} total)
+                    </span>
+                  )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Right Content - Interactive Chart */}
+        <div className="flex-1">
+          <PriceChart
+            data={isChartLoading ? [] : chartData}
+            currencyName={selectedCurrency}
+            timeRange="30d"
+            showPredictionBands={true}
+          />
+        </div>
+      </div>
     </div>
   );
 }

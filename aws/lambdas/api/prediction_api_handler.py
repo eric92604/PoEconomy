@@ -889,11 +889,11 @@ def _fetch_live_prices_from_db(
             total_count = response.get("Count", 0)
             
         elif league:
-            # Query specific league using GSI
+            # Query specific league using GSI - get all prices
             response = _PRICING_TABLE.query(
                 IndexName="league-timestamp-index",
-                KeyConditionExpression=Key("league").eq(league) & Key("timestamp").gte(hours_ago),
-                ScanIndexForward=False,
+                KeyConditionExpression=Key("league").eq(league),
+                ScanIndexForward=False,  # Most recent first
                 Limit=limit
             )
             prices = response.get("Items", [])
