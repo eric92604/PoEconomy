@@ -186,6 +186,7 @@ Resources:
           DATA_LAKE_BUCKET: 
             Fn::ImportValue:
               Fn::Sub: '${BaseStackName}-DataLakeBucket'
+          STREAM_REFRESH_TTL_HOURS: '2'
           LOG_LEVEL: INFO
       Tags:
         - Key: App
