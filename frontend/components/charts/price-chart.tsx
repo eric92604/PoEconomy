@@ -18,7 +18,7 @@ import {
 } from "recharts";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import type { ChartDataPoint } from "@/types";
-import { formatPrice, formatChartDate } from "@/lib/utils";
+import { formatPrice, formatChaosPrice, formatChartDate } from "@/lib/utils";
 import { useTheme } from "@/lib/providers";
 import Image from "next/image";
 
@@ -41,7 +41,7 @@ const CustomYAxisTick = ({ x, y, payload, isDark }: any) => {
         fill={isDark ? "#9ca3af" : "#6b7280"}
         fontSize={12}
       >
-        {formatPrice(payload.value)}
+        {formatChaosPrice(payload.value)}
       </text>
       <image
         x={-14}
@@ -128,7 +128,7 @@ export function PriceChart({
           <p className="text-sm">
             <span className="text-muted-foreground">Price: </span>
             <span className="font-mono font-semibold">
-              {formatPrice(data.price)}c
+              {formatChaosPrice(data.price)}c
             </span>
           </p>
           {isPredicted && (
@@ -136,7 +136,7 @@ export function PriceChart({
               <p className="text-xs text-muted-foreground">Predicted</p>
               {data.lower && data.upper && (
                 <p className="text-xs text-muted-foreground">
-                  Range: {formatPrice(data.lower)} - {formatPrice(data.upper)}
+                  Range: {formatChaosPrice(data.lower)} - {formatChaosPrice(data.upper)}
                 </p>
               )}
             </>

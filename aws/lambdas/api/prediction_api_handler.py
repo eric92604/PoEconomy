@@ -951,12 +951,13 @@ def _get_latest_price_update_time() -> str:
         assert _PRICING_TABLE is not None
         # Get the most recent item to determine last update time
         response = _PRICING_TABLE.scan(
-            Limit=1,
-            ScanIndexForward=False
+            Limit=1
         )
         items = response.get("Items", [])
         if items:
-            timestamp = items[0].get("timestamp")
+            # Find the item with the highest timestamp
+            latest_item = max(items, key=lambda x: int(x.get("timestamp", 0)))
+            timestamp = latest_item.get("timestamp")
             if timestamp:
                 # Convert Decimal to int for time.gmtime()
                 timestamp_int = int(timestamp) if timestamp else 0
