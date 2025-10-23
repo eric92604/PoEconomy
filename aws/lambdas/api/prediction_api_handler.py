@@ -720,26 +720,30 @@ def _handle_historical_prices(query_params: Dict[str, str]) -> Tuple[Dict[str, A
     """Handle historical daily price data endpoint."""
     currency = query_params.get("currency")
     league = query_params.get("league")
-    start_date = query_params.get("start_date")
-    end_date = query_params.get("end_date")
-    limit = int(query_params.get("limit", "100"))
+    start_date = query_params.get("start_date")  # Optional
+    end_date = query_params.get("end_date")  # Optional
+    limit = int(query_params.get("limit", "1000"))  # Default to 1000 to get more data
     
     # Validate required parameters
     if not currency:
         raise ClientFacingError("currency parameter is required")
     if not league:
         raise ClientFacingError("league parameter is required")
-    if not start_date:
-        raise ClientFacingError("start_date parameter is required (YYYY-MM-DD format)")
     
-    # Validate date format
-    try:
-        from datetime import datetime
-        datetime.strptime(start_date, "%Y-%m-%d")
-        if end_date:
+    # Validate date format if provided
+    if start_date:
+        try:
+            from datetime import datetime
+            datetime.strptime(start_date, "%Y-%m-%d")
+        except ValueError:
+            raise ClientFacingError("start_date must be in YYYY-MM-DD format")
+    
+    if end_date:
+        try:
+            from datetime import datetime
             datetime.strptime(end_date, "%Y-%m-%d")
-    except ValueError:
-        raise ClientFacingError("Date must be in YYYY-MM-DD format")
+        except ValueError:
+            raise ClientFacingError("end_date must be in YYYY-MM-DD format")
     
     # Validate limit
     if limit <= 0 or limit > 1000:
@@ -760,9 +764,9 @@ def _handle_historical_prices(query_params: Dict[str, str]) -> Tuple[Dict[str, A
 def _fetch_historical_prices_from_db(
     currency: str,
     league: str,
-    start_date: str,
+    start_date: str = None,
     end_date: str = None,
-    limit: int = 100
+    limit: int = 1000
 ) -> Dict[str, Any]:
     """Fetch historical daily prices from DynamoDB."""
     # Get the daily prices table name from environment
@@ -776,17 +780,34 @@ def _fetch_historical_prices_from_db(
         currency_league = f"{currency}#{league}"
         
         # Query the daily prices table
-        if end_date:
+        if start_date and end_date:
+            # Both start and end date provided
             response = daily_prices_table.query(
                 KeyConditionExpression=Key("currency_league").eq(currency_league) & 
                                      Key("date").between(start_date, end_date),
                 ScanIndexForward=True,  # Oldest first
                 Limit=limit
             )
-        else:
+        elif start_date:
+            # Only start date provided
             response = daily_prices_table.query(
                 KeyConditionExpression=Key("currency_league").eq(currency_league) & 
                                      Key("date").gte(start_date),
+                ScanIndexForward=True,  # Oldest first
+                Limit=limit
+            )
+        elif end_date:
+            # Only end date provided
+            response = daily_prices_table.query(
+                KeyConditionExpression=Key("currency_league").eq(currency_league) & 
+                                     Key("date").lte(end_date),
+                ScanIndexForward=False,  # Most recent first
+                Limit=limit
+            )
+        else:
+            # No date filters - get all available data
+            response = daily_prices_table.query(
+                KeyConditionExpression=Key("currency_league").eq(currency_league),
                 ScanIndexForward=True,  # Oldest first
                 Limit=limit
             )
@@ -798,13 +819,7 @@ def _fetch_historical_prices_from_db(
         for item in items:
             price_data = {
                 "date": item.get("date"),
-                "open_price": float(item.get("open_price", 0)),
-                "high_price": float(item.get("high_price", 0)),
-                "low_price": float(item.get("low_price", 0)),
-                "close_price": float(item.get("close_price", 0)),
-                "avg_price": float(item.get("avg_price", 0)),
-                "volume": item.get("volume", 0),
-                "price_change_percent": float(item.get("price_change_percent", 0))
+                "avg_price": float(item.get("avg_price", 0))
             }
             historical_prices.append(price_data)
         

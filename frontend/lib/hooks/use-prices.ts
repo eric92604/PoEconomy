@@ -5,6 +5,7 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { priceApi } from "@/lib/api";
 import type { LivePricesParams, LivePricesResponse } from "@/types";
+import type { HistoricalPricesResponse } from "@/lib/api/prices";
 
 /**
  * Query keys for prices
@@ -12,6 +13,8 @@ import type { LivePricesParams, LivePricesResponse } from "@/types";
 export const priceKeys = {
   all: ["prices"] as const,
   live: (params: LivePricesParams) => [...priceKeys.all, "live", params] as const,
+  historical: (params: { currency: string; league: string; start_date: string; end_date?: string; limit?: number }) => 
+    [...priceKeys.all, "historical", params] as const,
 };
 
 /**
@@ -39,6 +42,26 @@ export function useLivePricesWithRefresh(
     queryKey: priceKeys.live(params),
     queryFn: () => priceApi.getLivePrices(params),
     refetchInterval,
+  });
+}
+
+/**
+ * Hook to fetch historical prices
+ */
+export function useHistoricalPrices(
+  params: {
+    currency: string;
+    league: string;
+    start_date?: string;
+    end_date?: string;
+    limit?: number;
+  },
+  enabled = true
+): UseQueryResult<HistoricalPricesResponse> {
+  return useQuery({
+    queryKey: priceKeys.historical(params),
+    queryFn: () => priceApi.getHistoricalPrices(params),
+    enabled: enabled && !!params.currency && !!params.league,
   });
 }
 
