@@ -19,13 +19,18 @@ export default function Home() {
         <p className="max-w-[700px] text-lg text-muted-foreground sm:text-xl">
           Real-time currency price predictions and investment analysis.
         </p>
-        <div className="flex gap-4">
-          <Button asChild size="lg">
-            <Link href="/dashboard">View Dashboard</Link>
-          </Button>
-          <Button asChild variant="outline" size="lg">
-            <Link href="/investments">Explore Investments</Link>
-          </Button>
+        <div className="flex flex-col sm:flex-row gap-4 items-center">
+          <div className="flex gap-4">
+            <Button asChild size="lg">
+              <Link href="/dashboard">View Dashboard</Link>
+            </Button>
+            <Button asChild variant="outline" size="lg">
+              <Link href="/investments">Explore Investments</Link>
+            </Button>
+          </div>
+          <div className="text-sm text-muted-foreground">
+            Questions? <a href="mailto:contact@poeconomy.com" className="text-primary hover:underline">contact@poeconomy.com</a>
+          </div>
         </div>
       </section>
 

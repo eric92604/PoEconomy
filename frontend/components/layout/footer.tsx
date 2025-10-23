@@ -3,6 +3,7 @@
  */
 
 import { APP_NAME } from "@/lib/constants/config";
+import { Mail } from "lucide-react";
 
 export function Footer() {
   const currentYear = new Date().getFullYear();
@@ -13,8 +14,21 @@ export function Footer() {
         <div className="text-sm text-muted-foreground">
           © {currentYear} {APP_NAME}. All rights reserved.
         </div>
-        <div className="text-xs text-muted-foreground text-right">
-          This application is not affiliated with Grinding Gear Games. Path of Exile is a trademark of Grinding Gear Games Ltd.
+        
+        {/* Disclaimer */}
+        <div className="text-xs text-muted-foreground text-center flex-1 mx-4">
+          PoEconomy is not affiliated with Grinding Gear Games.
+        </div>
+        
+        {/* Contact Information */}
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Mail className="h-4 w-4" />
+          <a 
+            href="mailto:contact@poeconomy.com" 
+            className="hover:text-foreground transition-colors"
+          >
+            contact@poeconomy.com
+          </a>
         </div>
       </div>
     </footer>
