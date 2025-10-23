@@ -438,7 +438,7 @@ export default function InvestmentsPage() {
               </p>
             </div>
             <Badge variant="secondary">
-              {filteredCurrencies.length} opportunities
+              {filteredCurrencies.length} currencies
             </Badge>
           </div>
           {isLoading ? (
