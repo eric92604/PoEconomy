@@ -20,6 +20,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import type { ChartDataPoint } from "@/types";
 import { formatPrice, formatChartDate } from "@/lib/utils";
 import { useTheme } from "@/lib/providers";
+import Image from "next/image";
 
 interface PriceChartProps {
   data: ChartDataPoint[];
@@ -27,6 +28,31 @@ interface PriceChartProps {
   timeRange?: string;
   showPredictionBands?: boolean;
 }
+
+// Custom Y-axis tick with chaos orb icon
+const CustomYAxisTick = ({ x, y, payload, isDark }: any) => {
+  return (
+    <g transform={`translate(${x},${y})`}>
+      <text
+        x={-18}
+        y={0}
+        dy={4}
+        textAnchor="end"
+        fill={isDark ? "#9ca3af" : "#6b7280"}
+        fontSize={12}
+      >
+        {formatPrice(payload.value)}
+      </text>
+      <image
+        x={-14}
+        y={-6}
+        width={12}
+        height={12}
+        href="/images/chaos-orb.png"
+      />
+    </g>
+  );
+};
 
 export function PriceChart({
   data,
@@ -39,15 +65,26 @@ export function PriceChart({
 
   // Separate historical and predicted data
   const chartData = useMemo(() => {
-    return data.map((point) => ({
-      timestamp: point.timestamp,
-      date: formatChartDate(point.timestamp, timeRange),
-      price: point.price,
-      predicted: point.predicted ? point.price : null,
-      historical: !point.predicted ? point.price : null,
-      lower: point.prediction_lower || null,
-      upper: point.prediction_upper || null,
-    }));
+    return data.map((point, index) => {
+      const isLastHistorical = !point.predicted && index < data.length - 1 && data[index + 1]?.predicted;
+      const isFirstPrediction = point.predicted && (index === 0 || !data[index - 1]?.predicted);
+      
+      return {
+        timestamp: point.timestamp,
+        date: formatChartDate(point.timestamp, timeRange),
+        price: point.price,
+        predicted: point.predicted ? point.price : null,
+        historical: !point.predicted ? point.price : null,
+        // Connector line: show price at both last historical and first prediction
+        connector: (isLastHistorical || isFirstPrediction) ? point.price : null,
+        lower: point.prediction_lower || null,
+        upper: point.prediction_upper || null,
+        // For the range band, we need [lower, upper] format
+        range: point.prediction_lower && point.prediction_upper 
+          ? [point.prediction_lower, point.prediction_upper] 
+          : null,
+      };
+    });
   }, [data, timeRange]);
 
   // Calculate price range for Y-axis
@@ -149,31 +186,10 @@ export function PriceChart({
               domain={[priceRange.min, priceRange.max]}
               stroke={isDark ? "#9ca3af" : "#6b7280"}
               fontSize={12}
-              tickFormatter={(value) => `${formatPrice(value)}c`}
+              tick={<CustomYAxisTick isDark={isDark} />}
             />
             <Tooltip content={<CustomTooltip />} />
             <Legend />
-
-            {/* Prediction band */}
-            {showPredictionBands && (
-              <Area
-                type="monotone"
-                dataKey="upper"
-                stroke="none"
-                fill={isDark ? "#3b82f6" : "#93c5fd"}
-                fillOpacity={0.2}
-                name="Prediction Range"
-              />
-            )}
-            {showPredictionBands && (
-              <Area
-                type="monotone"
-                dataKey="lower"
-                stroke="none"
-                fill={isDark ? "#3b82f6" : "#93c5fd"}
-                fillOpacity={0.2}
-              />
-            )}
 
             {/* Historical prices */}
             <Line
@@ -182,21 +198,45 @@ export function PriceChart({
               stroke={isDark ? "#3b82f6" : "#2563eb"}
               strokeWidth={2}
               dot={false}
-              name="Historical Price"
+              name="Historical"
               connectNulls={false}
+            />
+
+            {/* Connector line - bridges historical to predicted */}
+            <Line
+              type="monotone"
+              dataKey="connector"
+              stroke={isDark ? "#6b7280" : "#9ca3af"}
+              strokeWidth={2}
+              strokeDasharray="3 3"
+              dot={false}
+              legendType="none"
+              connectNulls={true}
             />
 
             {/* Predicted prices */}
             <Line
               type="monotone"
               dataKey="predicted"
-              stroke={isDark ? "#10b981" : "#059669"}
+              stroke={isDark ? "#f59e0b" : "#d97706"}
               strokeWidth={2}
               strokeDasharray="5 5"
               dot={false}
-              name="Predicted Price"
+              name="Predicted"
               connectNulls={false}
             />
+
+            {/* Prediction band - using range format [lower, upper] */}
+            {showPredictionBands && (
+              <Area
+                type="monotone"
+                dataKey="range"
+                stroke="none"
+                fill={isDark ? "#f59e0b" : "#fbbf24"}
+                fillOpacity={0.2}
+                name="Prediction Range"
+              />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
       </CardContent>
