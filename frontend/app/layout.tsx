@@ -70,9 +70,6 @@ export const metadata: Metadata = {
     images: ['https://poeconomy.com/og-image.png'],
     creator: '@poeconomy',
   },
-  alternates: {
-    canonical: 'https://poeconomy.com',
-  },
   category: 'Gaming',
   classification: 'Path of Exile Trading Tools',
   other: {
