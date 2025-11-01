@@ -41,20 +41,22 @@ export default function DashboardPage() {
     }
   }, [currenciesData, currenciesLoading]);
 
-  // Get first league for initial data
-  const firstLeague = useMemo(() => {
+  // Get preferred league for initial data - prefer "Keepers" if available
+  const preferredLeague = useMemo(() => {
     if (!leaguesData) return null;
-    return Object.keys(leaguesData.leagues)[0];
+    const leagues = Object.keys(leaguesData.leagues);
+    // Prefer "Keepers" if available, otherwise use first league
+    return leagues.includes("Keepers") ? "Keepers" : leagues[0];
   }, [leaguesData]);
 
   // Fetch latest predictions using the optimized endpoint
   // Load all currencies for complete statistics
   // Only fetch when we have a league to prevent multiple calls
   const { data: predictionsData, isLoading: predictionsLoading } = useLatestPredictions({
-    league: firstLeague || undefined,
+    league: preferredLeague || undefined,
     horizons: ["1d"], // Only 1d horizon for dashboard
     limit: 500, // Increase limit to get more currencies
-    enabled: !!firstLeague, // Only fetch when we have a league
+    enabled: !!preferredLeague, // Only fetch when we have a league
   });
 
   // Remove automatic cache invalidation to prevent infinite loops
