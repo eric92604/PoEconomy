@@ -154,7 +154,7 @@ def lambda_handler(event: Optional[dict], _context) -> Dict[str, object]:
 
     for league in leagues:
         logger.info(f"Ingesting data for league {league} (categories: {categories})")
-        payload = fetch_poe_watch_data(league, timeout=timeout, categories=categories)
+        payload = fetch_poe_watch_data(league, timeout=timeout, categories=categories, logger=logger)
         price_items = build_price_items(payload, league, ttl_epoch)
         metadata_items = build_metadata_items(payload, league, iso_now)
 

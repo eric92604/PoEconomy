@@ -228,10 +228,13 @@ class BaseModel(ABC):
         y_val: Optional[np.ndarray] = None
     ) -> None:
         """Fit the model to training data."""
+        if self.model is None:
+            raise ValueError("Model has not been initialized. Call _create_model() first.")
+        
         start_time = time.time()
         
-        if X_val is not None and y_val is not None and len(X_val) >= 5:
-            # Only use early stopping if we have sufficient validation data
+        if X_val is not None and y_val is not None:
+            # Always use early stopping when validation data exists
             if isinstance(self.model, lgb.LGBMRegressor):
                 # LightGBM early stopping
                 self.model.fit(
@@ -240,15 +243,25 @@ class BaseModel(ABC):
                     callbacks=[lgb.early_stopping(self.config.early_stopping_rounds, verbose=False)]
                 )
             elif isinstance(self.model, xgb.XGBRegressor):
-                # XGBoost early stopping - use the correct API for version 2.1.0
+                # XGBoost early stopping - use parameter-based approach when available
                 try:
-                    # For XGBoost 2.1.0+, early_stopping_rounds should be set during model initialization
-                    # and eval_set should be provided to fit()
-                    self.model.fit(
-                        X, y,
-                        eval_set=[(X_val, y_val)],
-                        verbose=False
-                    )
+                    # Check if early_stopping_rounds is set in model params
+                    model_params = self.model.get_params()
+                    if 'early_stopping_rounds' in model_params and model_params['early_stopping_rounds'] is not None:
+                        # Use parameter-based early stopping (for non-Optuna training)
+                        self.model.fit(
+                            X, y,
+                            eval_set=[(X_val, y_val)],
+                            verbose=False
+                        )
+                    else:
+                        # When Optuna is active, train without XGBoost's built-in early stopping
+                        # Optuna will handle pruning based on validation scores
+                        self.model.fit(
+                            X, y,
+                            eval_set=[(X_val, y_val)],
+                            verbose=False
+                        )
                 except (TypeError, AttributeError, ImportError) as e:
                     # If early stopping fails, train without it
                     if self.logger:
@@ -258,9 +271,8 @@ class BaseModel(ABC):
                 # Other models without early stopping
                 self.model.fit(X, y)
         else:
-            # No validation data or insufficient data - train without early stopping
-            if self.logger and X_val is not None and len(X_val) < 5:
-                self.logger.warning(f"Insufficient validation data for early stopping: {len(X_val)} samples. Training without early stopping.")
+            # No validation data - train without early stopping
+            # This is expected during cross-validation where validation folds are used separately for evaluation
             self.model.fit(X, y)
         
         training_time = time.time() - start_time
@@ -307,25 +319,25 @@ class LightGBMModel(BaseModel):
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> lgb.LGBMRegressor:
         """Create LightGBM model with optimal parameters."""
         if trial is not None:
-            # Hyperparameter optimization - ranges optimized for small datasets
+            # Hyperparameter optimization
             params = {
-                'n_estimators': trial.suggest_int('lgb_n_estimators', 50, 200),  # Reduced for small datasets
-                'max_depth': trial.suggest_int('lgb_max_depth', 4, 8),
-                'learning_rate': trial.suggest_float('lgb_learning_rate', 0.01, 0.2),
-                'num_leaves': trial.suggest_int('lgb_num_leaves', 31, 127),  # 2^5 to 2^7-1
-                'min_child_samples': trial.suggest_int('lgb_min_child_samples', 10, 50),
-                'subsample': trial.suggest_float('lgb_subsample', 0.7, 1.0),
-                'colsample_bytree': trial.suggest_float('lgb_colsample_bytree', 0.7, 1.0),
-                'reg_alpha': trial.suggest_float('lgb_reg_alpha', 0.0, 5.0),
-                'reg_lambda': trial.suggest_float('lgb_reg_lambda', 0.0, 5.0),
+                'n_estimators': trial.suggest_int('lgb_n_estimators', 100, 1000),
+                'max_depth': trial.suggest_int('lgb_max_depth', 3, 15),
+                'learning_rate': trial.suggest_float('lgb_learning_rate', 0.01, 0.3),
+                'num_leaves': trial.suggest_int('lgb_num_leaves', 10, 300),
+                'min_child_samples': trial.suggest_int('lgb_min_child_samples', 5, 100),
+                'subsample': trial.suggest_float('lgb_subsample', 0.5, 1.0),
+                'colsample_bytree': trial.suggest_float('lgb_colsample_bytree', 0.5, 1.0),
+                'reg_alpha': trial.suggest_float('lgb_reg_alpha', 0.0, 10.0),
+                'reg_lambda': trial.suggest_float('lgb_reg_lambda', 0.0, 10.0),
             }
         else:
-            # Default parameters - use n_model_trials for training iterations
+            # Default parameters
             params = {
                 'n_estimators': self.config.n_model_trials,
                 'max_depth': self.config.max_depth,  # Use environment variable
                 'learning_rate': self.config.learning_rate,  # Use environment variable
-                'num_leaves': 2**self.config.max_depth - 1,  # Calculate based on max_depth
+                'num_leaves': 100,
                 'min_child_samples': 20,
                 'subsample': 0.8,
                 'colsample_bytree': 0.8,
@@ -335,10 +347,9 @@ class LightGBMModel(BaseModel):
         
         # Calculate optimal n_jobs based on system resources and parallel context
         import os
-        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '6'))
+        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '4'))
         
         if max_currency_workers > 1:
-            # For 8 vCPU system: 6 currency workers × 1-2 model jobs = 6-12 processes (optimal)
             optimal_n_jobs = max(1, min(self.config.model_n_jobs, 2))
         else:
             # Single currency worker: can use more resources
@@ -364,24 +375,24 @@ class XGBoostModel(BaseModel):
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> xgb.XGBRegressor:
         """Create XGBoost model with optimal parameters."""
         if trial is not None:
-            # Hyperparameter optimization - ranges optimized for small datasets
+            # Hyperparameter optimization
             params = {
-                'n_estimators': trial.suggest_int('xgb_n_estimators', 50, 200),  # Reduced for small datasets
-                'max_depth': trial.suggest_int('xgb_max_depth', 4, 8),
-                'learning_rate': trial.suggest_float('xgb_learning_rate', 0.01, 0.2),
-                'min_child_weight': trial.suggest_int('xgb_min_child_weight', 1, 5),
-                'subsample': trial.suggest_float('xgb_subsample', 0.7, 1.0),
-                'colsample_bytree': trial.suggest_float('xgb_colsample_bytree', 0.7, 1.0),
-                'reg_alpha': trial.suggest_float('xgb_reg_alpha', 0.0, 5.0),
-                'reg_lambda': trial.suggest_float('xgb_reg_lambda', 0.0, 5.0),
+                'n_estimators': trial.suggest_int('xgb_n_estimators', 100, 1000),
+                'max_depth': trial.suggest_int('xgb_max_depth', 3, 15),
+                'learning_rate': trial.suggest_float('xgb_learning_rate', 0.01, 0.3),
+                'min_child_weight': trial.suggest_int('xgb_min_child_weight', 1, 10),
+                'subsample': trial.suggest_float('xgb_subsample', 0.5, 1.0),
+                'colsample_bytree': trial.suggest_float('xgb_colsample_bytree', 0.5, 1.0),
+                'reg_alpha': trial.suggest_float('xgb_reg_alpha', 0.0, 10.0),
+                'reg_lambda': trial.suggest_float('xgb_reg_lambda', 0.0, 10.0),
             }
         else:
-            # Default parameters - use n_model_trials for training iterations
+            # Default parameters
             params = {
                 'n_estimators': self.config.n_model_trials,
                 'max_depth': self.config.max_depth,  # Use environment variable
                 'learning_rate': self.config.learning_rate,  # Use environment variable
-                'min_child_weight': 1,  # Reduced from 3 for better performance
+                'min_child_weight': 3,
                 'subsample': 0.8,
                 'colsample_bytree': 0.8,
                 'reg_alpha': 0.1,
@@ -390,10 +401,10 @@ class XGBoostModel(BaseModel):
         
         # Calculate optimal n_jobs based on system resources and parallel context
         import os
-        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '6'))
+        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '4'))
         
         if max_currency_workers > 1:
-            # For 8 vCPU system: 6 currency workers × 1-2 model jobs = 6-12 processes (optimal)
+            # For 16 vCPU system: 4 currency workers × 1-2 model jobs = 4-8 processes (optimal)
             optimal_n_jobs = max(1, min(self.config.model_n_jobs, 2))
         else:
             # Single currency worker: can use more resources
@@ -404,8 +415,12 @@ class XGBoostModel(BaseModel):
             'n_jobs': optimal_n_jobs,
             'tree_method': 'hist',  # type: ignore[dict-item]  # Optimal for multi-core
             'verbosity': 0,
-            'early_stopping_rounds': self.config.early_stopping_rounds  # Set early stopping during initialization for XGBoost 2.1.0+
         })
+        
+        # Only set early_stopping_rounds when NOT using Optuna (trial is None)
+        # Optuna handles pruning itself and conflicts with XGBoost's built-in early stopping
+        if trial is None:
+            params['early_stopping_rounds'] = self.config.early_stopping_rounds
         
         return xgb.XGBRegressor(**params)
     
@@ -440,10 +455,10 @@ class RandomForestModel(BaseModel):
         
         # Calculate optimal n_jobs based on system resources and parallel context
         import os
-        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '6'))
+        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '4'))
         
         if max_currency_workers > 1:
-        # For 8 vCPU system: 6 currency workers × 1-2 model jobs = 6-12 processes (optimal)
+            # For 16 vCPU system: 4 currency workers × 1-2 model jobs = 4-8 processes (optimal)
             optimal_n_jobs = max(1, min(self.config.model_n_jobs, 2))
         else:
             # Single currency worker: can use more resources
@@ -491,7 +506,9 @@ class EnsembleModel:
     ) -> None:
         """Fit all models in the ensemble."""
         for i, model in enumerate(self.models):
-            model.model = model._create_model()
+            # Only create model if it doesn't already exist (may have been created with optimized params)
+            if model.model is None:
+                model.model = model._create_model()
             model.fit(X, y, X_val, y_val)
     
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -758,18 +775,10 @@ class ModelTrainer:
         X_train, X_test = X[:split_idx], X[split_idx:]
         y_train, y_test = y[:split_idx], y[split_idx:]
         
-        # Further split training data for validation (only if we have enough data)
-        min_val_samples = 10  # Reduced from 20 to 10
-        if len(X_train) > min_val_samples * 2:  # Need at least 20 samples for validation
-            val_split_idx = int(len(X_train) * 0.8)
-            X_train_split, X_val = X_train[:val_split_idx], X_train[val_split_idx:]
-            y_train_split, y_val = y_train[:val_split_idx], y_train[val_split_idx:]
-        else:
-            # Not enough data for validation split, use all training data
-            X_train_split, X_val = X_train, None
-            y_train_split, y_val = y_train, None
-            if self.logger:
-                self.logger.warning(f"Insufficient data for validation split: {len(X_train)} samples (need at least {min_val_samples * 2})")
+        # Further split training data for validation (always create validation split)
+        val_split_idx = int(len(X_train) * 0.8)
+        X_train_split, X_val = X_train[:val_split_idx], X_train[val_split_idx:]
+        y_train_split, y_val = y_train[:val_split_idx], y_train[val_split_idx:]
         
         # Scale features if needed
         scaler = None
@@ -780,11 +789,11 @@ class ModelTrainer:
                 X_val = scaler.transform(X_val)
             X_test = scaler.transform(X_test)
         
-        # Train model
+        # Train model (validation data is always available now)
         if model_type == "ensemble":
-            model: Any = self._train_ensemble_model(X_train_split, y_train_split, X_val if X_val is not None else X_train_split, y_val if y_val is not None else y_train_split, currency)
+            model: Any = self._train_ensemble_model(X_train_split, y_train_split, X_val, y_val, currency)
         else:
-            model = self._train_single_base_model(X_train_split, y_train_split, X_val if X_val is not None else X_train_split, y_val if y_val is not None else y_train_split, currency, model_type)
+            model = self._train_single_base_model(X_train_split, y_train_split, X_val, y_val, currency, model_type)
         
         # Make predictions and calculate metrics
         y_pred = model.predict(X_test)
@@ -842,13 +851,12 @@ class ModelTrainer:
                         LightGBMModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
                     )
                     lgb_model.model = lgb_model._create_model_with_params(optimized_params)
+                    if self.logger:
+                        self.logger.info(f"Using optimized LightGBM params for {currency}")
                 except Exception as e:
                     if self.logger:
                         self.logger.warning(f"LightGBM optimization failed for {currency}: {e}. Using default parameters.")
                     lgb_model.model = lgb_model._create_model()
-                
-                if self.logger:
-                    self.logger.info(f"Using optimized LightGBM params for {currency}")
                 
                 models.append(lgb_model)
             
@@ -864,13 +872,12 @@ class ModelTrainer:
                         XGBoostModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
                     )
                     xgb_model.model = xgb_model._create_model_with_params(optimized_params)
+                    if self.logger:
+                        self.logger.info(f"Using optimized XGBoost params for {currency}")
                 except Exception as e:
                     if self.logger:
                         self.logger.warning(f"XGBoost optimization failed for {currency}: {e}. Using default parameters.")
                     xgb_model.model = xgb_model._create_model()
-                
-                if self.logger:
-                    self.logger.info(f"Using optimized XGBoost params for {currency}")
                 
                 models.append(xgb_model)  # type: ignore[arg-type]
         else:
@@ -976,11 +983,11 @@ class ModelTrainer:
                     X_train_cv, X_val_cv = X[train_idx], X[val_idx]
                     y_train_cv, y_val_cv = y[train_idx], y[val_idx]
                     
-                    # Create temporary model
+                    # Create temporary model with logger for proper error handling
                     temp_ensemble = EnsembleModel([
-                        LightGBMModel(self.config),
-                        XGBoostModel(self.config)
-                    ])
+                        LightGBMModel(self.config, self.logger),
+                        XGBoostModel(self.config, self.logger)
+                    ], logger=self.logger)
                     temp_ensemble.fit(X_train_cv, y_train_cv)
                     
                     y_pred_cv = temp_ensemble.predict(X_val_cv)
@@ -990,8 +997,18 @@ class ModelTrainer:
             return scores  # type: ignore[no-any-return]
             
         except Exception as e:
-            if self.logger:
-                self.logger.warning(f"Cross-validation failed: {e}")
+            # Use try/except to avoid logger errors masking CV errors
+            try:
+                if self.logger and hasattr(self.logger, 'logger') and self.logger.logger is not None:
+                    self.logger.warning(f"Cross-validation failed: {str(e)}")
+                else:
+                    # Fallback to print if logger is not available
+                    import sys
+                    sys.stderr.write(f"Cross-validation failed: {str(e)}\n")
+            except Exception as logger_error:
+                # If logger itself fails, use stderr as last resort
+                import sys
+                sys.stderr.write(f"Cross-validation failed: {str(e)} (logger error: {str(logger_error)})\n")
             return []
 
 

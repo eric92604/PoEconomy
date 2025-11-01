@@ -218,7 +218,7 @@ Resources:
               Value: !Ref DataLakeBucketName
             - Name: TASK_TIMEOUT_MINUTES
               Value: !Ref TaskTimeoutMinutes
-          StopTimeout: !Ref TaskTimeoutMinutes
+          StopTimeout: 60
       Tags:
         - Key: App
           Value: PoEconomy

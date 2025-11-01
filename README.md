@@ -50,7 +50,7 @@ PoEconomy/
 
 ### AWS Backend
 - **Runtime**: Python 3.11
-- **Compute**: AWS Lambda (256MB-1024MB memory allocation) + Fargate Spot (8 vCPU, 16GB)
+- **Compute**: AWS Lambda (256MB-1024MB memory allocation) + Fargate Spot (16 vCPU, 32GB)
 - **Database**: DynamoDB with on-demand billing
 - **Storage**: S3 with intelligent tiering (data lake + models bucket)
 - **API**: API Gateway with regional endpoints
@@ -291,7 +291,7 @@ Attributes: prediction_data, created_at, confidence
 
 #### TrainingCluster
 - **Capacity Providers**: Fargate Spot (100%)
-- **Compute**: 8 vCPU, 16GB RAM
+- **Compute**: 16 vCPU, 32GB RAM
 - **Purpose**: Cost-optimized ML model training
 - **Data Source**: S3 data lake with processed parquet data
 - **Output**: Trained models uploaded to S3 models bucket

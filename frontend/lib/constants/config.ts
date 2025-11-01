@@ -6,7 +6,9 @@ export const APP_VERSION = "1.0.0";
 
 export const SUPPORTED_LEAGUES = [
   "Affliction",
-  "Ancestor", 
+  "Ancestor",
+  "Keepers",
+  "Mercenaries",
   "Necro Settlers",
   "Necropolis",
   "Phrecia",

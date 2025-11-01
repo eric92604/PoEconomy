@@ -81,18 +81,14 @@ class FeatureEngineer:
             df_processed = self._engineer_rolling_features(df_processed)
             transformations_applied.append("rolling_features")
             
-            # 6. Volatility features (handled in _add_volatility_features)
-            
-            
-            # 8. Target variables
+            # 6. Target variables
             df_processed = self._create_targets(df_processed)
             transformations_applied.append("target_creation")
             
-            # 9. Outlier removal
+            # 7. Outlier removal
             if self.processing_config.outlier_removal:
                 df_processed = self._remove_outliers(df_processed)
                 transformations_applied.append("outlier_removal")
-            
             
             # Statistics
             final_shape = df_processed.shape
@@ -146,7 +142,10 @@ class FeatureEngineer:
             return df
         
         # Basic time features
-        df['is_weekend'] = df['date'].dt.dayofweek.isin([5, 6]).astype(int)
+        df['day_of_week'] = df['date'].dt.dayofweek
+        df['day_of_month'] = df['date'].dt.day
+        df['month'] = df['date'].dt.month
+        df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
         
         # League-specific time features
         if 'league_name' in df.columns:
@@ -155,15 +154,15 @@ class FeatureEngineer:
             df['league_start'] = df['league_name'].map(league_starts)
             df['league_day'] = (df['date'] - df['league_start']).dt.days
             
-        # League phase features
-        max_league_day = df.groupby('league_name')['league_day'].max()
-        df['league_max_day'] = df['league_name'].map(max_league_day)
-        
-        # Detailed league phase bins (early to mid league focus)
-        df['league_phase'] = pd.cut(df['league_day'], 
-            bins=[0, 3, 7, 14, 21, 30, 45, 60, float('inf')], 
-            labels=['launch', 'week1', 'week2', 'week3', 'week4', 'month2', 'month3', 'endgame']
-        )
+            # League phase features
+            max_league_day = df.groupby('league_name')['league_day'].max()
+            df['league_max_day'] = df['league_name'].map(max_league_day)
+            df['league_progress'] = df['league_day'] / (df['league_max_day'] + 1)
+            
+            # League age (how old is the league relative to others)
+            latest_start = league_starts.max()
+            league_age = (latest_start - league_starts).dt.days
+            df['league_age_days'] = df['league_name'].map(league_age)
         
         return df
     
@@ -172,9 +171,13 @@ class FeatureEngineer:
         if 'price' not in df.columns:
             return df
         
-        # Log transformation removed - not needed for currency prediction
+        # Log transformation
+        if self.processing_config.log_transform:
+            price_range = df['price'].max() / df['price'].min()
+            if price_range > self.processing_config.log_transform_ratio_threshold:
+                df['price_log'] = np.log1p(df['price'])
         
-        # Price changes with null handling
+        # Price changes
         if 'league_name' in df.columns:
             df['price_change_1d'] = df.groupby('league_name')['price'].diff()
             df['price_change_pct_1d'] = df.groupby('league_name')['price'].pct_change()
@@ -182,28 +185,16 @@ class FeatureEngineer:
             df['price_change_1d'] = df['price'].diff()
             df['price_change_pct_1d'] = df['price'].pct_change()
         
-        # Fill null values in price changes with 0 (no change)
-        df['price_change_1d'] = df['price_change_1d'].fillna(0)
-        df['price_change_pct_1d'] = df['price_change_pct_1d'].fillna(0)
-        
-        # Price momentum - use consistent horizons: 1, 3, 5, 7
-        momentum_periods = getattr(self.config, 'momentum_periods', [1, 3, 5, 7])
+        # Price momentum
+        momentum_periods = getattr(self.config, 'momentum_periods', [3, 5, 7])
         for period in momentum_periods:
-            if 'league_name' in df.columns:
-                df[f'momentum_{period}d'] = df.groupby('league_name')['price'].transform(
-                    lambda x: x.pct_change(periods=period)
-                )
-            else:
-                df[f'momentum_{period}d'] = df['price'].pct_change(periods=period)
-        
-        # Price acceleration (second derivative) with null handling
-        if 'league_name' in df.columns:
-            df['price_acceleration'] = df.groupby('league_name')['price_change_pct_1d'].diff()
-        else:
-            df['price_acceleration'] = df['price_change_pct_1d'].diff()
-        
-        # Fill null values in price acceleration with 0 (no acceleration)
-        df['price_acceleration'] = df['price_acceleration'].fillna(0)
+            if period > 1:
+                if 'league_name' in df.columns:
+                    df[f'momentum_{period}d'] = df.groupby('league_name')['price'].transform(
+                        lambda x: x.pct_change(periods=period)
+                    )
+                else:
+                    df[f'momentum_{period}d'] = df['price'].pct_change(periods=period)
         
         return df
     
@@ -214,7 +205,7 @@ class FeatureEngineer:
         
         # League statistics
         league_stats = df.groupby('league_name')['price'].agg([
-            'mean', 'std', 'min', 'max', 'median'
+            'count', 'mean', 'std', 'min', 'max', 'median'
         ]).add_prefix('league_price_')
         
         # Merge back to main dataframe
@@ -223,8 +214,17 @@ class FeatureEngineer:
         # Price relative to league statistics
         df['price_vs_league_mean'] = df['price'] / df['league_price_mean']
         df['price_vs_league_median'] = df['price'] / df['league_price_median']
-        df['price_vs_league_min'] = df['price'] / df['league_price_min']
-        df['price_vs_league_max'] = df['price'] / df['league_price_max']
+        
+        # Price percentile within league
+        df['price_percentile_in_league'] = df.groupby('league_name')['price'].transform(
+            lambda x: x.rank(pct=True)
+        )
+        
+        # League recency ranking
+        league_recency = df.groupby('league_name')['league_start'].first().rank(
+            method='dense', ascending=False
+        )
+        df['league_recency_rank'] = df['league_name'].map(league_recency)
         
         return df
     
@@ -264,8 +264,8 @@ class FeatureEngineer:
                 # Skip std and zscore for 1-day window
                 continue
             
-            # For windows > 1, use min_periods=1 for std calculation (more permissive)
-            min_periods_std = 1  # Allow std calculation with single data point
+            # For windows > 1, use min_periods=2 for std calculation
+            min_periods_std = max(2, min(window, 2))  # At least 2 points for std
             
             if 'league_name' in df.columns:
                 # Rolling statistics within each league
@@ -295,19 +295,13 @@ class FeatureEngineer:
             std_col = f'price_std_{window}d'
             mean_col = f'price_mean_{window}d'
             
-            # Create z-score with null handling
-            df[f'price_zscore_{window}d'] = np.nan
-            
-            # Only calculate z-score where we have valid std values
+            # Z-score (robust) - only calculate where std is available and > 0
             valid_std_mask = (df[std_col].notna()) & (df[std_col] > 1e-8)
-            if valid_std_mask.any():
-                df.loc[valid_std_mask, f'price_zscore_{window}d'] = (
-                    (df.loc[valid_std_mask, 'price'] - df.loc[valid_std_mask, mean_col]) / 
-                    df.loc[valid_std_mask, std_col]
-                )
-            
-            # Fill remaining null z-scores with 0 (neutral z-score)
-            df[f'price_zscore_{window}d'] = df[f'price_zscore_{window}d'].fillna(0)
+            df[f'price_zscore_{window}d'] = np.nan
+            df.loc[valid_std_mask, f'price_zscore_{window}d'] = (
+                (df.loc[valid_std_mask, 'price'] - df.loc[valid_std_mask, mean_col]) / 
+                df.loc[valid_std_mask, std_col]
+            )
             
             # Debug: Log the rolling calculation results
             if hasattr(self, 'logger') and self.logger:
@@ -509,14 +503,8 @@ class FeatureEngineer:
             else:
                 df[f'target_price_{horizon}d'] = df['price'].shift(-horizon)
             
-            # Price change targets with null handling
+            # Price change targets
             df[f'target_change_{horizon}d'] = df[f'target_price_{horizon}d'] - df['price']
-            
-            # For null target prices, use current price as target (no change prediction)
-            null_target_mask = df[f'target_price_{horizon}d'].isna()
-            if null_target_mask.any():
-                df.loc[null_target_mask, f'target_price_{horizon}d'] = df.loc[null_target_mask, 'price']
-                df.loc[null_target_mask, f'target_change_{horizon}d'] = 0
             df[f'target_change_pct_{horizon}d'] = (
                 df[f'target_change_{horizon}d'] / df['price']
             ) * 100
