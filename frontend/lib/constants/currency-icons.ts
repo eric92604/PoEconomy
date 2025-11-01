@@ -199,6 +199,7 @@ export const CURRENCY_ICON_MAP: Record<string, string> = {
   "orb_of_annulment": "/images/currency/orb_of_annulment.avif",
   "orb_of_horizons": "/images/currency/orb_of_horizons.avif",
   "tattoo_of_the_ngamahu_warrior": "/images/currency/tattoo_of_the_ngamahu_warrior.avif",
+  "harbinger's_shard": "/images/currency/harbinger_s_shard.avif",
   "syndicate_medallion": "/images/currency/syndicate_medallion.avif",
   "omen_of_blanching": "/images/currency/omen_of_blanching.avif",
   "harbinger's_orb": "/images/currency/harbinger_s_orb.avif",

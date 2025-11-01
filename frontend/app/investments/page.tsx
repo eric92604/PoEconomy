@@ -65,10 +65,12 @@ export default function InvestmentsPage() {
     return Object.keys(leaguesData.leagues);
   }, [leaguesData]);
 
-  // Set default league
+  // Set default league - prefer "Keepers" if available
   useEffect(() => {
     if (leagues.length > 0 && !selectedLeague) {
-      setSelectedLeague(leagues[0]);
+      // Prefer "Keepers" if available, otherwise use first league
+      const preferredLeague = leagues.includes("Keepers") ? "Keepers" : leagues[0];
+      setSelectedLeague(preferredLeague);
     }
   }, [leagues, selectedLeague]);
 
