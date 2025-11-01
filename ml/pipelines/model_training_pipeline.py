@@ -76,15 +76,10 @@ class ModelTrainingPipeline:
         self.data_source = create_s3_data_source(s3_config, self.logger)
         self.logger.info(f"Using S3 data source for processed data from bucket: {data_lake_bucket}")
         
-        # Create experiment-specific models directory
-        experiment_models_dir = config.paths.models_dir.parent / f"currency_{config.experiment.experiment_id}"
-        experiment_models_dir.mkdir(parents=True, exist_ok=True)
-        self.config.paths.models_dir = experiment_models_dir
-        
-        self.logger.info(f"Models will be saved to: {experiment_models_dir}")
-        
         # Store S3 configuration for log uploads
         self.data_lake_bucket = data_lake_bucket
+        
+        # Note: Models directory will be created after experiment_id is potentially updated from processed data
         
         # Initialize tracking
         self.results: List[Any] = []
@@ -133,6 +128,12 @@ class ModelTrainingPipeline:
                 self.logger.error("3. The DATA_LAKE_BUCKET environment variable is not set correctly")
                 self.logger.error("Please ensure the feature engineering pipeline has run and created processed data")
                 return []
+            
+            # Create experiment-specific models directory now that experiment_id is finalized
+            experiment_models_dir = self.config.paths.models_dir.parent / f"currency_{self.config.experiment.experiment_id}"
+            experiment_models_dir.mkdir(parents=True, exist_ok=True)
+            self.config.paths.models_dir = experiment_models_dir
+            self.logger.info(f"Models will be saved to: {experiment_models_dir} (experiment_id: {self.config.experiment.experiment_id})")
             
             # Extract currencies from processed data
             target_currencies = self._extract_currencies_from_processed_data(processed_data)
@@ -385,10 +386,15 @@ class ModelTrainingPipeline:
             # Reconstruct configuration from dict
             config = MLConfig.from_dict(shared_data['config_dict'])
             
-            # Intelligent resource allocation in worker processes for 8 vCPU system
-            # Allow more resources per worker since we have 8 vCPUs
-            config.model.max_optuna_workers = min(config.model.max_optuna_workers, 3)  # Up to 3 Optuna workers per currency
-            config.model.model_n_jobs = min(config.model.model_n_jobs, 2)  # Up to 2 model jobs per currency
+            # Calculate optimal threading based on system resources
+            import multiprocessing
+            total_cores = multiprocessing.cpu_count()
+            max_currency_workers = config.model.max_currency_workers
+            optimal_model_threads = min(4, max(2, total_cores // max_currency_workers))
+            
+            # Set optimal threading for this worker
+            config.model.model_n_jobs = optimal_model_threads
+            config.model.max_optuna_workers = max(1, min(config.model.max_optuna_workers, optimal_model_threads))
             
             # Create pipeline instance for this worker
             pipeline = ModelTrainingPipeline(config)

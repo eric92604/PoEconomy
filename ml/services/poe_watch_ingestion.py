@@ -41,20 +41,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def fetch_poe_watch_data(league: str, timeout: int, categories: List[str] = None) -> List[dict]:
+def fetch_poe_watch_data(league: str, timeout: int, categories: List[str] = None, logger: Optional[MLLogger] = None) -> List[dict]:
     """Fetch data from POE Watch API for specified categories.
     
     Args:
         league: League name to fetch data for
         timeout: HTTP timeout in seconds
         categories: List of categories to fetch (defaults to ["currency", "fragment"])
+        logger: Optional logger for warnings (defaults to None)
         
     Returns:
         List of items from POE Watch API
         
     Raises:
         requests.RequestException: If API request fails
-        ValueError: If response format is unexpected
     """
     if categories is None:
         categories = ["currency", "fragment"]
@@ -62,12 +62,65 @@ def fetch_poe_watch_data(league: str, timeout: int, categories: List[str] = None
     all_data = []
     for category in categories:
         params = {"category": category, "league": league}
-        response = requests.get(POE_WATCH_URL, params=params, timeout=timeout)
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, list):
-            raise ValueError(f"Unexpected response for league {league}, category {category}: {payload!r}")
-        all_data.extend(payload)
+        
+        # Log the exact request being made
+        if logger:
+            request_url = f"{POE_WATCH_URL}?category={category}&league={league}"
+            logger.debug(f"Making request to POE Watch API: {request_url}")
+            logger.debug(f"Request parameters: {params}")
+        
+        try:
+            response = requests.get(POE_WATCH_URL, params=params, timeout=timeout)
+            response.raise_for_status()
+            
+            # Log response details
+            if logger:
+                logger.debug(f"Response status: {response.status_code}")
+                logger.debug(f"Response URL: {response.url}")
+                logger.debug(f"Response headers: {dict(response.headers)}")
+                logger.debug(f"Response text length: {len(response.text)}")
+            
+            # Check if response is empty
+            if not response.text or response.text.strip() == '':
+                if logger:
+                    logger.warning(f"Empty response for league {league}, category {category}")
+                continue
+            
+            # Parse JSON response
+            try:
+                payload = response.json()
+            except (ValueError, json.JSONDecodeError) as e:
+                if logger:
+                    logger.warning(f"Failed to parse JSON response for league {league}, category {category}: {e}")
+                    logger.debug(f"Response text (first 500 chars): {response.text[:500]}")
+                continue
+            
+            # Log the payload type and a preview
+            if logger:
+                logger.debug(f"Response payload type: {type(payload).__name__}")
+                if payload is not None:
+                    if isinstance(payload, list):
+                        logger.debug(f"Response payload: list with {len(payload)} items")
+                    else:
+                        logger.debug(f"Response payload preview (first 200 chars): {str(payload)[:200]}")
+            
+            # Handle cases where API returns None or non-list response for certain leagues/categories
+            if payload is None:
+                if logger:
+                    logger.warning(f"No data available for league {league}, category {category} (API returned None)")
+                continue
+            elif not isinstance(payload, list):
+                if logger:
+                    logger.warning(f"Unexpected response format for league {league}, category {category}: {payload!r}, skipping")
+                continue
+            
+            # Successfully got a list, add to all_data
+            all_data.extend(payload)
+                
+        except requests.RequestException as e:
+            if logger:
+                logger.error(f"Request failed for league {league}, category {category}: {e}")
+            raise
     
     return all_data
 
@@ -203,7 +256,7 @@ def main() -> None:
 
     for league in leagues:
         logger.info(f"Ingesting POE Watch data for league {league} (categories: {args.categories})")
-        data = fetch_poe_watch_data(league, timeout=args.timeout, categories=args.categories)
+        data = fetch_poe_watch_data(league, timeout=args.timeout, categories=args.categories, logger=logger)
         price_items = build_price_items(data, league, ttl_epoch)
         metadata_items = build_metadata_items(data, league, iso_now)
 

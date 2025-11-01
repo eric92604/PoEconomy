@@ -9,11 +9,11 @@ Environment Variables:
     
     # Hyperparameter Optimization
     N_HYPERPARAMETER_TRIALS: Number of hyperparameter optimization trials (default: 50)
-    N_MODEL_TRIALS: Number of model training iterations (default: 100)
+    N_MODEL_TRIALS: Number of model training iterations (default: 500)
     CV_FOLDS: Number of cross-validation folds (default: 5)
     
     # Model Performance
-    MAX_DEPTH: Maximum tree depth (default: 6)
+    MAX_DEPTH: Maximum tree depth (default: 8)
     LEARNING_RATE: Learning rate for models (default: 0.1)
     
     # Data Selection
@@ -59,11 +59,11 @@ class ModelConfig:
     n_hyperparameter_trials: int = field(default_factory=lambda: int(os.getenv('N_HYPERPARAMETER_TRIALS', '50')))
     
     # Model Performance
-    max_depth: int = field(default_factory=lambda: int(os.getenv('MAX_DEPTH', '6')))
+    max_depth: int = field(default_factory=lambda: int(os.getenv('MAX_DEPTH', '8')))
     learning_rate: float = field(default_factory=lambda: float(os.getenv('LEARNING_RATE', '0.1')))
     
     # Model Training Iterations (number of boosting rounds for LightGBM/XGBoost)
-    n_model_trials: int = field(default_factory=lambda: int(os.getenv('N_MODEL_TRIALS', '100')))
+    n_model_trials: int = field(default_factory=lambda: int(os.getenv('N_MODEL_TRIALS', '500')))
 
 
 @dataclass
@@ -233,8 +233,10 @@ class ExperimentConfig:
     
     def __post_init__(self) -> None:
         if self.experiment_id is None:
-            # Use consistent ID for production training
-            self.experiment_id = "production_training"
+            # Generate timestamp-based experiment ID (xp_YYYYMMDD_HHMMSS)
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.experiment_id = f"xp_{timestamp}"
 
 
 @dataclass

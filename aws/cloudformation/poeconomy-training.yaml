@@ -13,12 +13,16 @@ Parameters:
     Description: Training mode (production, development, test)
   TaskCpu:
     Type: Number
-    Default: 8192
+    Default: 16384
     Description: CPU units for the training task (1024 = 1 vCPU)
   TaskMemory:
     Type: Number
-    Default: 16384
+    Default: 32768
     Description: Memory in MB for the training task
+  EphemeralStorageGiB:
+    Type: Number
+    Default: 100
+    Description: Ephemeral storage in GiB for the training task (20-200 GiB)
   MinRecordsThreshold:
     Type: Number
     Default: 50
@@ -37,7 +41,7 @@ Parameters:
     Description: Number of hyperparameter optimization trials
   NModelTrials:
     Type: Number
-    Default: 100
+    Default: 500
     Description: Number of model training iterations (boosting rounds)
   CVFolds:
     Type: Number
@@ -45,7 +49,7 @@ Parameters:
     Description: Number of cross-validation folds
   MaxDepth:
     Type: Number
-    Default: 6
+    Default: 8
     Description: Maximum tree depth for models
   LearningRate:
     Type: String
@@ -207,6 +211,8 @@ Resources:
         - FARGATE
       Cpu: !Ref TaskCpu
       Memory: !Ref TaskMemory
+      EphemeralStorage:
+        SizeInGiB: !Ref EphemeralStorageGiB
       ExecutionRoleArn: !GetAtt TrainingExecutionRole.Arn
       TaskRoleArn: !GetAtt TrainingTaskRole.Arn
       ContainerDefinitions:
@@ -258,7 +264,10 @@ Resources:
               Value: !Ref MinRecordsThreshold
             - Name: MIN_AVG_VALUE_THRESHOLD
               Value: !Ref MinAvgValueThreshold
-
+          StopTimeout: 60
+      Tags:
+        - Key: App
+          Value: PoEconomy
 
   # IAM Role for ECS Task Execution
   TrainingExecutionRole:
