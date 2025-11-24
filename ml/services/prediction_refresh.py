@@ -43,7 +43,7 @@ from ml.utils.common_utils import MLLogger
 from ml.utils.data_processing import DataProcessor
 from ml.utils.model_inference import (
     _split_currency_label, 
-    _extract_rmse, 
+    _extract_uncertainty_metrics, 
     CurrencyModelBundle, 
     HORIZON_SUFFIXES
 )
@@ -273,7 +273,7 @@ class DirectModelPredictor(ModelPredictor):
                 return None
                 
             if raw_df is not None and not raw_df.empty:
-                processed_df, feature_columns = self._prepare_features(raw_df, currency=currency)
+                processed_df, feature_columns = self._prepare_features(raw_df, currency=currency, horizon=horizon)
                 if processed_df is not None and not processed_df.empty:
                     X, feature_rows = self._extract_feature_matrix(processed_df, feature_columns)
                     if len(feature_rows) > 0:
@@ -288,7 +288,11 @@ class DirectModelPredictor(ModelPredictor):
                                 raise ValueError(
                                     f"Feature count mismatch: expected {expected_features} features, "
                                     f"but got {X.shape[1]} features. This indicates a mismatch between "
-                                    f"training and inference feature engineering configurations."
+                                    f"training and inference feature engineering configurations.\n"
+                                    f"NOTE: If you recently enabled horizon-based feature filtering to prevent "
+                                    f"feature leakage, you need to retrain your models with the same filtering "
+                                    f"logic applied during training. The model for {currency} ({horizon}) was "
+                                    f"trained with {expected_features} features but inference is using {X.shape[1]} features."
                                 )
                             X = scaler.transform(X)
 
@@ -324,9 +328,10 @@ class DirectModelPredictor(ModelPredictor):
                             else:
                                 price_change_pct = 0.0  # Default to no change
 
-                        rmse = _extract_rmse(artifact.metadata)
-                        confidence = self._compute_confidence(rmse, current_price)
-                        lower, upper = self._compute_interval(prediction_value, rmse)
+                        uncertainty_metrics = _extract_uncertainty_metrics(artifact.metadata)
+                        lower, upper = self._compute_interval(prediction_value, uncertainty_metrics)
+                        interval_width = upper - lower
+                        confidence = self._compute_confidence(prediction_value, interval_width)
 
                         result = PredictionResult(
                             currency=currency,

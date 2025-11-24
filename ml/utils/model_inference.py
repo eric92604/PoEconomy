@@ -18,15 +18,30 @@ import math
 import joblib
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 from ml.config.training_config import MLConfig
 from ml.config.inference_config import InferenceConfig, get_inference_config_from_env
 from ml.utils.data_processing import DataProcessor
 from ml.utils.data_sources import create_data_source, DataSourceConfig, BaseDataSource
 from ml.utils.common_utils import MLLogger
+from ml.utils.feature_filtering import (
+    parse_horizon_to_days,
+    filter_features_by_horizon,
+    get_feature_filtering_stats
+)
 
 
 HORIZON_SUFFIXES = {"1d", "3d", "7d", "14d", "30d"}
+
+
+@dataclass
+class UncertaintyMetrics:
+    """Uncertainty metrics for prediction intervals."""
+    rse: float  # Residual standard error
+    sample_size: int  # Training sample size
+    n_features: int  # Number of features
+    confidence_level: float  # Confidence level (e.g., 0.95 for 95%)
 
 
 @dataclass
@@ -143,7 +158,7 @@ class ModelPredictor:
                     days_back=days_back,
                 )
                 if raw_df is not None and not raw_df.empty:
-                    processed_df, feature_columns = self._prepare_features(raw_df, currency=currency)
+                    processed_df, feature_columns = self._prepare_features(raw_df, currency=currency, horizon=horizon)
                     if processed_df is not None and not processed_df.empty:
                         X, feature_rows = self._extract_feature_matrix(processed_df, feature_columns)
                         if len(feature_rows) > 0:
@@ -187,9 +202,10 @@ class ModelPredictor:
                                 else:
                                     price_change_pct = 0.0  # Default to no change
 
-                            rmse = _extract_rmse(artifact.metadata)
-                            confidence = self._compute_confidence(rmse, current_price)
-                            lower, upper = self._compute_interval(prediction_value, rmse)
+                            uncertainty_metrics = _extract_uncertainty_metrics(artifact.metadata)
+                            lower, upper = self._compute_interval(prediction_value, uncertainty_metrics)
+                            interval_width = upper - lower
+                            confidence = self._compute_confidence(prediction_value, interval_width)
 
                             result = PredictionResult(
                                 currency=currency,
@@ -396,6 +412,7 @@ class ModelPredictor:
         self,
         df: pd.DataFrame,
         currency: str,
+        horizon: Optional[str] = None,
     ) -> Tuple[Optional[pd.DataFrame], List[str]]:
         processed_data, metadata = self.data_processor.process_currency_data(df, currency)
         if processed_data is None or processed_data.empty:
@@ -418,9 +435,30 @@ class ModelPredictor:
                     "league_end",
                     "league_active",
                     "get_currency",
+                    "pay_currency",
+                    "_multi_output_targets",
                 )
             )
         ]
+
+        if horizon:
+            filtered_columns, excluded_columns = filter_features_by_horizon(
+                feature_columns, horizon, strict_mode=False
+            )
+            if excluded_columns:
+                stats = get_feature_filtering_stats(feature_columns, horizon, strict_mode=False)
+                self.logger.info(
+                    f"Filtered {len(excluded_columns)} features for {horizon} horizon to prevent feature leakage",
+                    extra={
+                        "horizon": horizon,
+                        "horizon_days": stats['horizon_days'],
+                        "excluded_count": len(excluded_columns),
+                        "remaining_count": len(filtered_columns),
+                        "exclusion_rate": stats['exclusion_rate'],
+                        "excluded_by_window": stats['excluded_by_window']
+                    }
+                )
+            feature_columns = filtered_columns
 
         numeric_columns = []
         for col in feature_columns:
@@ -485,23 +523,34 @@ class ModelPredictor:
         self.logger.debug(f"Feature matrix extraction: {len(filtered_matrix)} rows, {filtered_matrix.shape[1]} features")
         return filtered_matrix, filtered_rows
 
-    def _compute_confidence(self, rmse: Optional[float], current_price: float) -> float:
-        if rmse is None or not math.isfinite(rmse):
-            return 0.5
+    def _get_t_critical(self, confidence_level: float, degrees_of_freedom: int) -> float:
+        """Calculate t-critical value for given confidence level and degrees of freedom."""
+        if degrees_of_freedom > 30:
+            # For large df, use z-value (normal distribution approximation)
+            alpha = 1 - confidence_level
+            return stats.norm.ppf(1 - alpha / 2)
+        else:
+            # Use t-distribution
+            alpha = 1 - confidence_level
+            return stats.t.ppf(1 - alpha / 2, degrees_of_freedom)
 
-        scale = abs(current_price) if current_price else 1.0
-        score = 1.0 - (rmse / (scale + 1e-6))
-        return float(max(0.0, min(1.0, score)))
-
-    def _compute_interval(self, prediction: float, rmse: Optional[float]) -> Tuple[float, float]:
-        if rmse is None or not math.isfinite(rmse):
-            return prediction, prediction
-
-        lower = prediction - rmse
-        upper = prediction + rmse
-        if lower > upper:
-            lower, upper = upper, lower
+    def _compute_interval(self, prediction: float, uncertainty_metrics: UncertaintyMetrics) -> Tuple[float, float]:
+        """Compute prediction interval using t-distribution with RSE."""
+        degrees_of_freedom = max(1, uncertainty_metrics.sample_size - uncertainty_metrics.n_features - 1)
+        t_critical = self._get_t_critical(uncertainty_metrics.confidence_level, degrees_of_freedom)
+        margin = t_critical * uncertainty_metrics.rse
+        lower = prediction - margin
+        upper = prediction + margin
         return float(lower), float(upper)
+
+    def _compute_confidence(self, prediction: float, interval_width: float) -> float:
+        """Compute confidence score based on relative interval width."""
+        if prediction == 0:
+            return 0.5  # Default confidence for zero predictions
+        
+        relative_width = interval_width / abs(prediction)
+        confidence = 1.0 / (1.0 + relative_width)
+        return float(max(0.0, min(1.0, confidence)))
 
 
 def _split_currency_label(label: str) -> Tuple[str, Optional[str]]:
@@ -512,22 +561,30 @@ def _split_currency_label(label: str) -> Tuple[str, Optional[str]]:
     return label, None
 
 
-def _extract_rmse(metadata: Dict) -> Optional[float]:
-    metrics = metadata.get("metrics") if isinstance(metadata, dict) else None
-    if metrics is None:
-        return None
-
-    rmse = metrics.get("rmse") if isinstance(metrics, dict) else None
-    if rmse is None:
-        return None
-
-    if isinstance(rmse, (int, float)):
-        return float(rmse)
-
-    if isinstance(rmse, dict):
-        # Return the first finite value in the dict
-        for value in rmse.values():
-            if isinstance(value, (int, float)) and math.isfinite(value):
-                return float(value)
-
-    return None
+def _extract_uncertainty_metrics(metadata: Dict) -> UncertaintyMetrics:
+    """Extract uncertainty metrics from model metadata."""
+    if not isinstance(metadata, dict):
+        raise ValueError("Metadata must be a dictionary")
+    
+    rse = metadata.get("residual_standard_error")
+    if rse is None or not isinstance(rse, (int, float)) or not math.isfinite(rse):
+        raise ValueError("residual_standard_error not found or invalid in metadata")
+    
+    sample_size = metadata.get("training_samples")
+    if sample_size is None or not isinstance(sample_size, int) or sample_size <= 0:
+        raise ValueError("training_samples not found or invalid in metadata")
+    
+    n_features = metadata.get("n_features")
+    if n_features is None or not isinstance(n_features, int) or n_features < 0:
+        raise ValueError("n_features not found or invalid in metadata")
+    
+    confidence_level = metadata.get("confidence_level", 0.95)
+    if not isinstance(confidence_level, (int, float)) or not (0 < confidence_level < 1):
+        confidence_level = 0.95
+    
+    return UncertaintyMetrics(
+        rse=float(rse),
+        sample_size=int(sample_size),
+        n_features=int(n_features),
+        confidence_level=float(confidence_level),
+    )

@@ -203,17 +203,33 @@ class FeatureEngineer:
         if 'league_name' not in df.columns:
             return df
         
+        if 'price' not in df.columns:
+            return df
+        
         # League statistics
-        league_stats = df.groupby('league_name')['price'].agg([
-            'count', 'mean', 'std', 'min', 'max', 'median'
-        ]).add_prefix('league_price_')
+        try:
+            league_stats = df.groupby('league_name')['price'].agg([
+                'count', 'mean', 'std', 'min', 'max', 'median'
+            ]).add_prefix('league_price_')
+            
+            # Merge back to main dataframe
+            df = df.merge(league_stats, left_on='league_name', right_index=True, how='left')
+        except Exception:
+            # If merge fails, create empty league stats columns
+            for stat in ['count', 'mean', 'std', 'min', 'max', 'median']:
+                if f'league_price_{stat}' not in df.columns:
+                    df[f'league_price_{stat}'] = np.nan
         
-        # Merge back to main dataframe
-        df = df.merge(league_stats, left_on='league_name', right_index=True, how='left')
+        # Price relative to league statistics (with defensive checks)
+        if 'league_price_mean' in df.columns:
+            df['price_vs_league_mean'] = df['price'] / df['league_price_mean'].replace(0, np.nan)
+        else:
+            df['price_vs_league_mean'] = np.nan
         
-        # Price relative to league statistics
-        df['price_vs_league_mean'] = df['price'] / df['league_price_mean']
-        df['price_vs_league_median'] = df['price'] / df['league_price_median']
+        if 'league_price_median' in df.columns:
+            df['price_vs_league_median'] = df['price'] / df['league_price_median'].replace(0, np.nan)
+        else:
+            df['price_vs_league_median'] = np.nan
         
         # Price percentile within league
         df['price_percentile_in_league'] = df.groupby('league_name')['price'].transform(
