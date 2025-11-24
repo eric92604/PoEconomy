@@ -439,6 +439,10 @@ class DynamoDBDataSource(BaseDataSource):
                     league_type = item.get("league_type", "").lower()
                     is_active = item.get("isActive", False)
                     
+                    # Filter out leagues with "Event" in the name
+                    if league_name and "Event" in league_name:
+                        continue
+                    
                     if league_name and league_type == "seasonal" and is_active:
                         start_raw = item.get("startDate") or item.get("start_date")
                         start_date = self._coerce_datetime(start_raw)
@@ -461,6 +465,10 @@ class DynamoDBDataSource(BaseDataSource):
             best_timestamp = None
 
             for stat in stats:
+                # Filter out leagues with "Event" in the name
+                if stat.league and "Event" in stat.league:
+                    continue
+                    
                 timestamp = stat.last_updated or stat.last_availability_check
                 dt = self._coerce_datetime(timestamp) if timestamp else None
                 if dt is None:
@@ -475,12 +483,18 @@ class DynamoDBDataSource(BaseDataSource):
 
         # Final fallback: use the league with the latest start date from metadata
         if league_metadata:
-            latest_league = max(
-                league_metadata.items(),
-                key=lambda item: item[1].get("start") or datetime.min,
-            )[0]
-            self.logger.info(f"Using fallback league with latest start date: {latest_league}")
-            return latest_league
+            # Filter out leagues with "Event" in the name
+            filtered_metadata = {
+                league: metadata for league, metadata in league_metadata.items()
+                if league and "Event" not in league
+            }
+            if filtered_metadata:
+                latest_league = max(
+                    filtered_metadata.items(),
+                    key=lambda item: item[1].get("start") or datetime.min,
+                )[0]
+                self.logger.info(f"Using fallback league with latest start date: {latest_league}")
+                return latest_league
         
         return None
     
@@ -687,8 +701,13 @@ class S3DataSource(BaseDataSource):
         
         if 'Date' in all_data.columns:
             latest_dates = all_data.groupby('League')['Date'].max()
-            most_recent_league = latest_dates.idxmax()
-            return str(most_recent_league)
+            # Filter out leagues with "Event" in the name
+            filtered_dates = latest_dates[
+                ~latest_dates.index.str.contains("Event", case=False, na=False)
+            ]
+            if not filtered_dates.empty:
+                most_recent_league = filtered_dates.idxmax()
+                return str(most_recent_league)
         
         return None
     
