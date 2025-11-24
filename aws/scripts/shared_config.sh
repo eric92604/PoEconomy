@@ -209,6 +209,49 @@ build_and_push_lambda_image() {
   INFERENCE_IMAGE_URI="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$repository:$timestamp"
 }
 
+find_latest_experiment() {
+  local backup_dir="$ROOT_DIR/s3_backup/models/currency"
+  local latest_experiment=""
+  local latest_timestamp=0
+  
+  # Find all experiment directories (xp_* pattern)
+  for exp_dir in "$backup_dir"/xp_*; do
+    if [[ -d "$exp_dir" ]]; then
+      local exp_name=$(basename "$exp_dir")
+      local exp_models=$(find "$exp_dir" -name "*.pkl" 2>/dev/null | wc -l)
+      
+      if [[ $exp_models -gt 0 ]]; then
+        # Extract timestamp from directory name (xp_YYYYMMDD_HHMMSS)
+        local timestamp_str=$(echo "$exp_name" | sed 's/xp_//' | sed 's/_/ /')
+        local epoch_time=0
+        
+        # Try to parse timestamp (format: YYYYMMDD HHMMSS)
+        if [[ "$timestamp_str" =~ ^[0-9]{8}\ [0-9]{6}$ ]]; then
+          # Convert to epoch (works on Linux/Mac)
+          epoch_time=$(date -d "$timestamp_str" +%s 2>/dev/null || date -j -f "%Y%m%d %H%M%S" "$timestamp_str" +%s 2>/dev/null || echo "0")
+        fi
+        
+        # Fallback: use directory name for comparison if date parsing fails
+        if [[ $epoch_time -eq 0 ]]; then
+          epoch_time=$(echo "$exp_name" | tr -cd '0-9' | head -c 14)
+        fi
+        
+        if [[ $epoch_time -gt $latest_timestamp ]]; then
+          latest_timestamp=$epoch_time
+          latest_experiment="$exp_name"
+        fi
+      fi
+    fi
+  done
+  
+  if [[ -n "$latest_experiment" ]]; then
+    echo "$latest_experiment"
+    return 0
+  fi
+  
+  return 1
+}
+
 verify_local_backup() {
   echo "Checking for local model backup..."
   
@@ -216,95 +259,132 @@ verify_local_backup() {
   
   if [[ ! -d "$backup_dir" ]]; then
     echo "❌ Local backup directory not found: $backup_dir"
-    echo "Expected structure: $backup_dir/currency_xp_{experiment_id}/"
     return 1
   fi
   
   echo "✅ Local backup directory found: $backup_dir"
-  echo "📁 Available experiments in local backup:"
   
-  local experiment_count=0
-  local latest_experiment=""
-  local latest_timestamp=0
+  # Check for experiment directories (xp_* pattern)
+  local latest_experiment
+  latest_experiment=$(find_latest_experiment)
   
-  # Find all experiment directories and show their details
-  for exp_dir in "$backup_dir"/currency_xp_*; do
-    if [[ -d "$exp_dir" ]]; then
-      local exp_name=$(basename "$exp_dir")
-      local model_count=$(find "$exp_dir" -name "*.pkl" 2>/dev/null | wc -l)
-      local metadata_count=$(find "$exp_dir" -name "model_metadata.json" 2>/dev/null | wc -l)
-      
-      if [[ $model_count -gt 0 ]]; then
-        echo "  $exp_name: $model_count models, $metadata_count metadata files"
-        experiment_count=$((experiment_count + 1))
-        
-        # Extract timestamp from experiment name (currency_xp_YYYYMMDD_HHMMSS)
-        local timestamp=$(echo "$exp_name" | sed 's/currency_xp_//' | sed 's/_/ /')
-        if [[ -n "$timestamp" ]]; then
-          # Convert to epoch for comparison
-          local epoch_time=$(date -d "$timestamp" +%s 2>/dev/null || echo "0")
-          if [[ $epoch_time -gt $latest_timestamp ]]; then
-            latest_timestamp=$epoch_time
-            latest_experiment="$exp_name"
-          fi
-        fi
-      fi
-    fi
-  done
-  
-  if [[ $experiment_count -eq 0 ]]; then
-    echo "❌ No valid experiment directories found in local backup"
-    return 1
-  fi
-  
-  echo "📊 Found $experiment_count valid experiments"
   if [[ -n "$latest_experiment" ]]; then
-    echo "🕒 Latest experiment: $latest_experiment"
-    export LATEST_LOCAL_EXPERIMENT="$latest_experiment"
+    local exp_dir="$backup_dir/$latest_experiment"
+    local model_count=$(find "$exp_dir" -name "*.pkl" 2>/dev/null | wc -l)
+    local metadata_count=$(find "$exp_dir" -name "model_metadata.json" 2>/dev/null | wc -l)
+    
+    echo "📁 Found latest experiment: $latest_experiment"
+    echo "  Model files: $model_count"
+    echo "  Metadata files: $metadata_count"
+    export LATEST_EXPERIMENT="$latest_experiment"
+    return 0
   fi
   
-  return 0
+  # Fallback: Check for model files directly (flat structure: {Currency Name}_{horizon}/)
+  local model_count
+  model_count=$(find "$backup_dir" -mindepth 2 -maxdepth 2 -name "*.pkl" 2>/dev/null | wc -l)
+  local metadata_count
+  metadata_count=$(find "$backup_dir" -mindepth 2 -maxdepth 2 -name "model_metadata.json" 2>/dev/null | wc -l)
+  
+  if [[ $model_count -gt 0 ]]; then
+    echo "📁 Found models in flat structure:"
+    echo "  Model files: $model_count"
+    echo "  Metadata files: $metadata_count"
+    return 0
+  fi
+  
+  echo "❌ No model files found in local backup"
+  return 1
 }
 
 build_lambda_image_with_models() {
-  # Use models directly from s3_backup directory (no bundling needed)
-  echo "Using models directly from s3_backup directory..."
+  local models_source_dir="$ROOT_DIR/s3_backup/models"
+  local temp_models_dir=""
+  
+  # Check if local models are available, otherwise download from S3
+  if [[ ! -d "$models_source_dir" ]]; then
+    echo "Local models not found, downloading from S3..."
+    mkdir -p "$models_source_dir"
+    
+    echo "Downloading models from s3://$DATA_LAKE_BUCKET_NAME/models/currency/ to $models_source_dir/currency/"
+    "$AWS_CMD" s3 sync "s3://$DATA_LAKE_BUCKET_NAME/models/currency/" "$models_source_dir/currency/" --region "$REGION"
+    
+    if [[ $? -ne 0 ]]; then
+      echo "❌ Failed to download models from S3"
+      exit 1
+    fi
+    
+    echo "✅ Models downloaded from S3"
+  fi
   
   # Verify s3_backup/models exists
-  if [[ ! -d "$ROOT_DIR/s3_backup/models" ]]; then
+  if [[ ! -d "$models_source_dir" ]]; then
     echo "❌ s3_backup/models directory not found"
-    echo "Please ensure models are available in s3_backup/models/currency/"
     exit 1
   fi
   
-  echo "✅ Models found in s3_backup directory"
+  # Check if we have a latest experiment to use
+  local backup_dir="$ROOT_DIR/s3_backup/models/currency"
+  if [[ -n "$LATEST_EXPERIMENT" ]] && [[ -d "$backup_dir/$LATEST_EXPERIMENT" ]]; then
+    echo "Using models from latest experiment: $LATEST_EXPERIMENT"
+    
+    # Create temporary directory with only the latest experiment's models
+    temp_models_dir=$(mktemp -d)
+    mkdir -p "$temp_models_dir/models/currency"
+    
+    # Copy only the latest experiment's models
+    echo "Copying models from $LATEST_EXPERIMENT to temporary directory..."
+    cp -r "$backup_dir/$LATEST_EXPERIMENT" "$temp_models_dir/models/currency/"
+    
+    # Update models_source_dir to use temp directory
+    models_source_dir="$temp_models_dir/models"
+    echo "✅ Using latest experiment models only"
+  else
+    echo "Using all models from s3_backup directory..."
+    models_source_dir="$ROOT_DIR/s3_backup/models"
+  fi
   
   # Verify models are available
   local model_count
-  model_count=$(find "$ROOT_DIR/s3_backup/models" -name "*.pkl" | wc -l)
+  model_count=$(find "$models_source_dir" -name "*.pkl" 2>/dev/null | wc -l)
   echo "📊 Total model files: $model_count"
   
   if [[ $model_count -eq 0 ]]; then
-    echo "❌ No model files found in s3_backup/models"
+    echo "❌ No model files found"
+    [[ -n "$temp_models_dir" ]] && rm -rf "$temp_models_dir"
     exit 1
   fi
   
   # Verify model structure
   local metadata_count
-  metadata_count=$(find "$ROOT_DIR/s3_backup/models" -name "model_metadata.json" | wc -l)
+  metadata_count=$(find "$models_source_dir" -name "model_metadata.json" 2>/dev/null | wc -l)
   echo "📊 Model metadata files: $metadata_count"
   
   if [[ $metadata_count -eq 0 ]]; then
-    echo "❌ No model metadata files found in s3_backup/models"
-    echo "Expected structure: {Currency Name}_{horizon}/model_metadata.json"
+    echo "❌ No model metadata files found"
+    [[ -n "$temp_models_dir" ]] && rm -rf "$temp_models_dir"
     exit 1
   fi
   
   # Show sample of models structure
   echo "📁 Models structure:"
-  find "$ROOT_DIR/s3_backup/models" -type d -name "*_*d" | head -5 | while read -r dir; do
-    echo "  $(basename "$dir"): $(find "$dir" -name "*.pkl" | wc -l) models, $(find "$dir" -name "*.json" | wc -l) metadata files"
+  find "$models_source_dir" -mindepth 1 -maxdepth 3 -type d -name "*_*d" | head -5 | while read -r dir; do
+    echo "  $(basename "$dir"): $(find "$dir" -name "*.pkl" 2>/dev/null | wc -l) models, $(find "$dir" -name "*.json" 2>/dev/null | wc -l) metadata files"
   done
+  
+  # If using temp directory, replace s3_backup/models temporarily
+  local original_models_backup=""
+  if [[ -n "$temp_models_dir" ]] && [[ -d "$temp_models_dir/models" ]]; then
+    # Backup original s3_backup/models if it exists
+    if [[ -d "$ROOT_DIR/s3_backup/models" ]]; then
+      original_models_backup="$ROOT_DIR/s3_backup/models.backup"
+      mv "$ROOT_DIR/s3_backup/models" "$original_models_backup"
+    fi
+    # Move temp models to s3_backup location for Docker build
+    mkdir -p "$ROOT_DIR/s3_backup"
+    mv "$temp_models_dir/models" "$ROOT_DIR/s3_backup/models"
+    rmdir "$temp_models_dir" 2>/dev/null || true
+  fi
   
   # Build image with models using standard docker build for single-platform manifest
   echo "Building Lambda container image with models..."
@@ -356,6 +436,14 @@ build_lambda_image_with_models() {
   if [[ -f "$ROOT_DIR/.dockerignore.backup" ]]; then
     mv "$ROOT_DIR/.dockerignore.backup" "$ROOT_DIR/.dockerignore"
   fi
+  
+  # Restore original s3_backup/models if we used temp directory
+  if [[ -n "$original_models_backup" ]] && [[ -d "$original_models_backup" ]]; then
+    rm -rf "$ROOT_DIR/s3_backup/models"
+    mv "$original_models_backup" "$ROOT_DIR/s3_backup/models"
+    echo "🧹 Restored original s3_backup/models directory"
+  fi
+  
   echo "🧹 Cleaned up temporary files"
 }
 
