@@ -77,22 +77,60 @@ export function PriceChart({
         historical: !point.predicted ? point.price : null,
         // Connector line: show price at both last historical and first prediction
         connector: (isLastHistorical || isFirstPrediction) ? point.price : null,
-        lower: point.prediction_lower || null,
-        upper: point.prediction_upper || null,
-        // For the range band, we need [lower, upper] format
-        range: point.prediction_lower && point.prediction_upper 
-          ? [point.prediction_lower, point.prediction_upper] 
+        // Only include prediction bounds if they're valid and reasonable
+        // Filter out extreme values that would skew the Y-axis
+        lower: (point.prediction_lower != null && 
+                point.prediction_lower >= 0 && 
+                isFinite(point.prediction_lower)) 
+          ? point.prediction_lower 
+          : null,
+        upper: (point.prediction_upper != null && 
+                point.prediction_upper >= 0 && 
+                isFinite(point.prediction_upper)) 
+          ? point.prediction_upper 
           : null,
       };
     });
   }, [data, timeRange]);
 
   // Calculate price range for Y-axis
+  // IMPORTANT: Only use actual price values, ignore prediction bounds to avoid incorrect scaling
   const priceRange = useMemo(() => {
-    const prices = data.map((d) => d.price);
+    if (data.length === 0) {
+      return { min: 0, max: 100 };
+    }
+
+    // Only extract actual price values, filter out null/NaN/invalid values
+    const prices = data
+      .map((d) => d.price)
+      .filter((p) => p != null && !isNaN(p) && isFinite(p) && p >= 0);
+    
+    if (prices.length === 0) {
+      return { min: 0, max: 100 };
+    }
+
     const min = Math.min(...prices);
     const max = Math.max(...prices);
-    const padding = (max - min) * 0.1;
+    
+    // Handle case where all prices are the same
+    if (min === max) {
+      const value = min || 1; // Use 1 if min is 0
+      // Create a range around the single value (10% above and below)
+      const padding = Math.max(value * 0.1, 0.1); // At least 10% or 0.1 unit
+      return {
+        min: Math.max(0, value - padding),
+        max: value + padding,
+      };
+    }
+
+    // Calculate padding as percentage of range
+    const range = max - min;
+    // Use 10% of range for padding, with a minimum of 5% of the average value
+    // This ensures small variations are visible
+    const avgValue = (min + max) / 2;
+    const minPaddingFromAvg = avgValue * 0.05; // At least 5% of average
+    const padding = Math.max(range * 0.1, minPaddingFromAvg, 0.1); // At least 10% of range, 5% of avg, or 0.1 unit
+    
     return {
       min: Math.max(0, min - padding),
       max: max + padding,
@@ -184,9 +222,14 @@ export function PriceChart({
             />
             <YAxis
               domain={[priceRange.min, priceRange.max]}
+              allowDataOverflow={false}
+              allowDecimals={true}
+              type="number"
               stroke={isDark ? "#9ca3af" : "#6b7280"}
               fontSize={12}
               tick={<CustomYAxisTick isDark={isDark} />}
+              // Explicitly prevent domain recalculation from data
+              scale="linear"
             />
             <Tooltip content={<CustomTooltip />} />
             <Legend />
@@ -226,15 +269,31 @@ export function PriceChart({
               connectNulls={false}
             />
 
-            {/* Prediction band - using range format [lower, upper] */}
+            {/* Prediction bounds as lines - simpler and doesn't affect Y-axis domain */}
             {showPredictionBands && (
-              <Area
+              <Line
                 type="monotone"
-                dataKey="range"
-                stroke="none"
-                fill={isDark ? "#f59e0b" : "#fbbf24"}
-                fillOpacity={0.2}
-                name="Prediction Range"
+                dataKey="upper"
+                stroke={isDark ? "#f59e0b" : "#fbbf24"}
+                strokeWidth={1}
+                strokeDasharray="2 2"
+                dot={false}
+                name="Upper Bound"
+                connectNulls={false}
+                isAnimationActive={false}
+              />
+            )}
+            {showPredictionBands && (
+              <Line
+                type="monotone"
+                dataKey="lower"
+                stroke={isDark ? "#f59e0b" : "#fbbf24"}
+                strokeWidth={1}
+                strokeDasharray="2 2"
+                dot={false}
+                name="Lower Bound"
+                connectNulls={false}
+                isAnimationActive={false}
               />
             )}
           </ComposedChart>
