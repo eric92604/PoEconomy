@@ -88,6 +88,16 @@ class DailyPriceAggregator:
                 self.logger.warning("No active seasonal leagues found")
                 return None
             
+            # Filter out leagues with "Event" in the name
+            active_seasonal_leagues = [
+                league for league in active_seasonal_leagues
+                if league.get("league_name") and "Event" not in league.get("league_name", "")
+            ]
+            
+            if not active_seasonal_leagues:
+                self.logger.warning("No active seasonal leagues found after filtering out Event leagues")
+                return None
+            
             # If multiple active seasonal leagues, prefer the most recent one
             # Sort by last_updated or startDate
             active_seasonal_leagues.sort(

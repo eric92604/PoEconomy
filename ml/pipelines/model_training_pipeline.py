@@ -27,6 +27,11 @@ from ml.config.training_config import MLConfig, get_default_config
 from ml.utils.common_utils import setup_ml_logging, MLLogger, ProgressLogger
 from ml.utils.model_training import ModelTrainer, save_model_artifacts, TrainingResult
 from ml.utils.data_processing import generate_target_currency_list
+from ml.utils.feature_filtering import (
+    parse_horizon_to_days,
+    filter_features_by_horizon,
+    get_feature_filtering_stats
+)
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
@@ -129,11 +134,11 @@ class ModelTrainingPipeline:
                 self.logger.error("Please ensure the feature engineering pipeline has run and created processed data")
                 return []
             
-            # Create experiment-specific models directory now that experiment_id is finalized
-            experiment_models_dir = self.config.paths.models_dir.parent / f"currency_{self.config.experiment.experiment_id}"
-            experiment_models_dir.mkdir(parents=True, exist_ok=True)
-            self.config.paths.models_dir = experiment_models_dir
-            self.logger.info(f"Models will be saved to: {experiment_models_dir} (experiment_id: {self.config.experiment.experiment_id})")
+            # Use the models_dir directly (which is already ml/models/currency)
+            # This aligns with what the prediction lambda expects: models/currency/{currency_name}_{horizon}/
+            # The experiment_id is still tracked in model metadata for reference
+            self.config.paths.models_dir.mkdir(parents=True, exist_ok=True)
+            self.logger.info(f"Models will be saved to: {self.config.paths.models_dir} (experiment_id: {self.config.experiment.experiment_id})")
             
             # Extract currencies from processed data
             target_currencies = self._extract_currencies_from_processed_data(processed_data)
@@ -799,6 +804,29 @@ class ModelTrainingPipeline:
                     horizon = target_col.replace('target_price_', '')
                     self.logger.info(f"Training model for {horizon} horizon")
                     
+                    # Apply horizon-based feature filtering to prevent feature leakage
+                    # This must match the filtering logic used during inference
+                    horizon_feature_columns, excluded_columns = filter_features_by_horizon(
+                        feature_columns, horizon, strict_mode=False
+                    )
+                    if excluded_columns:
+                        stats = get_feature_filtering_stats(feature_columns, horizon, strict_mode=False)
+                        self.logger.info(
+                            f"Filtered {len(excluded_columns)} features for {horizon} horizon to prevent feature leakage "
+                            f"({len(horizon_feature_columns)} features remaining)",
+                            extra={
+                                "horizon": horizon,
+                                "horizon_days": stats['horizon_days'],
+                                "excluded_count": len(excluded_columns),
+                                "remaining_count": len(horizon_feature_columns),
+                                "exclusion_rate": stats['exclusion_rate'],
+                                "excluded_by_window": stats['excluded_by_window']
+                            }
+                        )
+                    
+                    # Use filtered features for this horizon
+                    X_horizon_filtered = processed_data[horizon_feature_columns].values
+                    
                     # Get target for this horizon
                     y_horizon = processed_data[target_col].values
                     
@@ -815,7 +843,7 @@ class ModelTrainingPipeline:
                     
                     # Filter out NaN values for this specific target
                     target_valid_mask = ~pd.isna(y_horizon)
-                    X_horizon = X[target_valid_mask]
+                    X_horizon = X_horizon_filtered[target_valid_mask]
                     y_horizon = y_horizon[target_valid_mask]
                     
                     self.logger.info(f"  After filtering: {len(X_horizon):,} samples available for training")
@@ -825,7 +853,7 @@ class ModelTrainingPipeline:
                         # Try using forward-fill for NaN values to preserve more data
                         y_horizon_ffill = processed_data[target_col].fillna(method='ffill').values
                         target_valid_mask_ffill = ~pd.isna(y_horizon_ffill)
-                        X_horizon_ffill = X[target_valid_mask_ffill]
+                        X_horizon_ffill = X_horizon_filtered[target_valid_mask_ffill]
                         y_horizon_ffill = y_horizon_ffill[target_valid_mask_ffill]
                         
                         if len(X_horizon_ffill) > len(X_horizon):
@@ -837,11 +865,11 @@ class ModelTrainingPipeline:
                         self.logger.warning(f"Insufficient data for {currency_name} {horizon} horizon: {len(X_horizon)} samples (need at least 10)")
                         continue
                     
-                    # Train model for this horizon
+                    # Train model for this horizon with filtered features
                     training_result = self.model_trainer.train_single_model(
                         X_horizon, y_horizon, f"{currency_name}_{horizon}", 
                         target_names=[target_col],
-                        feature_names=feature_columns
+                        feature_names=horizon_feature_columns
                     )
                     
                     if training_result is not None:
@@ -899,11 +927,37 @@ class ModelTrainingPipeline:
                 # Single-horizon training (should not happen with proper multi-horizon setup)
                 self.logger.warning(f"Using single-horizon training fallback for {currency_name}. This indicates a configuration issue.")
                 target_col = target_column if isinstance(target_column, str) else target_column[0]
+                
+                # Extract horizon from target column name (e.g., "target_price_3d" -> "3d")
+                horizon = target_col.replace('target_price_', '') if 'target_price_' in target_col else '1d'
+                
+                # Apply horizon-based feature filtering to prevent feature leakage
+                # This must match the filtering logic used during inference
+                horizon_feature_columns, excluded_columns = filter_features_by_horizon(
+                    feature_columns, horizon, strict_mode=True
+                )
+                if excluded_columns:
+                    stats = get_feature_filtering_stats(feature_columns, horizon, strict_mode=True)
+                    self.logger.info(
+                        f"Filtered {len(excluded_columns)} features for {horizon} horizon to prevent feature leakage "
+                        f"({len(horizon_feature_columns)} features remaining)",
+                        extra={
+                            "horizon": horizon,
+                            "horizon_days": stats['horizon_days'],
+                            "excluded_count": len(excluded_columns),
+                            "remaining_count": len(horizon_feature_columns),
+                            "exclusion_rate": stats['exclusion_rate'],
+                            "excluded_by_window": stats['excluded_by_window']
+                        }
+                    )
+                
+                # Use filtered features for this horizon
+                X_horizon_filtered = processed_data[horizon_feature_columns].values
                 y = processed_data[target_col].values
                 
                 # Filter out NaN values
                 target_valid_mask = ~pd.isna(y)
-                X = X[target_valid_mask]
+                X = X_horizon_filtered[target_valid_mask]
                 y = y[target_valid_mask]
                 
                 if len(X) < 5:  # Reduced minimum from 50 to 5
@@ -915,7 +969,7 @@ class ModelTrainingPipeline:
                 training_result = self.model_trainer.train_single_model(
                     X, y, currency_name, 
                     target_names=[target_col],
-                    feature_names=feature_columns
+                    feature_names=horizon_feature_columns
                 )
                 
                 if training_result is None:
@@ -939,7 +993,7 @@ class ModelTrainingPipeline:
                     'training_metrics': training_result.metrics,
                     'model_info': model_info,
                     'processing_metadata': processing_metadata,
-                    'feature_count': len(feature_columns),
+                    'feature_count': len(horizon_feature_columns),
                     'leagues_in_training': processing_metadata.get('leagues_included', [])
                 }
             
@@ -1081,18 +1135,22 @@ class ModelTrainingPipeline:
         return str(latest_file)
     
     def _get_feature_columns(self, df: pd.DataFrame) -> Optional[List[str]]:
-        """Get feature columns from dataframe."""
+        """Get feature columns from dataframe.
+        
+        This method must match the feature extraction logic in ModelPredictor._prepare_features
+        to ensure training and inference use the same feature sets.
+        """
         exclude_patterns = [
             'target_', 'date', 'league_name', 'currency', 'id', 'league_start', 'league_end',
-            'league_active', 'get_currency'
+            'league_active', 'get_currency', 'pay_currency', '_multi_output_targets'
         ]
         feature_cols = [col for col in df.columns 
                        if not any(pattern in col for pattern in exclude_patterns)]
         
-        # Filter to only include numeric columns
+        # Filter to only include numeric columns - use same method as inference
         numeric_feature_cols = []
         for col in feature_cols:
-            if df[col].dtype in ['int64', 'float64', 'int32', 'float32', 'int16', 'float16']:
+            if pd.api.types.is_numeric_dtype(df[col]):
                 numeric_feature_cols.append(col)
             else:
                 self.logger.debug(f"Excluding non-numeric column: {col} (dtype: {df[col].dtype})")

@@ -159,6 +159,12 @@ class TrainingResult:
     cross_validation_scores: Optional[List[float]]
     model_type: str
     currency: str
+    training_history: Optional[Dict[str, Any]] = None  # Training losses per epoch/trial
+    training_samples: int = 0  # Number of training samples
+    residual_standard_error: float = 0.0  # RSE from test set
+    n_features: int = 0  # Number of features for degrees of freedom calculation
+    confidence_level: float = 0.95  # Confidence level for prediction intervals
+    feature_names: Optional[List[str]] = None  # Exact feature names used during training
 
 
 class BaseModel(ABC):
@@ -226,27 +232,46 @@ class BaseModel(ABC):
         y: np.ndarray,
         X_val: Optional[np.ndarray] = None,
         y_val: Optional[np.ndarray] = None
-    ) -> None:
-        """Fit the model to training data."""
+    ) -> Dict[str, Any]:
+        """
+        Fit the model to training data.
+        
+        Returns:
+            Dictionary containing training history (losses per epoch) if available
+        """
         if self.model is None:
             raise ValueError("Model has not been initialized. Call _create_model() first.")
         
         start_time = time.time()
+        training_history = {}
         
         if X_val is not None and y_val is not None:
             # Always use early stopping when validation data exists
             if isinstance(self.model, lgb.LGBMRegressor):
-                # LightGBM early stopping
+                # LightGBM early stopping with history tracking
+                evals_result = {}
                 self.model.fit(
                     X, y,
-                    eval_set=[(X_val, y_val)],
-                    callbacks=[lgb.early_stopping(self.config.early_stopping_rounds, verbose=False)]
+                    eval_set=[(X, y), (X_val, y_val)],  # Include training set for training loss
+                    eval_names=['training', 'validation'],
+                    callbacks=[
+                        lgb.early_stopping(self.config.early_stopping_rounds, verbose=False),
+                        lgb.record_evaluation(evals_result)
+                    ]
                 )
+                # Extract training history from evals_result
+                if evals_result:
+                    training_history = {
+                        'train_loss': evals_result.get('training', {}).get('l2', []),
+                        'val_loss': evals_result.get('validation', {}).get('l2', []),
+                        'epochs': len(evals_result.get('validation', {}).get('l2', []))
+                    }
             elif isinstance(self.model, xgb.XGBRegressor):
                 # XGBoost early stopping - use parameter-based approach when available
                 try:
                     # Check if early_stopping_rounds is set in model params
                     model_params = self.model.get_params()
+                    evals_result = {}
                     if 'early_stopping_rounds' in model_params and model_params['early_stopping_rounds'] is not None:
                         # Use parameter-based early stopping (for non-Optuna training)
                         self.model.fit(
@@ -262,6 +287,20 @@ class BaseModel(ABC):
                             eval_set=[(X_val, y_val)],
                             verbose=False
                         )
+                    # Extract training history from evals_result (XGBoost stores it in model)
+                    if hasattr(self.model, 'evals_result_') and self.model.evals_result_:
+                        evals_result = self.model.evals_result_
+                        # XGBoost uses different key structure
+                        if 'validation' in evals_result or 0 in evals_result:
+                            val_key = 'validation' if 'validation' in evals_result else 0
+                            val_losses = evals_result[val_key].get('rmse', evals_result[val_key].get('l2', []))
+                            train_key = 'train' if 'train' in evals_result else 0
+                            train_losses = evals_result.get(train_key, {}).get('rmse', evals_result.get(train_key, {}).get('l2', []))
+                            training_history = {
+                                'train_loss': train_losses if train_losses else [],
+                                'val_loss': val_losses if val_losses else [],
+                                'epochs': len(val_losses) if val_losses else 0
+                            }
                 except (TypeError, AttributeError, ImportError) as e:
                     # If early stopping fails, train without it
                     if self.logger:
@@ -277,7 +316,14 @@ class BaseModel(ABC):
         
         training_time = time.time() - start_time
         
-        # Training completed silently
+        # Store training history in model for later retrieval
+        if training_history:
+            if hasattr(self, 'training_history'):
+                self.training_history = training_history
+            else:
+                setattr(self, 'training_history', training_history)
+        
+        return training_history
     
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Make predictions using the trained model."""
@@ -503,13 +549,24 @@ class EnsembleModel:
         y: np.ndarray,
         X_val: Optional[np.ndarray] = None,
         y_val: Optional[np.ndarray] = None
-    ) -> None:
-        """Fit all models in the ensemble."""
+    ) -> Dict[str, Any]:
+        """
+        Fit all models in the ensemble.
+        
+        Returns:
+            Dictionary containing training history from all models
+        """
+        ensemble_history = {}
         for i, model in enumerate(self.models):
             # Only create model if it doesn't already exist (may have been created with optimized params)
             if model.model is None:
                 model.model = model._create_model()
-            model.fit(X, y, X_val, y_val)
+            model_history = model.fit(X, y, X_val, y_val)
+            if model_history:
+                model_type = model.get_model_type()
+                ensemble_history[f"{model_type}_{i}"] = model_history
+        
+        return ensemble_history
     
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Make ensemble predictions."""
@@ -790,14 +847,32 @@ class ModelTrainer:
             X_test = scaler.transform(X_test)
         
         # Train model (validation data is always available now)
+        training_history = None
         if model_type == "ensemble":
             model: Any = self._train_ensemble_model(X_train_split, y_train_split, X_val, y_val, currency)
+            # Get training history from ensemble
+            if hasattr(model, 'models'):
+                training_history = {}
+                for i, base_model in enumerate(model.models):
+                    if hasattr(base_model, 'training_history'):
+                        model_type_name = base_model.get_model_type()
+                        training_history[f"{model_type_name}_{i}"] = base_model.training_history
         else:
             model = self._train_single_base_model(X_train_split, y_train_split, X_val, y_val, currency, model_type)
+            # Get training history from single model
+            if hasattr(model, 'training_history'):
+                training_history = model.training_history
         
         # Make predictions and calculate metrics
         y_pred = model.predict(X_test)
         metrics = ModelMetrics.from_predictions(y_test, y_pred, target_names)
+        
+        # Calculate residual standard error (RSE) from test set
+        residuals = y_test - y_pred
+        n_test = len(residuals)
+        n_features = X_test.shape[1]
+        degrees_of_freedom = max(1, n_test - n_features - 1)
+        rse = np.sqrt(np.sum(residuals**2) / degrees_of_freedom)
         
         # Get feature importance with feature names
         feature_importance = model.get_feature_importance(feature_names=feature_names)
@@ -823,7 +898,13 @@ class ModelTrainer:
             feature_importance=feature_importance,
             cross_validation_scores=cv_scores,
             model_type=model_type,
-            currency=currency
+            currency=currency,
+            training_history=training_history,
+            training_samples=n_test,
+            residual_standard_error=float(rse),
+            n_features=n_features,
+            confidence_level=0.95,
+            feature_names=feature_names,  # Store exact feature names used during training
         )
     
     def _train_ensemble_model(
@@ -1053,11 +1134,26 @@ def save_model_artifacts(
         'training_timestamp': datetime.now().isoformat(),
         'training_time': result.training_time,
         'metrics': result.metrics.to_dict(),
+        'training_samples': result.training_samples,
+        'residual_standard_error': result.residual_standard_error,
+        'n_features': result.n_features,
+        'confidence_level': result.confidence_level,
     }
+    
+    # Store feature names if available (for exact feature matching during inference)
+    if result.feature_names:
+        metadata['feature_names'] = result.feature_names
     
     metadata_path = output_dir / "model_metadata.json"
     with open(metadata_path, 'w') as f:
         json.dump(metadata, f, indent=2, default=str)
     saved_files['metadata'] = str(metadata_path)
+    
+    # Save training history if available
+    if result.training_history:
+        history_path = output_dir / "training_history.json"
+        with open(history_path, 'w') as f:
+            json.dump(result.training_history, f, indent=2, default=str)
+        saved_files['training_history'] = str(history_path)
 
     return saved_files 
