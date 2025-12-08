@@ -35,14 +35,6 @@ from ml.utils.feature_filtering import (
 HORIZON_SUFFIXES = {"1d", "3d", "7d", "14d", "30d"}
 
 
-@dataclass
-class UncertaintyMetrics:
-    """Uncertainty metrics for prediction intervals."""
-    rse: float  # Residual standard error (absolute)
-    sample_size: int  # Training sample size
-    n_features: int  # Number of features
-    confidence_level: float  # Confidence level (e.g., 0.95 for 95%)
-    mean_training_price: Optional[float] = None  # Mean price from training data (for relative RSE)
 
 
 @dataclass
@@ -527,17 +519,6 @@ class ModelPredictor:
         self.logger.debug(f"Feature matrix extraction: {len(filtered_matrix)} rows, {filtered_matrix.shape[1]} features")
         return filtered_matrix, filtered_rows
 
-    def _get_t_critical(self, confidence_level: float, degrees_of_freedom: int) -> float:
-        """Calculate t-critical value for given confidence level and degrees of freedom."""
-        if degrees_of_freedom > 30:
-            # For large df, use z-value (normal distribution approximation)
-            alpha = 1 - confidence_level
-            return stats.norm.ppf(1 - alpha / 2)
-        else:
-            # Use t-distribution
-            alpha = 1 - confidence_level
-            return stats.t.ppf(1 - alpha / 2, degrees_of_freedom)
-    
     def _compute_interval_from_ensemble(
         self, 
         model: Any, 
@@ -576,69 +557,6 @@ class ModelPredictor:
             upper = prediction_value + margin
             return prediction_value, lower, upper
 
-    def _compute_interval(self, prediction: float, uncertainty_metrics: UncertaintyMetrics) -> Tuple[float, float]:
-        """
-        Compute prediction interval using best practices for price forecasting.
-        
-        Uses a hybrid approach:
-        1. For small prices (< 10c): Uses relative/percentage-based intervals
-        2. For larger prices: Uses a combination of relative and absolute RSE
-        3. Always ensures bounds are reasonable (lower >= 0, upper capped)
-        
-        This addresses heteroscedasticity in price data where uncertainty scales
-        with price level, which is standard practice in financial forecasting.
-        """
-        degrees_of_freedom = max(1, uncertainty_metrics.sample_size - uncertainty_metrics.n_features - 1)
-        t_critical = self._get_t_critical(uncertainty_metrics.confidence_level, degrees_of_freedom)
-        
-        # Calculate relative RSE (coefficient of variation)
-        # Use mean training price if available, otherwise use prediction as proxy
-        reference_price = uncertainty_metrics.mean_training_price if uncertainty_metrics.mean_training_price else prediction
-        if reference_price > 0:
-            relative_rse = uncertainty_metrics.rse / reference_price
-        else:
-            # Fallback: use a conservative default relative error (50%)
-            relative_rse = 0.5
-        
-        # For very small prices (< 10c), use purely relative intervals
-        # For larger prices, use a hybrid: min(relative, absolute) to prevent huge bounds
-        if prediction < 10.0:
-            # Small prices: use relative intervals (percentage-based)
-            # Cap relative RSE at 200% to prevent unreasonable bounds
-            relative_rse_capped = min(relative_rse, 2.0)
-            margin = prediction * relative_rse_capped * t_critical
-        else:
-            # Larger prices: use hybrid approach
-            # Use the minimum of relative and absolute margins to prevent both:
-            # - Huge absolute bounds for small RSE on large prices
-            # - Tiny relative bounds for large RSE on small prices
-            relative_margin = prediction * min(relative_rse, 1.0) * t_critical  # Cap relative at 100%
-            absolute_margin = uncertainty_metrics.rse * t_critical
-            margin = min(relative_margin, absolute_margin)
-        
-        # Calculate bounds
-        lower = prediction - margin
-        upper = prediction + margin
-        
-        # Ensure bounds are reasonable:
-        # 1. Lower bound cannot be negative for prices
-        lower = max(0.0, lower)
-        
-        # 2. Upper bound should not exceed prediction by more than 500% (safety cap)
-        max_upper = prediction * 6.0  # 500% above prediction
-        upper = min(upper, max_upper)
-        
-        # 3. If prediction is very small (< 0.1c), ensure minimum reasonable interval
-        if prediction < 0.1:
-            # For very small prices, use at least 0.01c interval width
-            min_interval_width = 0.01
-            if upper - lower < min_interval_width:
-                center = (upper + lower) / 2
-                lower = max(0.0, center - min_interval_width / 2)
-                upper = center + min_interval_width / 2
-        
-        return float(lower), float(upper)
-
     def _compute_confidence(self, prediction: float, interval_width: float) -> float:
         """Compute confidence score based on relative interval width."""
         if prediction == 0:
@@ -655,39 +573,3 @@ def _split_currency_label(label: str) -> Tuple[str, Optional[str]]:
         if label.endswith(token):
             return label[: -len(token)], suffix
     return label, None
-
-
-def _extract_uncertainty_metrics(metadata: Dict) -> UncertaintyMetrics:
-    """Extract uncertainty metrics from model metadata."""
-    if not isinstance(metadata, dict):
-        raise ValueError("Metadata must be a dictionary")
-    
-    rse = metadata.get("residual_standard_error")
-    if rse is None or not isinstance(rse, (int, float)) or not math.isfinite(rse):
-        raise ValueError("residual_standard_error not found or invalid in metadata")
-    
-    sample_size = metadata.get("training_samples")
-    if sample_size is None or not isinstance(sample_size, int) or sample_size <= 0:
-        raise ValueError("training_samples not found or invalid in metadata")
-    
-    n_features = metadata.get("n_features")
-    if n_features is None or not isinstance(n_features, int) or n_features < 0:
-        raise ValueError("n_features not found or invalid in metadata")
-    
-    confidence_level = metadata.get("confidence_level", 0.95)
-    if not isinstance(confidence_level, (int, float)) or not (0 < confidence_level < 1):
-        confidence_level = 0.95
-    
-    # Extract mean training price if available (for relative RSE calculation)
-    mean_training_price = metadata.get("mean_training_price")
-    if mean_training_price is not None:
-        if not isinstance(mean_training_price, (int, float)) or not math.isfinite(mean_training_price) or mean_training_price <= 0:
-            mean_training_price = None
-    
-    return UncertaintyMetrics(
-        rse=float(rse),
-        sample_size=int(sample_size),
-        n_features=int(n_features),
-        confidence_level=float(confidence_level),
-        mean_training_price=float(mean_training_price) if mean_training_price is not None else None,
-    )

@@ -161,11 +161,9 @@ class TrainingResult:
     currency: str
     training_history: Optional[Dict[str, Any]] = None  # Training losses per epoch/trial
     training_samples: int = 0  # Number of training samples
-    residual_standard_error: float = 0.0  # RSE from test set
-    n_features: int = 0  # Number of features for degrees of freedom calculation
+    n_features: int = 0  # Number of features
     confidence_level: float = 0.95  # Confidence level for prediction intervals
     feature_names: Optional[List[str]] = None  # Exact feature names used during training
-    mean_training_price: Optional[float] = None  # Mean price from training data (for relative RSE calculation)
 
 
 class BaseModel(ABC):
@@ -933,16 +931,9 @@ class ModelTrainer:
         y_pred = model.predict(X_test)
         metrics = ModelMetrics.from_predictions(y_test, y_pred, target_names)
         
-        # Calculate residual standard error (RSE) from test set
-        residuals = y_test - y_pred
-        n_test = len(residuals)
+        # Get number of test samples and features
+        n_test = len(y_test)
         n_features = X_test.shape[1]
-        degrees_of_freedom = max(1, n_test - n_features - 1)
-        rse = np.sqrt(np.sum(residuals**2) / degrees_of_freedom)
-        
-        # Calculate mean training price for relative RSE calculation
-        # Use training data (not test) to get representative mean
-        mean_training_price = float(np.mean(y_train)) if len(y_train) > 0 else None
         
         # Get feature importance with feature names
         feature_importance = model.get_feature_importance(feature_names=feature_names)
@@ -971,11 +962,9 @@ class ModelTrainer:
             currency=currency,
             training_history=training_history,
             training_samples=n_test,
-            residual_standard_error=float(rse),
             n_features=n_features,
             confidence_level=0.95,
             feature_names=feature_names,  # Store exact feature names used during training
-            mean_training_price=mean_training_price,  # Mean price for relative RSE calculation
         )
     
     def _train_ensemble_model(
@@ -1206,7 +1195,6 @@ def save_model_artifacts(
         'training_time': result.training_time,
         'metrics': result.metrics.to_dict(),
         'training_samples': result.training_samples,
-        'residual_standard_error': result.residual_standard_error,
         'n_features': result.n_features,
         'confidence_level': result.confidence_level,
     }
@@ -1214,10 +1202,6 @@ def save_model_artifacts(
     # Store feature names if available (for exact feature matching during inference)
     if result.feature_names:
         metadata['feature_names'] = result.feature_names
-    
-    # Store mean training price for relative RSE calculation (best practice for price forecasting)
-    if result.mean_training_price is not None and result.mean_training_price > 0:
-        metadata['mean_training_price'] = float(result.mean_training_price)
     
     metadata_path = output_dir / "model_metadata.json"
     with open(metadata_path, 'w') as f:
