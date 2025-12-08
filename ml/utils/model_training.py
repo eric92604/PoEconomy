@@ -164,6 +164,7 @@ class TrainingResult:
     residual_standard_error: float = 0.0  # RSE from test set
     n_features: int = 0  # Number of features for degrees of freedom calculation
     confidence_level: float = 0.95  # Confidence level for prediction intervals
+    feature_names: Optional[List[str]] = None  # Exact feature names used during training
 
 
 class BaseModel(ABC):
@@ -903,6 +904,7 @@ class ModelTrainer:
             residual_standard_error=float(rse),
             n_features=n_features,
             confidence_level=0.95,
+            feature_names=feature_names,  # Store exact feature names used during training
         )
     
     def _train_ensemble_model(
@@ -1137,6 +1139,10 @@ def save_model_artifacts(
         'n_features': result.n_features,
         'confidence_level': result.confidence_level,
     }
+    
+    # Store feature names if available (for exact feature matching during inference)
+    if result.feature_names:
+        metadata['feature_names'] = result.feature_names
     
     metadata_path = output_dir / "model_metadata.json"
     with open(metadata_path, 'w') as f:

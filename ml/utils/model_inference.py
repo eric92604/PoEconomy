@@ -158,7 +158,10 @@ class ModelPredictor:
                     days_back=days_back,
                 )
                 if raw_df is not None and not raw_df.empty:
-                    processed_df, feature_columns = self._prepare_features(raw_df, currency=currency, horizon=horizon)
+                    # Pass model metadata to _prepare_features to use stored feature names if available
+                    processed_df, feature_columns = self._prepare_features(
+                        raw_df, currency=currency, horizon=horizon, model_metadata=artifact.metadata
+                    )
                     if processed_df is not None and not processed_df.empty:
                         X, feature_rows = self._extract_feature_matrix(processed_df, feature_columns)
                         if len(feature_rows) > 0:
@@ -413,6 +416,7 @@ class ModelPredictor:
         df: pd.DataFrame,
         currency: str,
         horizon: Optional[str] = None,
+        model_metadata: Optional[Dict] = None,
     ) -> Tuple[Optional[pd.DataFrame], List[str]]:
         processed_data, metadata = self.data_processor.process_currency_data(df, currency)
         if processed_data is None or processed_data.empty:
@@ -420,54 +424,54 @@ class ModelPredictor:
             return None, []
 
         processed_data = processed_data.sort_values("date").reset_index(drop=True)
-        feature_columns = [
-            col
-            for col in processed_data.columns
-            if not any(
-                pattern in col
-                for pattern in (
-                    "target_",
-                    "date",
-                    "league_name",
-                    "league_start",
-                    "currency",
-                    "id",
-                    "league_end",
-                    "league_active",
-                    "get_currency",
-                    "pay_currency",
-                    "_multi_output_targets",
-                )
+        
+        # Require stored feature names in model metadata for exact feature matching
+        if not model_metadata or 'feature_names' not in model_metadata:
+            error_msg = (
+                f"Model metadata missing 'feature_names' for {currency} ({horizon}). "
+                f"This model was trained before feature names were stored in metadata. "
+                f"Please retrain the model to include feature names in metadata."
             )
-        ]
-
-        if horizon:
-            filtered_columns, excluded_columns = filter_features_by_horizon(
-                feature_columns, horizon, strict_mode=False
-            )
-            if excluded_columns:
-                stats = get_feature_filtering_stats(feature_columns, horizon, strict_mode=False)
-                self.logger.info(
-                    f"Filtered {len(excluded_columns)} features for {horizon} horizon to prevent feature leakage",
-                    extra={
-                        "horizon": horizon,
-                        "horizon_days": stats['horizon_days'],
-                        "excluded_count": len(excluded_columns),
-                        "remaining_count": len(filtered_columns),
-                        "exclusion_rate": stats['exclusion_rate'],
-                        "excluded_by_window": stats['excluded_by_window']
-                    }
-                )
-            feature_columns = filtered_columns
-
-        numeric_columns = []
-        for col in feature_columns:
-            if pd.api.types.is_numeric_dtype(processed_data[col]):
-                numeric_columns.append(col)
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        stored_feature_names = model_metadata['feature_names']
+        self.logger.info(
+            f"Using stored feature names from model metadata ({len(stored_feature_names)} features)",
+            extra={"currency": currency, "horizon": horizon}
+        )
+        
+        # Verify all stored features exist in processed data
+        available_features = []
+        missing_features = []
+        for feat_name in stored_feature_names:
+            if feat_name in processed_data.columns:
+                available_features.append(feat_name)
             else:
-                self.logger.debug(f"Dropping non-numeric feature {col} (dtype={processed_data[col].dtype})")
-
-        return processed_data, numeric_columns
+                missing_features.append(feat_name)
+        
+        if missing_features:
+            error_msg = (
+                f"Missing {len(missing_features)} stored features in processed data for {currency} ({horizon}). "
+                f"This indicates a mismatch between training and inference feature engineering. "
+                f"Missing features: {missing_features[:10]}{'...' if len(missing_features) > 10 else ''}"
+            )
+            self.logger.error(error_msg, extra={"missing_features": missing_features})
+            raise ValueError(error_msg)
+        
+        if not available_features:
+            error_msg = (
+                f"None of the stored feature names are available in processed data for {currency} ({horizon}). "
+                f"This indicates a critical mismatch between training and inference feature engineering."
+            )
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        # Use stored feature names exactly as they were during training
+        feature_columns = available_features
+        self.logger.debug(f"Using {len(feature_columns)} features from stored metadata (expected {len(stored_feature_names)})")
+        
+        return processed_data, feature_columns
 
     def _extract_feature_matrix(
         self,

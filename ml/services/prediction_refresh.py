@@ -273,7 +273,10 @@ class DirectModelPredictor(ModelPredictor):
                 return None
                 
             if raw_df is not None and not raw_df.empty:
-                processed_df, feature_columns = self._prepare_features(raw_df, currency=currency, horizon=horizon)
+                # Pass model metadata to _prepare_features to use stored feature names if available
+                processed_df, feature_columns = self._prepare_features(
+                    raw_df, currency=currency, horizon=horizon, model_metadata=artifact.metadata
+                )
                 if processed_df is not None and not processed_df.empty:
                     X, feature_rows = self._extract_feature_matrix(processed_df, feature_columns)
                     if len(feature_rows) > 0:
@@ -356,6 +359,20 @@ class DirectModelPredictor(ModelPredictor):
                         )
                         return result
 
+        except ValueError as exc:
+            # Handle feature count mismatch specifically
+            if "Feature count mismatch" in str(exc):
+                self.logger.error(
+                    f"Feature count mismatch for {currency} ({horizon}): {exc}",
+                    extra={
+                        "currency": currency,
+                        "horizon": horizon,
+                        "error_type": "feature_count_mismatch"
+                    }
+                )
+            else:
+                self.logger.warning(f"ValueError during prediction for {currency} ({horizon}): {exc}")
+            return None
         except Exception as exc:
             # Enhanced error logging to identify specific failure points
             error_details = []
