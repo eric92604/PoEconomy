@@ -188,13 +188,13 @@ API_BASE_URL=https://x6h57bofoe.execute-api.us-west-2.amazonaws.com/api
 
 ### Frontend (Cloudflare Pages)
 ```env
-NEXT_PUBLIC_API_URL=https://api.poeconomy.com
+NEXT_PUBLIC_API_URL=your_api_url_here
 NEXT_PUBLIC_API_KEY=your_api_key_here
 ```
 
 ### Cloudflare Worker (`wrangler.toml`)
 ```toml
-AWS_API_GATEWAY_URL=https://x6h57bofoe.execute-api.us-west-2.amazonaws.com/api
+AWS_API_GATEWAY_URL=your_api_gateway_url_here
 AWS_API_KEY=your_api_key_here
 CACHE_TTL=1800
 RATE_LIMIT_PER_MINUTE=60
