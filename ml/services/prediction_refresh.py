@@ -43,7 +43,6 @@ from ml.utils.common_utils import MLLogger
 from ml.utils.data_processing import DataProcessor
 from ml.utils.model_inference import (
     _split_currency_label, 
-    _extract_uncertainty_metrics, 
     CurrencyModelBundle, 
     HORIZON_SUFFIXES
 )
@@ -302,9 +301,10 @@ class DirectModelPredictor(ModelPredictor):
                         model = self._load_model_from_direct(artifact)
                         latest_features = X[-1].reshape(1, -1)
                         
-                        # Make prediction
-                        prediction = model.predict(latest_features)
-                        prediction_value = float(np.asarray(prediction).ravel()[0])
+                        # Make prediction with uncertainty using ensemble spread
+                        prediction_value, lower, upper = self._compute_interval_from_ensemble(
+                            model, latest_features, confidence_level=0.95
+                        )
                         
                         # Validate prediction value
                         if math.isnan(prediction_value) or math.isinf(prediction_value):
@@ -331,8 +331,7 @@ class DirectModelPredictor(ModelPredictor):
                             else:
                                 price_change_pct = 0.0  # Default to no change
 
-                        uncertainty_metrics = _extract_uncertainty_metrics(artifact.metadata)
-                        lower, upper = self._compute_interval(prediction_value, uncertainty_metrics)
+                        # Calculate confidence score based on relative interval width
                         interval_width = upper - lower
                         confidence = self._compute_confidence(prediction_value, interval_width)
 

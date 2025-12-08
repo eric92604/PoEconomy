@@ -38,10 +38,11 @@ HORIZON_SUFFIXES = {"1d", "3d", "7d", "14d", "30d"}
 @dataclass
 class UncertaintyMetrics:
     """Uncertainty metrics for prediction intervals."""
-    rse: float  # Residual standard error
+    rse: float  # Residual standard error (absolute)
     sample_size: int  # Training sample size
     n_features: int  # Number of features
     confidence_level: float  # Confidence level (e.g., 0.95 for 95%)
+    mean_training_price: Optional[float] = None  # Mean price from training data (for relative RSE)
 
 
 @dataclass
@@ -175,10 +176,10 @@ class ModelPredictor:
                             
                             latest_features = X[-1].reshape(1, -1)
                             
-                            # Make prediction
-                            prediction = model.predict(latest_features)
-                            
-                            prediction_value = float(np.asarray(prediction).ravel()[0])
+                            # Make prediction with uncertainty using ensemble spread
+                            prediction_value, lower, upper = self._compute_interval_from_ensemble(
+                                model, latest_features, confidence_level=0.95
+                            )
                             
                             # Validate prediction value
                             if math.isnan(prediction_value) or math.isinf(prediction_value):
@@ -205,8 +206,7 @@ class ModelPredictor:
                                 else:
                                     price_change_pct = 0.0  # Default to no change
 
-                            uncertainty_metrics = _extract_uncertainty_metrics(artifact.metadata)
-                            lower, upper = self._compute_interval(prediction_value, uncertainty_metrics)
+                            # Calculate confidence score based on relative interval width
                             interval_width = upper - lower
                             confidence = self._compute_confidence(prediction_value, interval_width)
 
@@ -537,14 +537,106 @@ class ModelPredictor:
             # Use t-distribution
             alpha = 1 - confidence_level
             return stats.t.ppf(1 - alpha / 2, degrees_of_freedom)
+    
+    def _compute_interval_from_ensemble(
+        self, 
+        model: Any, 
+        X: np.ndarray, 
+        confidence_level: float = 0.95
+    ) -> Tuple[float, float, float]:
+        """
+        Compute prediction interval using ensemble spread method.
+        
+        Uses the variance across ensemble model predictions as uncertainty measure.
+        This method adapts to prediction difficulty and handles heteroscedasticity naturally.
+        
+        Args:
+            model: Trained ensemble model
+            X: Input features (single sample)
+            confidence_level: Confidence level for intervals
+        
+        Returns:
+            Tuple of (prediction, lower_bound, upper_bound)
+        """
+        if hasattr(model, 'predict_with_uncertainty'):
+            # Use ensemble spread method
+            mean_pred, lower, upper = model.predict_with_uncertainty(X, confidence_level)
+            prediction = float(np.asarray(mean_pred).ravel()[0])
+            lower = float(np.asarray(lower).ravel()[0])
+            upper = float(np.asarray(upper).ravel()[0])
+            return prediction, lower, upper
+        else:
+            # Fallback: if model doesn't support uncertainty, use simple prediction
+            # This should not happen with EnsembleModel, but handle gracefully
+            prediction = model.predict(X)
+            prediction_value = float(np.asarray(prediction).ravel()[0])
+            # Use a conservative default interval (20% of prediction)
+            margin = prediction_value * 0.2
+            lower = max(0.0, prediction_value - margin)
+            upper = prediction_value + margin
+            return prediction_value, lower, upper
 
     def _compute_interval(self, prediction: float, uncertainty_metrics: UncertaintyMetrics) -> Tuple[float, float]:
-        """Compute prediction interval using t-distribution with RSE."""
+        """
+        Compute prediction interval using best practices for price forecasting.
+        
+        Uses a hybrid approach:
+        1. For small prices (< 10c): Uses relative/percentage-based intervals
+        2. For larger prices: Uses a combination of relative and absolute RSE
+        3. Always ensures bounds are reasonable (lower >= 0, upper capped)
+        
+        This addresses heteroscedasticity in price data where uncertainty scales
+        with price level, which is standard practice in financial forecasting.
+        """
         degrees_of_freedom = max(1, uncertainty_metrics.sample_size - uncertainty_metrics.n_features - 1)
         t_critical = self._get_t_critical(uncertainty_metrics.confidence_level, degrees_of_freedom)
-        margin = t_critical * uncertainty_metrics.rse
+        
+        # Calculate relative RSE (coefficient of variation)
+        # Use mean training price if available, otherwise use prediction as proxy
+        reference_price = uncertainty_metrics.mean_training_price if uncertainty_metrics.mean_training_price else prediction
+        if reference_price > 0:
+            relative_rse = uncertainty_metrics.rse / reference_price
+        else:
+            # Fallback: use a conservative default relative error (50%)
+            relative_rse = 0.5
+        
+        # For very small prices (< 10c), use purely relative intervals
+        # For larger prices, use a hybrid: min(relative, absolute) to prevent huge bounds
+        if prediction < 10.0:
+            # Small prices: use relative intervals (percentage-based)
+            # Cap relative RSE at 200% to prevent unreasonable bounds
+            relative_rse_capped = min(relative_rse, 2.0)
+            margin = prediction * relative_rse_capped * t_critical
+        else:
+            # Larger prices: use hybrid approach
+            # Use the minimum of relative and absolute margins to prevent both:
+            # - Huge absolute bounds for small RSE on large prices
+            # - Tiny relative bounds for large RSE on small prices
+            relative_margin = prediction * min(relative_rse, 1.0) * t_critical  # Cap relative at 100%
+            absolute_margin = uncertainty_metrics.rse * t_critical
+            margin = min(relative_margin, absolute_margin)
+        
+        # Calculate bounds
         lower = prediction - margin
         upper = prediction + margin
+        
+        # Ensure bounds are reasonable:
+        # 1. Lower bound cannot be negative for prices
+        lower = max(0.0, lower)
+        
+        # 2. Upper bound should not exceed prediction by more than 500% (safety cap)
+        max_upper = prediction * 6.0  # 500% above prediction
+        upper = min(upper, max_upper)
+        
+        # 3. If prediction is very small (< 0.1c), ensure minimum reasonable interval
+        if prediction < 0.1:
+            # For very small prices, use at least 0.01c interval width
+            min_interval_width = 0.01
+            if upper - lower < min_interval_width:
+                center = (upper + lower) / 2
+                lower = max(0.0, center - min_interval_width / 2)
+                upper = center + min_interval_width / 2
+        
         return float(lower), float(upper)
 
     def _compute_confidence(self, prediction: float, interval_width: float) -> float:
@@ -586,9 +678,16 @@ def _extract_uncertainty_metrics(metadata: Dict) -> UncertaintyMetrics:
     if not isinstance(confidence_level, (int, float)) or not (0 < confidence_level < 1):
         confidence_level = 0.95
     
+    # Extract mean training price if available (for relative RSE calculation)
+    mean_training_price = metadata.get("mean_training_price")
+    if mean_training_price is not None:
+        if not isinstance(mean_training_price, (int, float)) or not math.isfinite(mean_training_price) or mean_training_price <= 0:
+            mean_training_price = None
+    
     return UncertaintyMetrics(
         rse=float(rse),
         sample_size=int(sample_size),
         n_features=int(n_features),
         confidence_level=float(confidence_level),
+        mean_training_price=float(mean_training_price) if mean_training_price is not None else None,
     )

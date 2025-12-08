@@ -165,6 +165,7 @@ class TrainingResult:
     n_features: int = 0  # Number of features for degrees of freedom calculation
     confidence_level: float = 0.95  # Confidence level for prediction intervals
     feature_names: Optional[List[str]] = None  # Exact feature names used during training
+    mean_training_price: Optional[float] = None  # Mean price from training data (for relative RSE calculation)
 
 
 class BaseModel(ABC):
@@ -585,6 +586,71 @@ class EnsembleModel:
         
         return weighted_pred
     
+    def predict_with_uncertainty(
+        self, 
+        X: np.ndarray, 
+        confidence_level: float = 0.95
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Make ensemble predictions with uncertainty estimates using ensemble spread.
+        
+        Uses the variance across ensemble model predictions as a measure of uncertainty.
+        This is a robust method that adapts to prediction difficulty.
+        
+        Args:
+            X: Input features
+            confidence_level: Confidence level for prediction intervals (default 0.95)
+        
+        Returns:
+            Tuple of (mean_prediction, lower_bound, upper_bound)
+        """
+        if not self.models or any(model.model is None for model in self.models):
+            raise ValueError("All models must be trained before making predictions")
+        
+        if len(self.models) < 2:
+            raise ValueError("Ensemble spread requires at least 2 models in the ensemble")
+        
+        # Get predictions from each model
+        predictions = []
+        for model in self.models:
+            pred = model.predict(X)
+            predictions.append(pred)
+        
+        predictions = np.array(predictions)
+        
+        # Calculate weighted mean prediction
+        mean_pred = np.average(predictions, axis=0, weights=self.weights)
+        
+        # Calculate weighted standard deviation (ensemble spread)
+        # This measures disagreement between models, which indicates uncertainty
+        variance = np.average((predictions - mean_pred) ** 2, axis=0, weights=self.weights)
+        std_pred = np.sqrt(variance)
+        
+        # Use t-distribution for prediction intervals
+        # Degrees of freedom = number of models - 1
+        from scipy import stats
+        degrees_of_freedom = len(self.models) - 1
+        t_critical = stats.t.ppf(1 - (1 - confidence_level) / 2, degrees_of_freedom)
+        
+        # Calculate bounds
+        lower = mean_pred - t_critical * std_pred
+        upper = mean_pred + t_critical * std_pred
+        
+        # Ensure bounds are reasonable for price predictions
+        # Lower bound cannot be negative
+        lower = np.maximum(lower, 0.0)
+        
+        # For very small predictions, ensure minimum interval width
+        min_interval_width = 0.01  # 0.01c minimum
+        interval_width = upper - lower
+        too_narrow = interval_width < min_interval_width
+        if np.any(too_narrow):
+            center = (upper + lower) / 2
+            lower = np.where(too_narrow, np.maximum(0.0, center - min_interval_width / 2), lower)
+            upper = np.where(too_narrow, center + min_interval_width / 2, upper)
+        
+        return mean_pred, lower, upper
+    
     def get_feature_importance(self, feature_names: Optional[List[str]] = None) -> Optional[Dict[str, float]]:
         """Get aggregated feature importance from all models."""
         importance_dicts = []
@@ -874,6 +940,10 @@ class ModelTrainer:
         degrees_of_freedom = max(1, n_test - n_features - 1)
         rse = np.sqrt(np.sum(residuals**2) / degrees_of_freedom)
         
+        # Calculate mean training price for relative RSE calculation
+        # Use training data (not test) to get representative mean
+        mean_training_price = float(np.mean(y_train)) if len(y_train) > 0 else None
+        
         # Get feature importance with feature names
         feature_importance = model.get_feature_importance(feature_names=feature_names)
         
@@ -905,6 +975,7 @@ class ModelTrainer:
             n_features=n_features,
             confidence_level=0.95,
             feature_names=feature_names,  # Store exact feature names used during training
+            mean_training_price=mean_training_price,  # Mean price for relative RSE calculation
         )
     
     def _train_ensemble_model(
@@ -1143,6 +1214,10 @@ def save_model_artifacts(
     # Store feature names if available (for exact feature matching during inference)
     if result.feature_names:
         metadata['feature_names'] = result.feature_names
+    
+    # Store mean training price for relative RSE calculation (best practice for price forecasting)
+    if result.mean_training_price is not None and result.mean_training_price > 0:
+        metadata['mean_training_price'] = float(result.mean_training_price)
     
     metadata_path = output_dir / "model_metadata.json"
     with open(metadata_path, 'w') as f:
