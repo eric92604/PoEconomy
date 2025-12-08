@@ -35,13 +35,6 @@ from ml.utils.feature_filtering import (
 HORIZON_SUFFIXES = {"1d", "3d", "7d", "14d", "30d"}
 
 
-@dataclass
-class UncertaintyMetrics:
-    """Uncertainty metrics for prediction intervals."""
-    rse: float  # Residual standard error
-    sample_size: int  # Training sample size
-    n_features: int  # Number of features
-    confidence_level: float  # Confidence level (e.g., 0.95 for 95%)
 
 
 @dataclass
@@ -175,10 +168,10 @@ class ModelPredictor:
                             
                             latest_features = X[-1].reshape(1, -1)
                             
-                            # Make prediction
-                            prediction = model.predict(latest_features)
-                            
-                            prediction_value = float(np.asarray(prediction).ravel()[0])
+                            # Make prediction with uncertainty using ensemble spread
+                            prediction_value, lower, upper = self._compute_interval_from_ensemble(
+                                model, latest_features, confidence_level=0.95
+                            )
                             
                             # Validate prediction value
                             if math.isnan(prediction_value) or math.isinf(prediction_value):
@@ -205,8 +198,7 @@ class ModelPredictor:
                                 else:
                                     price_change_pct = 0.0  # Default to no change
 
-                            uncertainty_metrics = _extract_uncertainty_metrics(artifact.metadata)
-                            lower, upper = self._compute_interval(prediction_value, uncertainty_metrics)
+                            # Calculate confidence score based on relative interval width
                             interval_width = upper - lower
                             confidence = self._compute_confidence(prediction_value, interval_width)
 
@@ -527,25 +519,43 @@ class ModelPredictor:
         self.logger.debug(f"Feature matrix extraction: {len(filtered_matrix)} rows, {filtered_matrix.shape[1]} features")
         return filtered_matrix, filtered_rows
 
-    def _get_t_critical(self, confidence_level: float, degrees_of_freedom: int) -> float:
-        """Calculate t-critical value for given confidence level and degrees of freedom."""
-        if degrees_of_freedom > 30:
-            # For large df, use z-value (normal distribution approximation)
-            alpha = 1 - confidence_level
-            return stats.norm.ppf(1 - alpha / 2)
+    def _compute_interval_from_ensemble(
+        self, 
+        model: Any, 
+        X: np.ndarray, 
+        confidence_level: float = 0.95
+    ) -> Tuple[float, float, float]:
+        """
+        Compute prediction interval using ensemble spread method.
+        
+        Uses the variance across ensemble model predictions as uncertainty measure.
+        This method adapts to prediction difficulty and handles heteroscedasticity naturally.
+        
+        Args:
+            model: Trained ensemble model
+            X: Input features (single sample)
+            confidence_level: Confidence level for intervals
+        
+        Returns:
+            Tuple of (prediction, lower_bound, upper_bound)
+        """
+        if hasattr(model, 'predict_with_uncertainty'):
+            # Use ensemble spread method
+            mean_pred, lower, upper = model.predict_with_uncertainty(X, confidence_level)
+            prediction = float(np.asarray(mean_pred).ravel()[0])
+            lower = float(np.asarray(lower).ravel()[0])
+            upper = float(np.asarray(upper).ravel()[0])
+            return prediction, lower, upper
         else:
-            # Use t-distribution
-            alpha = 1 - confidence_level
-            return stats.t.ppf(1 - alpha / 2, degrees_of_freedom)
-
-    def _compute_interval(self, prediction: float, uncertainty_metrics: UncertaintyMetrics) -> Tuple[float, float]:
-        """Compute prediction interval using t-distribution with RSE."""
-        degrees_of_freedom = max(1, uncertainty_metrics.sample_size - uncertainty_metrics.n_features - 1)
-        t_critical = self._get_t_critical(uncertainty_metrics.confidence_level, degrees_of_freedom)
-        margin = t_critical * uncertainty_metrics.rse
-        lower = prediction - margin
-        upper = prediction + margin
-        return float(lower), float(upper)
+            # Fallback: if model doesn't support uncertainty, use simple prediction
+            # This should not happen with EnsembleModel, but handle gracefully
+            prediction = model.predict(X)
+            prediction_value = float(np.asarray(prediction).ravel()[0])
+            # Use a conservative default interval (20% of prediction)
+            margin = prediction_value * 0.2
+            lower = max(0.0, prediction_value - margin)
+            upper = prediction_value + margin
+            return prediction_value, lower, upper
 
     def _compute_confidence(self, prediction: float, interval_width: float) -> float:
         """Compute confidence score based on relative interval width."""
@@ -563,32 +573,3 @@ def _split_currency_label(label: str) -> Tuple[str, Optional[str]]:
         if label.endswith(token):
             return label[: -len(token)], suffix
     return label, None
-
-
-def _extract_uncertainty_metrics(metadata: Dict) -> UncertaintyMetrics:
-    """Extract uncertainty metrics from model metadata."""
-    if not isinstance(metadata, dict):
-        raise ValueError("Metadata must be a dictionary")
-    
-    rse = metadata.get("residual_standard_error")
-    if rse is None or not isinstance(rse, (int, float)) or not math.isfinite(rse):
-        raise ValueError("residual_standard_error not found or invalid in metadata")
-    
-    sample_size = metadata.get("training_samples")
-    if sample_size is None or not isinstance(sample_size, int) or sample_size <= 0:
-        raise ValueError("training_samples not found or invalid in metadata")
-    
-    n_features = metadata.get("n_features")
-    if n_features is None or not isinstance(n_features, int) or n_features < 0:
-        raise ValueError("n_features not found or invalid in metadata")
-    
-    confidence_level = metadata.get("confidence_level", 0.95)
-    if not isinstance(confidence_level, (int, float)) or not (0 < confidence_level < 1):
-        confidence_level = 0.95
-    
-    return UncertaintyMetrics(
-        rse=float(rse),
-        sample_size=int(sample_size),
-        n_features=int(n_features),
-        confidence_level=float(confidence_level),
-    )
