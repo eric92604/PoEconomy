@@ -624,15 +624,47 @@ class EnsembleModel:
         variance = np.average((predictions - mean_pred) ** 2, axis=0, weights=self.weights)
         std_pred = np.sqrt(variance)
         
-        # Use t-distribution for prediction intervals
-        # Degrees of freedom = number of models - 1
+        # Use appropriate multiplier for prediction intervals
+        # For small ensembles (<=2 models), t-distribution has very fat tails (df=1 gives t_crit=12.7)
+        # Use a more conservative approach: normal distribution approximation or fixed multiplier
         from scipy import stats
-        degrees_of_freedom = len(self.models) - 1
-        t_critical = stats.t.ppf(1 - (1 - confidence_level) / 2, degrees_of_freedom)
+        n_models = len(self.models)
+        
+        if n_models <= 2:
+            # For very small ensembles, use normal distribution (z-score) with a conservative multiplier
+            # This prevents unreasonably wide intervals from t-distribution with low df
+            # Use 2 standard deviations for 95% confidence (normal approximation)
+            multiplier = 2.0
+            if self.logger:
+                self.logger.debug(
+                    f"Using normal approximation for small ensemble (n={n_models}), "
+                    f"multiplier={multiplier} for {confidence_level*100}% confidence"
+                )
+        elif n_models <= 5:
+            # For small ensembles, use t-distribution but cap the multiplier
+            # This balances statistical rigor with practical bounds
+            degrees_of_freedom = n_models - 1
+            t_critical = stats.t.ppf(1 - (1 - confidence_level) / 2, degrees_of_freedom)
+            # Cap at 3.0 to prevent excessive widening
+            multiplier = min(t_critical, 3.0)
+            if self.logger:
+                self.logger.debug(
+                    f"Using capped t-distribution (n={n_models}, df={degrees_of_freedom}), "
+                    f"t_critical={t_critical:.2f}, capped to {multiplier:.2f}"
+                )
+        else:
+            # For larger ensembles, use full t-distribution
+            degrees_of_freedom = n_models - 1
+            multiplier = stats.t.ppf(1 - (1 - confidence_level) / 2, degrees_of_freedom)
+            if self.logger:
+                self.logger.debug(
+                    f"Using t-distribution (n={n_models}, df={degrees_of_freedom}), "
+                    f"t_critical={multiplier:.2f}"
+                )
         
         # Calculate bounds
-        lower = mean_pred - t_critical * std_pred
-        upper = mean_pred + t_critical * std_pred
+        lower = mean_pred - multiplier * std_pred
+        upper = mean_pred + multiplier * std_pred
         
         # Ensure bounds are reasonable for price predictions
         # Lower bound cannot be negative
@@ -646,6 +678,19 @@ class EnsembleModel:
             center = (upper + lower) / 2
             lower = np.where(too_narrow, np.maximum(0.0, center - min_interval_width / 2), lower)
             upper = np.where(too_narrow, center + min_interval_width / 2, upper)
+        
+        # Cap unreasonably large ranges (more than 5x the predicted price suggests model disagreement or error)
+        # This prevents extremely wide intervals that aren't useful
+        max_range_multiplier = 5.0
+        interval_width = upper - lower
+        max_reasonable_range = np.maximum(mean_pred * max_range_multiplier, 10.0)  # At least 10c range allowed
+        too_wide = interval_width > max_reasonable_range
+        if np.any(too_wide):
+            # Cap the range while keeping the mean prediction centered
+            center = (upper + lower) / 2
+            half_range = max_reasonable_range / 2
+            lower = np.where(too_wide, np.maximum(0.0, center - half_range), lower)
+            upper = np.where(too_wide, center + half_range, upper)
         
         return mean_pred, lower, upper
     

@@ -291,9 +291,13 @@ export default function DashboardPage() {
                       {(() => {
                         const prediction = currency.predictions["1d"];
                         if (prediction?.prediction_lower !== undefined && prediction?.prediction_upper !== undefined) {
+                          // Clamp negative values to 0 (shouldn't happen with ensemble range, but handle old data)
+                          const lower = Math.max(0, prediction.prediction_lower);
+                          const upper = Math.max(lower, prediction.prediction_upper);
+                          
                           return (
                             <>
-                              <span>{formatChaosPrice(prediction.prediction_lower)} - {formatChaosPrice(prediction.prediction_upper)}</span>
+                              <span>{formatChaosPrice(lower)} - {formatChaosPrice(upper)}</span>
                               <CurrencyIcon 
                                 iconUrl="/images/chaos-orb.png" 
                                 currency="Chaos Orb" 

@@ -515,6 +515,23 @@ def _format_prediction_item(item: Dict[str, Any], currency: str, league: str, ho
     if "confidence_score" in prediction_dict and "confidence" not in prediction_dict:
         prediction_dict["confidence"] = prediction_dict["confidence_score"]
     
+    # Validate and clamp prediction bounds to ensure they're reasonable
+    # Clamp negative values to 0 (shouldn't happen with ensemble range, but handle old data)
+    if prediction_dict.get("prediction_lower") is not None:
+        prediction_dict["prediction_lower"] = max(0.0, float(prediction_dict["prediction_lower"]))
+    if prediction_dict.get("prediction_upper") is not None:
+        prediction_dict["prediction_upper"] = max(0.0, float(prediction_dict["prediction_upper"]))
+    
+    # Ensure upper >= lower (fix any data inconsistencies)
+    if (prediction_dict.get("prediction_lower") is not None and 
+        prediction_dict.get("prediction_upper") is not None):
+        if prediction_dict["prediction_upper"] < prediction_dict["prediction_lower"]:
+            # If upper < lower, swap them or set upper = lower
+            prediction_dict["prediction_upper"] = max(
+                prediction_dict["prediction_lower"], 
+                prediction_dict["prediction_upper"]
+            )
+    
     return prediction_dict
 
 
@@ -604,6 +621,23 @@ def _fetch_cached_prediction(currency: str, league: Optional[str], horizon: str)
     # Ensure confidence field name matches frontend expectation
     if "confidence_score" in payload_dict and "confidence" not in payload_dict:
         payload_dict["confidence"] = payload_dict["confidence_score"]
+    
+    # Validate and clamp prediction bounds to ensure they're reasonable
+    # Clamp negative values to 0 (shouldn't happen with ensemble range, but handle old data)
+    if payload_dict.get("prediction_lower") is not None:
+        payload_dict["prediction_lower"] = max(0.0, float(payload_dict["prediction_lower"]))
+    if payload_dict.get("prediction_upper") is not None:
+        payload_dict["prediction_upper"] = max(0.0, float(payload_dict["prediction_upper"]))
+    
+    # Ensure upper >= lower (fix any data inconsistencies)
+    if (payload_dict.get("prediction_lower") is not None and 
+        payload_dict.get("prediction_upper") is not None):
+        if payload_dict["prediction_upper"] < payload_dict["prediction_lower"]:
+            # If upper < lower, swap them or set upper = lower
+            payload_dict["prediction_upper"] = max(
+                payload_dict["prediction_lower"], 
+                payload_dict["prediction_upper"]
+            )
     
     return payload_dict
 

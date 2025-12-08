@@ -558,12 +558,20 @@ class ModelPredictor:
             return prediction_value, lower, upper
 
     def _compute_confidence(self, prediction: float, interval_width: float) -> float:
-        """Compute confidence score based on relative interval width."""
+        """
+        Compute confidence score based on relative interval width.
+        
+        Uses a square root transformation to make confidence less sensitive to range width.
+        This means small changes in range width have less impact on confidence scores.
+        """
         if prediction == 0:
             return 0.5  # Default confidence for zero predictions
         
         relative_width = interval_width / abs(prediction)
-        confidence = 1.0 / (1.0 + relative_width)
+        # Use square root to reduce sensitivity - small range changes have less impact
+        # Scale by 0.5 to further dampen the effect
+        scaled_relative_width = 0.5 * (relative_width ** 0.5)
+        confidence = 1.0 / (1.0 + scaled_relative_width)
         return float(max(0.0, min(1.0, confidence)))
 
 

@@ -211,9 +211,13 @@ export const InvestmentCurrencyTable = memo(function InvestmentCurrencyTable({
                                                null;
 
                       if (predictionWithRange) {
+                        // Clamp negative values to 0 (shouldn't happen with ensemble range, but handle old data)
+                        const lower = Math.max(0, predictionWithRange.prediction_lower ?? 0);
+                        const upper = Math.max(lower, predictionWithRange.prediction_upper ?? 0);
+                        
                         return (
                           <div className="text-sm text-muted-foreground font-mono flex items-center justify-end gap-1">
-                            <span>{formatChaosPrice(predictionWithRange.prediction_lower!)} - {formatChaosPrice(predictionWithRange.prediction_upper!)}</span>
+                            <span>{formatChaosPrice(lower)} - {formatChaosPrice(upper)}</span>
                             <CurrencyIcon 
                               iconUrl="/images/chaos-orb.png" 
                               currency="Chaos Orb" 
