@@ -15,11 +15,13 @@ from datetime import datetime
 
 # ML imports
 import lightgbm as lgb
-import xgboost as xgb
 from sklearn.preprocessing import RobustScaler
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import (
+    RandomForestRegressor,
+    ExtraTreesRegressor
+)
 import optuna
 from optuna.samplers import TPESampler
 from optuna.pruners import MedianPruner
@@ -414,66 +416,6 @@ class LightGBMModel(BaseModel):
         return "lightgbm"
 
 
-class XGBoostModel(BaseModel):
-    """XGBoost model implementation with optimal threading."""
-    
-    def _create_model(self, trial: Optional[optuna.Trial] = None) -> xgb.XGBRegressor:
-        """Create XGBoost model with optimal parameters."""
-        if trial is not None:
-            # Hyperparameter optimization
-            params = {
-                'n_estimators': trial.suggest_int('xgb_n_estimators', 100, 1000),
-                'max_depth': trial.suggest_int('xgb_max_depth', 3, 15),
-                'learning_rate': trial.suggest_float('xgb_learning_rate', 0.01, 0.3),
-                'min_child_weight': trial.suggest_int('xgb_min_child_weight', 1, 10),
-                'subsample': trial.suggest_float('xgb_subsample', 0.5, 1.0),
-                'colsample_bytree': trial.suggest_float('xgb_colsample_bytree', 0.5, 1.0),
-                'reg_alpha': trial.suggest_float('xgb_reg_alpha', 0.0, 10.0),
-                'reg_lambda': trial.suggest_float('xgb_reg_lambda', 0.0, 10.0),
-            }
-        else:
-            # Default parameters
-            params = {
-                'n_estimators': self.config.n_model_trials,
-                'max_depth': self.config.max_depth,  # Use environment variable
-                'learning_rate': self.config.learning_rate,  # Use environment variable
-                'min_child_weight': 3,
-                'subsample': 0.8,
-                'colsample_bytree': 0.8,
-                'reg_alpha': 0.1,
-                'reg_lambda': 0.1,
-            }
-        
-        # Calculate optimal n_jobs based on system resources and parallel context
-        import os
-        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '4'))
-        
-        if max_currency_workers > 1:
-            # For 16 vCPU system: 4 currency workers × 1-2 model jobs = 4-8 processes (optimal)
-            optimal_n_jobs = max(1, min(self.config.model_n_jobs, 2))
-        else:
-            # Single currency worker: can use more resources
-            optimal_n_jobs = self.config.model_n_jobs
-            
-        params.update({
-            'random_state': self.config.random_state,
-            'n_jobs': optimal_n_jobs,
-            'tree_method': 'hist',  # type: ignore[dict-item]  # Optimal for multi-core
-            'verbosity': 0,
-        })
-        
-        # Only set early_stopping_rounds when NOT using Optuna (trial is None)
-        # Optuna handles pruning itself and conflicts with XGBoost's built-in early stopping
-        if trial is None:
-            params['early_stopping_rounds'] = self.config.early_stopping_rounds
-        
-        return xgb.XGBRegressor(**params)
-    
-    def get_model_type(self) -> str:
-        """Get model type identifier."""
-        return "xgboost"
-
-
 class RandomForestModel(BaseModel):
     """Random Forest model implementation."""
     
@@ -482,7 +424,7 @@ class RandomForestModel(BaseModel):
         if trial is not None:
             # Hyperparameter optimization
             params = {
-                'n_estimators': trial.suggest_int('rf_n_estimators', 100, 500),
+                'n_estimators': trial.suggest_int('rf_n_estimators', 100, 1000),
                 'max_depth': trial.suggest_int('rf_max_depth', 5, 20),
                 'min_samples_split': trial.suggest_int('rf_min_samples_split', 2, 20),
                 'min_samples_leaf': trial.suggest_int('rf_min_samples_leaf', 1, 10),
@@ -491,7 +433,7 @@ class RandomForestModel(BaseModel):
         else:
             # Default parameters
             params = {
-                'n_estimators': 200,
+                'n_estimators': 1000,
                 'max_depth': 10,
                 'min_samples_split': 5,
                 'min_samples_leaf': 2,
@@ -521,6 +463,51 @@ class RandomForestModel(BaseModel):
         return "random_forest"
 
 
+class ExtraTreesModel(BaseModel):
+    """Extra Trees (Extremely Randomized Trees) model implementation."""
+    
+    def _create_model(self, trial: Optional[optuna.Trial] = None) -> ExtraTreesRegressor:
+        """Create Extra Trees model."""
+        if trial is not None:
+            # Hyperparameter optimization
+            params = {
+                'n_estimators': trial.suggest_int('et_n_estimators', 100, 1000),
+                'max_depth': trial.suggest_int('et_max_depth', 5, 20),
+                'min_samples_split': trial.suggest_int('et_min_samples_split', 2, 20),
+                'min_samples_leaf': trial.suggest_int('et_min_samples_leaf', 1, 10),
+                'max_features': trial.suggest_categorical('et_max_features', ['sqrt', 'log2', None]),
+            }
+        else:
+            # Default parameters - Extra Trees often work well with more trees
+            params = {
+                'n_estimators': 1000,
+                'max_depth': 10,
+                'min_samples_split': 5,
+                'min_samples_leaf': 2,
+                'max_features': 'sqrt',
+            }
+        
+        # Calculate optimal n_jobs based on system resources and parallel context
+        import os
+        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '4'))
+        
+        if max_currency_workers > 1:
+            optimal_n_jobs = max(1, min(self.config.model_n_jobs, 2))
+        else:
+            optimal_n_jobs = self.config.model_n_jobs
+            
+        params.update({
+            'random_state': self.config.random_state,
+            'n_jobs': optimal_n_jobs,
+        })
+        
+        return ExtraTreesRegressor(**params)
+    
+    def get_model_type(self) -> str:
+        """Get model type identifier."""
+        return "extra_trees"
+
+
 class EnsembleModel:
     """Ensemble model combining multiple base models."""
     
@@ -540,6 +527,12 @@ class EnsembleModel:
         # Normalize weights
         total_weight = sum(self.weights)
         self.weights = [w / total_weight for w in self.weights]
+        
+        # Log weights if logger is available
+        if self.logger and len(self.models) > 0:
+            model_types = [model.get_model_type() for model in self.models]
+            weight_str = ', '.join([f"{mt}: {w:.3f}" for mt, w in zip(model_types, self.weights)])
+            self.logger.debug(f"Ensemble weights: {weight_str}")
 
     
     def fit(
@@ -901,7 +894,184 @@ class HyperparameterOptimizer:
                     self.logger.warning(f"Failed to clean up database file {storage_file}: {e}")
         
         return study.best_params
+
+
+class EnsembleWeightOptimizer:
+    """Optimizer for ensemble weights using Optuna."""
     
+    def __init__(
+        self,
+        config: ModelConfig,
+        logger: Optional[MLLogger] = None
+    ):
+        self.config = config
+        self.logger = logger
+        
+        # Configure Optuna to be less verbose
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+    
+    def optimize_weights(
+        self,
+        models: List[BaseModel],
+        X_val: np.ndarray,
+        y_val: np.ndarray,
+        currency: str,
+        n_trials: int = 50
+    ) -> List[float]:
+        """
+        Optimize ensemble weights using Optuna.
+        
+        Args:
+            models: List of trained base models
+            X_val: Validation features
+            y_val: Validation targets
+            currency: Currency name for logging
+            n_trials: Number of Optuna trials
+            
+        Returns:
+            List of optimized weights (normalized to sum to 1.0)
+        """
+        if len(models) < 2:
+            if self.logger:
+                self.logger.warning(f"Need at least 2 models for weight optimization, got {len(models)}. Using equal weights.")
+            return [1.0 / len(models)] * len(models)
+        
+        if len(X_val) < 10:
+            if self.logger:
+                self.logger.warning(f"Insufficient validation data ({len(X_val)} samples) for weight optimization. Using equal weights.")
+            return [1.0 / len(models)] * len(models)
+        
+        def objective(trial: Any) -> float:
+            # Suggest weights for each model
+            weights = []
+            for i in range(len(models)):
+                weight = trial.suggest_float(f'weight_{i}', 0.01, 1.0)
+                weights.append(weight)
+            
+            # Normalize weights to sum to 1.0
+            total_weight = sum(weights)
+            normalized_weights = [w / total_weight for w in weights]
+            
+            # Get predictions from each model
+            predictions = []
+            for model in models:
+                if model.model is None:
+                    raise ValueError("Model must be trained before weight optimization")
+                pred = model.predict(X_val)
+                predictions.append(pred)
+            
+            # Calculate weighted ensemble prediction
+            weighted_pred = np.zeros_like(predictions[0])
+            for pred, weight in zip(predictions, normalized_weights):
+                weighted_pred += weight * pred
+            
+            # Calculate MAE as objective
+            mae = mean_absolute_error(y_val, weighted_pred)
+            return float(mae)
+        
+        # Create study
+        study_name = f"ensemble_weights_{currency}_{self.config.random_state}"
+        
+        # Initialize storage_file variable for cleanup
+        storage_file = None
+        
+        if self.config.max_optuna_workers > 1:
+            # Use SQLite storage for multi-threaded parallelization
+            import tempfile
+            import os
+            import uuid
+            
+            temp_dir = tempfile.gettempdir()
+            unique_id = str(uuid.uuid4())[:8]
+            storage_file = os.path.join(temp_dir, f"optuna_weights_{study_name}_{unique_id}.db")
+            
+            sqlite_url = f"sqlite:///{storage_file}?timeout=30&check_same_thread=False"
+            
+            try:
+                storage = optuna.storages.RDBStorage(
+                    sqlite_url,
+                    engine_kwargs={'pool_pre_ping': True, 'pool_recycle': 300}
+                )
+                study = optuna.create_study(
+                    direction='minimize',
+                    sampler=TPESampler(seed=self.config.random_state),
+                    pruner=MedianPruner(),
+                    storage=storage,
+                    study_name=study_name,
+                    load_if_exists=True
+                )
+                if self.logger:
+                    self.logger.debug(f"Using SQLite storage for weight optimization: {storage_file}")
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"SQLite storage failed: {e}. Falling back to in-memory storage.")
+                study = optuna.create_study(
+                    direction='minimize',
+                    sampler=TPESampler(seed=self.config.random_state),
+                    pruner=MedianPruner(),
+                    study_name=study_name,
+                    load_if_exists=True
+                )
+                storage_file = None
+        else:
+            # Use in-memory storage for single-threaded optimization
+            study = optuna.create_study(
+                direction='minimize',
+                sampler=TPESampler(seed=self.config.random_state),
+                pruner=MedianPruner(),
+                study_name=study_name,
+                load_if_exists=True
+            )
+        
+        # Optimize
+        import os
+        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '6'))
+        if max_currency_workers > 1:
+            optuna_workers = max(1, min(self.config.max_optuna_workers, 2))
+        else:
+            optuna_workers = 1  # Weight optimization is fast, use single worker
+        
+        study.optimize(objective, n_trials=n_trials, n_jobs=optuna_workers)
+        
+        if self.logger:
+            self.logger.info(f"Weight optimization completed. Best MAE: {study.best_value:.4f}")
+        
+        # Extract optimized weights
+        best_weights = []
+        for i in range(len(models)):
+            weight = study.best_params[f'weight_{i}']
+            best_weights.append(weight)
+        
+        # Normalize to sum to 1.0
+        total_weight = sum(best_weights)
+        normalized_weights = [w / total_weight for w in best_weights]
+        
+        if self.logger:
+            model_types = [model.get_model_type() for model in models]
+            weight_str = ', '.join([f"{mt}: {w:.3f}" for mt, w in zip(model_types, normalized_weights)])
+            self.logger.info(f"Optimized weights for {currency}: {weight_str}")
+        
+        # Clean up temporary database file if it exists
+        if storage_file is not None:
+            try:
+                import time
+                time.sleep(0.1)
+                
+                if os.path.exists(storage_file):
+                    try:
+                        if 'storage' in locals():
+                            storage._backend._engine.dispose()
+                    except:
+                        pass
+                    
+                    os.remove(storage_file)
+                    if self.logger:
+                        self.logger.debug(f"Cleaned up temporary database: {storage_file}")
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"Failed to clean up database file {storage_file}: {e}")
+        
+        return normalized_weights
 
 
 class ModelTrainer:
@@ -1046,26 +1216,47 @@ class ModelTrainer:
                 
                 models.append(lgb_model)
             
-            if self.config.use_xgboost:
-                xgb_model = XGBoostModel(self.config, self.logger)
+            if self.config.use_random_forest:
+                rf_model = RandomForestModel(self.config, self.logger)
                 
                 # Perform individual optimization for this currency
                 if self.logger:
-                    self.logger.info(f"Optimizing XGBoost hyperparameters for {currency}")
+                    self.logger.info(f"Optimizing RandomForest hyperparameters for {currency}")
                 
                 try:
                     optimized_params = self.hyperparameter_optimizer.optimize(
-                        XGBoostModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
+                        RandomForestModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
                     )
-                    xgb_model.model = xgb_model._create_model_with_params(optimized_params)
+                    rf_model.model = rf_model._create_model_with_params(optimized_params)
                     if self.logger:
-                        self.logger.info(f"Using optimized XGBoost params for {currency}")
+                        self.logger.info(f"Using optimized RandomForest params for {currency}")
                 except Exception as e:
                     if self.logger:
-                        self.logger.warning(f"XGBoost optimization failed for {currency}: {e}. Using default parameters.")
-                    xgb_model.model = xgb_model._create_model()
+                        self.logger.warning(f"RandomForest optimization failed for {currency}: {e}. Using default parameters.")
+                    rf_model.model = rf_model._create_model()
                 
-                models.append(xgb_model)  # type: ignore[arg-type]
+                models.append(rf_model)  # type: ignore[arg-type]
+            
+            if self.config.use_extra_trees:
+                et_model = ExtraTreesModel(self.config, self.logger)
+                
+                # Perform individual optimization for this currency
+                if self.logger:
+                    self.logger.info(f"Optimizing ExtraTrees hyperparameters for {currency}")
+                
+                try:
+                    optimized_params = self.hyperparameter_optimizer.optimize(
+                        ExtraTreesModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
+                    )
+                    et_model.model = et_model._create_model_with_params(optimized_params)
+                    if self.logger:
+                        self.logger.info(f"Using optimized ExtraTrees params for {currency}")
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f"ExtraTrees optimization failed for {currency}: {e}. Using default parameters.")
+                    et_model.model = et_model._create_model()
+                
+                models.append(et_model)  # type: ignore[arg-type]
         else:
             # Use default parameters if optimization is disabled
             if self.logger:
@@ -1076,13 +1267,53 @@ class ModelTrainer:
                 lgb_model.model = lgb_model._create_model()
                 models.append(lgb_model)
             
-            if self.config.use_xgboost:
-                xgb_model = XGBoostModel(self.config, self.logger)
-                xgb_model.model = xgb_model._create_model()
-                models.append(xgb_model)  # type: ignore[arg-type]
+            if self.config.use_random_forest:
+                rf_model = RandomForestModel(self.config, self.logger)
+                rf_model.model = rf_model._create_model()
+                models.append(rf_model)  # type: ignore[arg-type]
+            
+            if self.config.use_extra_trees:
+                et_model = ExtraTreesModel(self.config, self.logger)
+                et_model.model = et_model._create_model()
+                models.append(et_model)  # type: ignore[arg-type]
         
-        ensemble = EnsembleModel(models, logger=self.logger)  # type: ignore[arg-type]
-        ensemble.fit(X_train, y_train, X_val, y_val)
+        # Ensure we have the three required models
+        if len(models) == 0:
+            raise ValueError("No models were created for ensemble. Ensure use_lightgbm, use_random_forest, and use_extra_trees are enabled.")
+        
+        if self.logger:
+            model_types = [model.get_model_type() for model in models]
+            self.logger.info(f"Training ensemble for {currency} with models: {', '.join(model_types)}")
+        
+        # Train all models
+        for model in models:
+            if model.model is None:
+                model.model = model._create_model()
+            model.fit(X_train, y_train, X_val, y_val)
+        
+        # Optimize ensemble weights if enabled
+        optimized_weights = None
+        if self.config.optimize_ensemble_weights and len(models) >= 2:
+            if self.logger:
+                self.logger.info(f"Optimizing ensemble weights for {currency}")
+            
+            try:
+                weight_optimizer = EnsembleWeightOptimizer(self.config, self.logger)
+                optimized_weights = weight_optimizer.optimize_weights(
+                    models, X_val, y_val, currency, 
+                    n_trials=self.config.ensemble_weight_optimization_trials
+                )
+                if self.logger:
+                    model_types = [model.get_model_type() for model in models]
+                    weight_str = ', '.join([f"{mt}: {w:.3f}" for mt, w in zip(model_types, optimized_weights)])
+                    self.logger.info(f"Optimized ensemble weights for {currency}: {weight_str}")
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"Ensemble weight optimization failed for {currency}: {e}. Using equal weights.")
+                optimized_weights = None
+        
+        # Create ensemble with optimized or equal weights
+        ensemble = EnsembleModel(models, weights=optimized_weights, logger=self.logger)  # type: ignore[arg-type]
         
         return ensemble
     
@@ -1106,17 +1337,17 @@ class ModelTrainer:
                 )
                 model = LightGBMModel(self.config, self.logger)
                 model.model = model._create_model_with_params(params)
-            elif model_type == "xgboost":
-                params = optimizer.optimize(
-                    XGBoostModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
-                )
-                model = XGBoostModel(self.config, self.logger)
-                model.model = model._create_model_with_params(params)
             elif model_type == "random_forest":
                 params = optimizer.optimize(
                     RandomForestModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
                 )
                 model = RandomForestModel(self.config, self.logger)
+                model.model = model._create_model_with_params(params)
+            elif model_type == "extra_trees":
+                params = optimizer.optimize(
+                    ExtraTreesModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
+                )
+                model = ExtraTreesModel(self.config, self.logger)
                 model.model = model._create_model_with_params(params)
             else:
                 raise ValueError(f"Unknown model type: {model_type}")
@@ -1127,10 +1358,10 @@ class ModelTrainer:
             # Use default parameters for fast training
             if model_type == "lightgbm":
                 model: BaseModel = LightGBMModel(self.config, self.logger)
-            elif model_type == "xgboost":
-                model = XGBoostModel(self.config, self.logger)
             elif model_type == "random_forest":
                 model = RandomForestModel(self.config, self.logger)
+            elif model_type == "extra_trees":
+                model = ExtraTreesModel(self.config, self.logger)
             else:
                 raise ValueError(f"Unknown model type: {model_type}")
             
@@ -1172,7 +1403,8 @@ class ModelTrainer:
                     # Create temporary model with logger for proper error handling
                     temp_ensemble = EnsembleModel([
                         LightGBMModel(self.config, self.logger),
-                        XGBoostModel(self.config, self.logger)
+                        RandomForestModel(self.config, self.logger),
+                        ExtraTreesModel(self.config, self.logger)
                     ], logger=self.logger)
                     temp_ensemble.fit(X_train_cv, y_train_cv)
                     
@@ -1247,6 +1479,10 @@ def save_model_artifacts(
     # Store feature names if available (for exact feature matching during inference)
     if result.feature_names:
         metadata['feature_names'] = result.feature_names
+    
+    # Store feature importance if available (for analysis)
+    if result.feature_importance:
+        metadata['feature_importance'] = result.feature_importance
     
     metadata_path = output_dir / "model_metadata.json"
     with open(metadata_path, 'w') as f:

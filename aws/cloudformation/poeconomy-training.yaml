@@ -37,11 +37,11 @@ Parameters:
     Description: Maximum number of currencies to train (0 = no limit)
   NHyperparameterTrials:
     Type: Number
-    Default: 50
+    Default: 200
     Description: Number of hyperparameter optimization trials
   NModelTrials:
     Type: Number
-    Default: 500
+    Default: 1000
     Description: Number of model training iterations (boosting rounds)
   CVFolds:
     Type: Number

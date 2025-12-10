@@ -41,8 +41,13 @@ class ModelConfig:
     
     # Model Selection
     use_lightgbm: bool = True
-    use_xgboost: bool = True
+    use_random_forest: bool = True
+    use_extra_trees: bool = True 
     use_ensemble: bool = True
+    
+    # Ensemble Weight Optimization
+    optimize_ensemble_weights: bool = True  # Enable Optuna-based weight optimization
+    ensemble_weight_optimization_trials: int = 50  # Number of Optuna trials for weight optimization
     
     max_currency_workers: int = field(default_factory=lambda: int(os.getenv('MAX_CURRENCY_WORKERS', '4')))
     max_optuna_workers: int = field(default_factory=lambda: int(os.getenv('MAX_OPTUNA_WORKERS', '2')))
@@ -52,18 +57,18 @@ class ModelConfig:
     test_size: float = 0.2
     random_state: int = 42
     cv_folds: int = field(default_factory=lambda: int(os.getenv('CV_FOLDS', '5')))
-    early_stopping_rounds: int = 50  # Increased to allow more training before stopping
+    early_stopping_rounds: int = 50
     
     
     # Hyperparameter Optimization
-    n_hyperparameter_trials: int = field(default_factory=lambda: int(os.getenv('N_HYPERPARAMETER_TRIALS', '50')))
+    n_hyperparameter_trials: int = field(default_factory=lambda: int(os.getenv('N_HYPERPARAMETER_TRIALS', '200')))
     
     # Model Performance
     max_depth: int = field(default_factory=lambda: int(os.getenv('MAX_DEPTH', '8')))
     learning_rate: float = field(default_factory=lambda: float(os.getenv('LEARNING_RATE', '0.1')))
     
-    # Model Training Iterations (number of boosting rounds for LightGBM/XGBoost)
-    n_model_trials: int = field(default_factory=lambda: int(os.getenv('N_MODEL_TRIALS', '500')))
+    # Model Training Iterations
+    n_model_trials: int = field(default_factory=lambda: int(os.getenv('N_MODEL_TRIALS', '1000')))
 
 
 @dataclass
