@@ -8,7 +8,15 @@ set -euo pipefail
 # Configuration
 ENVIRONMENT=${1:-production}
 REGION=${AWS_DEFAULT_REGION:-us-west-2}
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+# AWS CLI command (handle Windows) - set early so it can be used below
+if command -v aws.exe >/dev/null 2>&1; then
+  AWS_CMD="aws.exe"
+else
+  AWS_CMD="aws"
+fi
+
+ACCOUNT_ID=$($AWS_CMD sts get-caller-identity --query Account --output text | tr -d '\r\n')
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -30,13 +38,6 @@ TRAINING_TEMPLATE="$ROOT_DIR/aws/cloudformation/poeconomy-training.yaml"
 
 # Environment file
 ENV_FILE="$ROOT_DIR/aws/.env"
-
-# AWS CLI command (handle Windows)
-if command -v aws.exe >/dev/null 2>&1; then
-  AWS_CMD="aws.exe"
-else
-  AWS_CMD="aws"
-fi
 
 # Bucket names
 DATA_LAKE_BUCKET_NAME="poeconomy-${ENVIRONMENT}-datalake"
@@ -91,8 +92,8 @@ ensure_prerequisites() {
     exit 1
   fi
   
-  # Check Python
-  if ! command -v python >/dev/null 2>&1; then
+  # Check Python (try python3 as fallback)
+  if ! command -v python >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
     echo "❌ Python not found. Please install Python."
     exit 1
   fi
