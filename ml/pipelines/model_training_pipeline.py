@@ -27,11 +27,6 @@ from ml.config.training_config import MLConfig, get_default_config
 from ml.utils.common_utils import setup_ml_logging, MLLogger, ProgressLogger
 from ml.utils.model_training import ModelTrainer, save_model_artifacts, TrainingResult
 from ml.utils.data_processing import generate_target_currency_list
-from ml.utils.feature_filtering import (
-    parse_horizon_to_days,
-    filter_features_by_horizon,
-    get_feature_filtering_stats
-)
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
@@ -804,28 +799,8 @@ class ModelTrainingPipeline:
                     horizon = target_col.replace('target_price_', '')
                     self.logger.info(f"Training model for {horizon} horizon")
                     
-                    # Apply horizon-based feature filtering to prevent feature leakage
-                    # This must match the filtering logic used during inference
-                    horizon_feature_columns, excluded_columns = filter_features_by_horizon(
-                        feature_columns, horizon, strict_mode=False
-                    )
-                    if excluded_columns:
-                        stats = get_feature_filtering_stats(feature_columns, horizon, strict_mode=False)
-                        self.logger.info(
-                            f"Filtered {len(excluded_columns)} features for {horizon} horizon to prevent feature leakage "
-                            f"({len(horizon_feature_columns)} features remaining)",
-                            extra={
-                                "horizon": horizon,
-                                "horizon_days": stats['horizon_days'],
-                                "excluded_count": len(excluded_columns),
-                                "remaining_count": len(horizon_feature_columns),
-                                "exclusion_rate": stats['exclusion_rate'],
-                                "excluded_by_window": stats['excluded_by_window']
-                            }
-                        )
-                    
-                    # Use filtered features for this horizon
-                    X_horizon_filtered = processed_data[horizon_feature_columns].values
+                    # Use all available features for this horizon
+                    X_horizon_filtered = processed_data[feature_columns].values
                     
                     # Get target for this horizon
                     y_horizon = processed_data[target_col].values
@@ -865,11 +840,11 @@ class ModelTrainingPipeline:
                         self.logger.warning(f"Insufficient data for {currency_name} {horizon} horizon: {len(X_horizon)} samples (need at least 10)")
                         continue
                     
-                    # Train model for this horizon with filtered features
+                    # Train model for this horizon
                     training_result = self.model_trainer.train_single_model(
                         X_horizon, y_horizon, f"{currency_name}_{horizon}", 
                         target_names=[target_col],
-                        feature_names=horizon_feature_columns
+                        feature_names=feature_columns
                     )
                     
                     if training_result is not None:
@@ -931,28 +906,8 @@ class ModelTrainingPipeline:
                 # Extract horizon from target column name (e.g., "target_price_3d" -> "3d")
                 horizon = target_col.replace('target_price_', '') if 'target_price_' in target_col else '1d'
                 
-                # Apply horizon-based feature filtering to prevent feature leakage
-                # This must match the filtering logic used during inference
-                horizon_feature_columns, excluded_columns = filter_features_by_horizon(
-                    feature_columns, horizon, strict_mode=True
-                )
-                if excluded_columns:
-                    stats = get_feature_filtering_stats(feature_columns, horizon, strict_mode=True)
-                    self.logger.info(
-                        f"Filtered {len(excluded_columns)} features for {horizon} horizon to prevent feature leakage "
-                        f"({len(horizon_feature_columns)} features remaining)",
-                        extra={
-                            "horizon": horizon,
-                            "horizon_days": stats['horizon_days'],
-                            "excluded_count": len(excluded_columns),
-                            "remaining_count": len(horizon_feature_columns),
-                            "exclusion_rate": stats['exclusion_rate'],
-                            "excluded_by_window": stats['excluded_by_window']
-                        }
-                    )
-                
-                # Use filtered features for this horizon
-                X_horizon_filtered = processed_data[horizon_feature_columns].values
+                # Use all available features
+                X_horizon_filtered = processed_data[feature_columns].values
                 y = processed_data[target_col].values
                 
                 # Filter out NaN values
@@ -969,7 +924,7 @@ class ModelTrainingPipeline:
                 training_result = self.model_trainer.train_single_model(
                     X, y, currency_name, 
                     target_names=[target_col],
-                    feature_names=horizon_feature_columns
+                    feature_names=feature_columns
                 )
                 
                 if training_result is None:
@@ -993,7 +948,7 @@ class ModelTrainingPipeline:
                     'training_metrics': training_result.metrics,
                     'model_info': model_info,
                     'processing_metadata': processing_metadata,
-                    'feature_count': len(horizon_feature_columns),
+                    'feature_count': len(feature_columns),
                     'leagues_in_training': processing_metadata.get('leagues_included', [])
                 }
             
