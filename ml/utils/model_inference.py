@@ -1,8 +1,7 @@
 """
 Inference utilities for DynamoDB-backed currency price predictions.
 
-This module rebuilds the prediction workflow around the new DynamoDB data
-source. It loads trained model artifacts, assembles the latest feature vectors
+This module loads trained model artifacts, assembles the latest feature vectors
 using the shared DataProcessor/FeatureEngineer pipeline, and generates
 predictions for requested currencies.
 """
@@ -18,19 +17,11 @@ import math
 import joblib
 import numpy as np
 import pandas as pd
-from scipy import stats
 
-from ml.config.training_config import MLConfig
 from ml.config.inference_config import InferenceConfig, get_inference_config_from_env
 from ml.utils.data_processing import DataProcessor
 from ml.utils.data_sources import create_data_source, DataSourceConfig, BaseDataSource
 from ml.utils.common_utils import MLLogger
-from ml.utils.feature_filtering import (
-    parse_horizon_to_days,
-    filter_features_by_horizon,
-    get_feature_filtering_stats
-)
-
 
 HORIZON_SUFFIXES = {"1d", "3d", "7d", "14d", "30d"}
 

@@ -30,18 +30,17 @@ from typing import Iterable, List, Optional, Sequence
 import boto3
 from boto3.dynamodb.conditions import Key
 
-from ml.config.training_config import MLConfig
 from ml.config.inference_config import get_inference_config_from_env, InferenceConfig
 from ml.utils.data_sources import create_data_source, DataSourceConfig, BaseDataSource
-from ml.utils.model_inference import ModelPredictor, PredictionResult
 import joblib
-import io
 import numpy as np
 import pandas as pd
 from typing import Dict, Any
 from ml.utils.common_utils import MLLogger
 from ml.utils.data_processing import DataProcessor
 from ml.utils.model_inference import (
+    ModelPredictor,
+    PredictionResult,
     _split_currency_label, 
     CurrencyModelBundle, 
     HORIZON_SUFFIXES
