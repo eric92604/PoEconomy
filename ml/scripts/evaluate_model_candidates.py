@@ -141,7 +141,7 @@ class LightGBMWrapper(BaseModelWrapper):
             # During optimization: use trial to suggest parameters
             # This takes priority over optimized_params to allow re-optimization
             params = {
-                'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+                'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
                 'max_depth': trial.suggest_int('max_depth', 4, 12),
                 'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
                 'num_leaves': trial.suggest_int('num_leaves', 20, 200),
@@ -168,7 +168,7 @@ class LightGBMWrapper(BaseModelWrapper):
         else:
             # Default parameters with early stopping support
             self.model = lgb.LGBMRegressor(
-                n_estimators=200,
+                n_estimators=1000,
                 max_depth=8,
                 learning_rate=0.1,
                 num_leaves=100,
@@ -204,7 +204,7 @@ class XGBoostWrapper(BaseModelWrapper):
         if trial is not None:
             # During optimization: use trial to suggest parameters
             params = {
-                'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+                'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
                 'max_depth': trial.suggest_int('max_depth', 4, 12),
                 'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
                 'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
@@ -232,7 +232,7 @@ class XGBoostWrapper(BaseModelWrapper):
         else:
             # Default parameters with early stopping support
             self.model = xgb.XGBRegressor(
-                n_estimators=200,
+                n_estimators=1000,
                 max_depth=8,
                 learning_rate=0.1,
                 random_state=42,
@@ -269,7 +269,7 @@ class CatBoostWrapper(BaseModelWrapper):
         if trial is not None:
             # During optimization: use trial to suggest parameters
             params = {
-                'iterations': trial.suggest_int('iterations', 100, 500),
+                'iterations': trial.suggest_int('iterations', 100, 1000),
                 'depth': trial.suggest_int('depth', 4, 10),
                 'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
                 'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1.0, 10.0),
@@ -292,7 +292,7 @@ class CatBoostWrapper(BaseModelWrapper):
         else:
             # Default parameters with early stopping support
             self.model = cb.CatBoostRegressor(
-                iterations=200,
+                iterations=1000,
                 depth=8,
                 learning_rate=0.1,
                 random_seed=42,
@@ -326,7 +326,7 @@ class HistGradientBoostingWrapper(BaseModelWrapper):
         if trial is not None:
             # During optimization: use trial to suggest parameters
             params = {
-                'max_iter': trial.suggest_int('max_iter', 100, 500),
+                'max_iter': trial.suggest_int('max_iter', 100, 1000),
                 'max_depth': trial.suggest_int('max_depth', 4, 12),
                 'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
                 'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 20),
@@ -343,7 +343,7 @@ class HistGradientBoostingWrapper(BaseModelWrapper):
         else:
             # Default parameters with early stopping support
             self.model = HistGradientBoostingRegressor(
-                max_iter=200,
+                max_iter=1000,
                 max_depth=8,
                 learning_rate=0.1,
                 random_state=42,
@@ -369,7 +369,7 @@ class MLPWrapper(BaseModelWrapper):
                 'activation': trial.suggest_categorical('activation', ['relu', 'tanh', 'logistic']),
                 'alpha': trial.suggest_float('alpha', 0.0001, 0.01, log=True),
                 'learning_rate_init': trial.suggest_float('learning_rate_init', 0.0001, 0.01, log=True),
-                'max_iter': 200,
+                'max_iter': 1000,
                 'solver': 'adam',
                 'random_state': 42,
                 'early_stopping': True,
@@ -414,7 +414,7 @@ class MLPWrapper(BaseModelWrapper):
                 activation='relu',
                 solver='adam',
                 alpha=0.001,
-                max_iter=200,
+                max_iter=1000,
                 random_state=42,
                 early_stopping=True,
                 validation_fraction=0.1
@@ -616,7 +616,7 @@ class RandomForestWrapper(BaseModelWrapper):
         if trial is not None:
             # During optimization: use trial to suggest parameters
             params = {
-                'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+                'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
                 'max_depth': trial.suggest_int('max_depth', 5, 20),
                 'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
                 'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
@@ -636,7 +636,7 @@ class RandomForestWrapper(BaseModelWrapper):
             self.model = RandomForestRegressor(**params)
         else:
             self.model = RandomForestRegressor(
-                n_estimators=200,
+                n_estimators=1000,
                 max_depth=10,
                 min_samples_split=5,
                 random_state=42,
@@ -655,7 +655,7 @@ class ExtraTreesWrapper(BaseModelWrapper):
         if trial is not None:
             # During optimization: use trial to suggest parameters
             params = {
-                'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+                'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
                 'max_depth': trial.suggest_int('max_depth', 5, 20),
                 'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
                 'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
@@ -675,7 +675,7 @@ class ExtraTreesWrapper(BaseModelWrapper):
             self.model = ExtraTreesRegressor(**params)
         else:
             self.model = ExtraTreesRegressor(
-                n_estimators=200,
+                n_estimators=1000,
                 max_depth=10,
                 min_samples_split=5,
                 random_state=42,
@@ -695,14 +695,14 @@ class BaggingWrapper(BaseModelWrapper):
         if trial is not None:
             # During optimization: use trial to suggest parameters
             params = {
-                'n_estimators': trial.suggest_int('n_estimators', 50, 200),
+                'n_estimators': trial.suggest_int('n_estimators', 50, 1000),
                 'max_depth': trial.suggest_int('max_depth', 5, 15),
             }
             # Don't store params during optimization - Optuna will track best params
             base_estimator = DecisionTreeRegressor(max_depth=params.get('max_depth', 10), random_state=42)
             self.model = BaggingRegressor(
                 estimator=base_estimator,
-                n_estimators=params.get('n_estimators', 100),
+                n_estimators=params.get('n_estimators', 1000),
                 random_state=42,
                 n_jobs=2
             )
@@ -712,7 +712,7 @@ class BaggingWrapper(BaseModelWrapper):
             base_estimator = DecisionTreeRegressor(max_depth=params.get('max_depth', 10), random_state=42)
             self.model = BaggingRegressor(
                 estimator=base_estimator,
-                n_estimators=params.get('n_estimators', 100),
+                n_estimators=params.get('n_estimators', 1000),
                 random_state=42,
                 n_jobs=2
             )
@@ -720,7 +720,7 @@ class BaggingWrapper(BaseModelWrapper):
             base_estimator = DecisionTreeRegressor(max_depth=10, random_state=42)
             self.model = BaggingRegressor(
                 estimator=base_estimator,
-                n_estimators=100,
+                n_estimators=1000,
                 random_state=42,
                 n_jobs=2
             )
@@ -748,7 +748,7 @@ class HuberWrapper(BaseModelWrapper):
         super().__init__("Huber Regressor", "Linear")
     
     def create_model(self):
-        self.model = HuberRegressor(epsilon=1.35, max_iter=200)
+        self.model = HuberRegressor(epsilon=1.35, max_iter=1000)
 
 
 # Support Vector Family
