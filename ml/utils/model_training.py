@@ -154,13 +154,14 @@ class TrainingResult:
     """Result of model training process."""
     model: Any
     scaler: Optional[Any]
-    metrics: ModelMetrics
-    training_time: float
-    hyperparameters: Dict[str, Any]
-    feature_importance: Optional[Dict[str, float]]
-    cross_validation_scores: Optional[List[float]]
-    model_type: str
-    currency: str
+    imputer: Optional[Any] = None  # Fitted imputer for models that require imputation (RandomForest/ExtraTrees)
+    metrics: ModelMetrics = None  # type: ignore[assignment]
+    training_time: float = 0.0
+    hyperparameters: Dict[str, Any] = None  # type: ignore[assignment]
+    feature_importance: Optional[Dict[str, float]] = None
+    cross_validation_scores: Optional[List[float]] = None
+    model_type: str = ""
+    currency: str = ""
     training_history: Optional[Dict[str, Any]] = None  # Training losses per epoch/trial
     training_samples: int = 0  # Number of training samples
     n_features: int = 0  # Number of features
@@ -175,6 +176,7 @@ class BaseModel(ABC):
         self.config = config
         self.logger = logger
         self.model: Any = None
+        self.imputer: Optional[Any] = None  # Fitted imputer for models that require imputation
         
         # Suppress model initialization logging to reduce noise
     
@@ -253,12 +255,15 @@ class BaseModel(ABC):
             # Check for NaN values and impute if necessary
             if np.isnan(X).any() or (X_val is not None and np.isnan(X_val).any()):
                 from sklearn.impute import SimpleImputer
+                # Create and fit imputer on training data only (prevents data leakage)
                 imputer = SimpleImputer(strategy='median')
                 X = imputer.fit_transform(X)
                 if X_val is not None:
                     X_val = imputer.transform(X_val)
+                # Store fitted imputer for use during inference
+                self.imputer = imputer
                 if self.logger:
-                    self.logger.debug(f"Applied median imputation for {self.get_model_type()} model")
+                    self.logger.debug(f"Applied median imputation for {self.get_model_type()} model and stored imputer for inference")
         
         if X_val is not None and y_val is not None:
             # Always use early stopping when validation data exists
@@ -301,18 +306,30 @@ class BaseModel(ABC):
         return training_history
     
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """Make predictions using the trained model."""
+        """
+        Make predictions using the trained model.
+        
+        Uses the fitted imputer from training to transform inference data,
+        preventing data leakage and ensuring consistency with training.
+        """
         if self.model is None:
             raise ValueError("Model has not been trained yet")
         
         # Handle NaN values for models that don't support them (RandomForest, ExtraTrees)
         # LightGBM handles NaN natively, but RandomForest and ExtraTrees require imputation
         needs_imputation = isinstance(self.model, (RandomForestRegressor, ExtraTreesRegressor))
-        if needs_imputation and np.isnan(X).any():
-            from sklearn.impute import SimpleImputer
-            # Use median imputation (same as during training)
-            imputer = SimpleImputer(strategy='median')
-            X = imputer.fit_transform(X)
+        if needs_imputation:
+            # Use the fitted imputer from training (stored in self.imputer)
+            # This prevents data leakage and ensures consistency with training
+            if hasattr(self, 'imputer') and self.imputer is not None:
+                X = self.imputer.transform(X)
+            elif np.isnan(X).any():
+                # Fallback: if imputer not found but NaNs exist, raise error
+                # This should not happen if training was done correctly
+                raise ValueError(
+                    f"Model requires imputation but no fitted imputer found. "
+                    f"This indicates the model was not properly trained or the imputer was not saved."
+                )
         
         predictions = self.model.predict(X)
         
@@ -344,10 +361,10 @@ class BaseModel(ABC):
 
 
 class LightGBMModel(BaseModel):
-    """LightGBM model implementation with optimal threading."""
+    """LightGBM model implementation with configurable threading."""
     
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> lgb.LGBMRegressor:
-        """Create LightGBM model with optimal parameters."""
+        """Create LightGBM model with configured parameters."""
         if trial is not None:
             # Hyperparameter optimization
             params = {
@@ -375,19 +392,10 @@ class LightGBMModel(BaseModel):
                 'reg_lambda': 0.1,
             }
         
-        # Calculate optimal n_jobs based on system resources and parallel context
-        import os
-        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '4'))
-        
-        if max_currency_workers > 1:
-            optimal_n_jobs = max(1, min(self.config.model_n_jobs, 2))
-        else:
-            # Single currency worker: can use more resources
-            optimal_n_jobs = self.config.model_n_jobs
-            
+        # Use configured model_n_jobs from environment variable (MODEL_N_JOBS)
         params.update({
             'random_state': self.config.random_state,
-            'n_jobs': optimal_n_jobs,
+            'n_jobs': self.config.model_n_jobs,
             'force_row_wise': True,  # Better for multi-threading
             'verbose': -1
         })
@@ -423,20 +431,10 @@ class RandomForestModel(BaseModel):
                 'max_features': 'sqrt',
             }
         
-        # Calculate optimal n_jobs based on system resources and parallel context
-        import os
-        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '4'))
-        
-        if max_currency_workers > 1:
-            # For 16 vCPU system: 4 currency workers × 1-2 model jobs = 4-8 processes (optimal)
-            optimal_n_jobs = max(1, min(self.config.model_n_jobs, 2))
-        else:
-            # Single currency worker: can use more resources
-            optimal_n_jobs = self.config.model_n_jobs
-            
+        # Use configured model_n_jobs from environment variable (MODEL_N_JOBS)
         params.update({
             'random_state': self.config.random_state,
-            'n_jobs': optimal_n_jobs,
+            'n_jobs': self.config.model_n_jobs,
         })
         
         return RandomForestRegressor(**params)
@@ -470,18 +468,10 @@ class ExtraTreesModel(BaseModel):
                 'max_features': 'sqrt',
             }
         
-        # Calculate optimal n_jobs based on system resources and parallel context
-        import os
-        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '4'))
-        
-        if max_currency_workers > 1:
-            optimal_n_jobs = max(1, min(self.config.model_n_jobs, 2))
-        else:
-            optimal_n_jobs = self.config.model_n_jobs
-            
+        # Use configured model_n_jobs from environment variable (MODEL_N_JOBS)
         params.update({
             'random_state': self.config.random_state,
-            'n_jobs': optimal_n_jobs,
+            'n_jobs': self.config.model_n_jobs,
         })
         
         return ExtraTreesRegressor(**params)
@@ -781,100 +771,28 @@ class HyperparameterOptimizer:
         # Initialize storage_file variable for cleanup
         storage_file = None
         
-        if self.config.max_optuna_workers > 1:
-            # Use SQLite storage for multi-threaded parallelization with proper configuration
-            import tempfile
-            import os
-            import uuid
-            
-            # Create unique database file per currency and process to avoid conflicts
-            temp_dir = tempfile.gettempdir()
-            unique_id = str(uuid.uuid4())[:8]  # Short unique ID
-            storage_file = os.path.join(temp_dir, f"optuna_{study_name}_{unique_id}.db")
-            
-            # Configure SQLite for better concurrent access
-            sqlite_url = f"sqlite:///{storage_file}?timeout=30&check_same_thread=False"
-            
-            try:
-                # Create storage with proper connection management
-                storage = optuna.storages.RDBStorage(
-                    sqlite_url,
-                    engine_kwargs={'pool_pre_ping': True, 'pool_recycle': 300}
-                )
-                study = optuna.create_study(
-                    direction='minimize',
-                    sampler=TPESampler(seed=self.config.random_state),
-                    pruner=MedianPruner(),
-                    storage=storage,
-                    study_name=study_name,
-                    load_if_exists=True
-                )
-                if self.logger:
-                    self.logger.debug(f"Using SQLite storage for {currency}: {storage_file}")
-            except Exception as e:
-                if self.logger:
-                    self.logger.warning(f"SQLite storage failed for {currency}: {e}. Falling back to in-memory storage.")
-                # Fall back to in-memory storage if SQLite fails
-                study = optuna.create_study(
-                    direction='minimize',
-                    sampler=TPESampler(seed=self.config.random_state),
-                    pruner=MedianPruner(),
-                    study_name=study_name,
-                    load_if_exists=True
-                )
-                storage_file = None  # No file to clean up
-        else:
-            # Use in-memory storage for single-threaded optimization
-            study = optuna.create_study(
-                direction='minimize',
-                sampler=TPESampler(seed=self.config.random_state),
-                pruner=MedianPruner(),
-                study_name=study_name,
-                load_if_exists=True
-            )
+        # Use in-memory storage to avoid excessive disk I/O
+        storage_file = None
+        study = optuna.create_study(
+            direction='minimize',
+            sampler=TPESampler(seed=self.config.random_state),
+            pruner=MedianPruner(),
+            study_name=study_name,
+            load_if_exists=True
+        )
+        if self.logger:
+            self.logger.debug(f"Using in-memory storage for {currency} (reduces disk I/O)")
         
-        # Check if we're likely running in a parallel context (multiple currency workers)
-        import os
-        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '6'))
-        if max_currency_workers > 1:
-            # Reduce Optuna workers when multiple currency workers are running to avoid resource conflicts
-            optuna_workers = max(1, min(self.config.max_optuna_workers, 2))
-            if self.logger:
-                self.logger.debug(f"Reduced Optuna workers to {optuna_workers} due to parallel currency processing")
-        else:
-            optuna_workers = self.config.max_optuna_workers
+        # Use Optuna workers from environment variable (MAX_OPTUNA_WORKERS)
+        # This is already configured and should not be recalculated
+        optuna_workers = self.config.max_optuna_workers
+        if self.logger:
+            self.logger.debug(f"Using {optuna_workers} Optuna workers (from MAX_OPTUNA_WORKERS environment variable)")
             
         study.optimize(objective, n_trials=self.config.n_hyperparameter_trials, n_jobs=optuna_workers)
         
         if self.logger:
             self.logger.debug(f"Optimization completed. Best MAE: {study.best_value:.4f}")
-        
-        # Clean up temporary database file if it exists
-        if storage_file is not None:
-            try:
-                import os
-                import time
-                
-                # Give a moment for any pending writes to complete
-                time.sleep(0.1)
-                
-                if os.path.exists(storage_file):
-                    # Force close any open connections
-                    try:
-                        if 'storage' in locals():
-                            storage._backend._engine.dispose()
-                    except:
-                        pass
-                    
-                    os.remove(storage_file)
-                    if self.logger:
-                        self.logger.debug(f"Cleaned up temporary database: {storage_file}")
-                else:
-                    if self.logger:
-                        self.logger.debug(f"Temporary database file already cleaned up: {storage_file}")
-            except Exception as e:
-                if self.logger:
-                    self.logger.warning(f"Failed to clean up database file {storage_file}: {e}")
         
         return study.best_params
 
@@ -958,61 +876,22 @@ class EnsembleWeightOptimizer:
         # Initialize storage_file variable for cleanup
         storage_file = None
         
-        if self.config.max_optuna_workers > 1:
-            # Use SQLite storage for multi-threaded parallelization
-            import tempfile
-            import os
-            import uuid
-            
-            temp_dir = tempfile.gettempdir()
-            unique_id = str(uuid.uuid4())[:8]
-            storage_file = os.path.join(temp_dir, f"optuna_weights_{study_name}_{unique_id}.db")
-            
-            sqlite_url = f"sqlite:///{storage_file}?timeout=30&check_same_thread=False"
-            
-            try:
-                storage = optuna.storages.RDBStorage(
-                    sqlite_url,
-                    engine_kwargs={'pool_pre_ping': True, 'pool_recycle': 300}
-                )
-                study = optuna.create_study(
-                    direction='minimize',
-                    sampler=TPESampler(seed=self.config.random_state),
-                    pruner=MedianPruner(),
-                    storage=storage,
-                    study_name=study_name,
-                    load_if_exists=True
-                )
-                if self.logger:
-                    self.logger.debug(f"Using SQLite storage for weight optimization: {storage_file}")
-            except Exception as e:
-                if self.logger:
-                    self.logger.warning(f"SQLite storage failed: {e}. Falling back to in-memory storage.")
-                study = optuna.create_study(
-                    direction='minimize',
-                    sampler=TPESampler(seed=self.config.random_state),
-                    pruner=MedianPruner(),
-                    study_name=study_name,
-                    load_if_exists=True
-                )
-                storage_file = None
-        else:
-            # Use in-memory storage for single-threaded optimization
-            study = optuna.create_study(
-                direction='minimize',
-                sampler=TPESampler(seed=self.config.random_state),
-                pruner=MedianPruner(),
-                study_name=study_name,
-                load_if_exists=True
-            )
+        # Use in-memory storage to avoid excessive disk I/O
+        # Weight optimization is fast and doesn't need persistent storage
+        storage_file = None
+        study = optuna.create_study(
+            direction='minimize',
+            sampler=TPESampler(seed=self.config.random_state),
+            pruner=MedianPruner(),
+            study_name=study_name,
+            load_if_exists=True
+        )
+        if self.logger:
+            self.logger.debug(f"Using in-memory storage for weight optimization (reduces disk I/O)")
         
-        # Optimize
-        import os
-        max_currency_workers = int(os.getenv('MAX_CURRENCY_WORKERS', '6'))
-        if max_currency_workers > 1:
-            optuna_workers = max(1, min(self.config.max_optuna_workers, 2))
-        else:
-            optuna_workers = 1  # Weight optimization is fast, use single worker
+        # Use more workers for weight optimization to utilize CPU
+        # Use Optuna workers from environment variable (MAX_OPTUNA_WORKERS)
+        optuna_workers = self.config.max_optuna_workers
         
         study.optimize(objective, n_trials=n_trials, n_jobs=optuna_workers)
         
@@ -1033,26 +912,6 @@ class EnsembleWeightOptimizer:
             model_types = [model.get_model_type() for model in models]
             weight_str = ', '.join([f"{mt}: {w:.3f}" for mt, w in zip(model_types, normalized_weights)])
             self.logger.debug(f"Optimized weights for {currency}: {weight_str}")
-        
-        # Clean up temporary database file if it exists
-        if storage_file is not None:
-            try:
-                import time
-                time.sleep(0.1)
-                
-                if os.path.exists(storage_file):
-                    try:
-                        if 'storage' in locals():
-                            storage._backend._engine.dispose()
-                    except:
-                        pass
-                    
-                    os.remove(storage_file)
-                    if self.logger:
-                        self.logger.debug(f"Cleaned up temporary database: {storage_file}")
-            except Exception as e:
-                if self.logger:
-                    self.logger.warning(f"Failed to clean up database file {storage_file}: {e}")
         
         return normalized_weights
 
@@ -1083,7 +942,7 @@ class ModelTrainer:
         target_names: Optional[List[str]] = None,
         feature_names: Optional[List[str]] = None
     ) -> TrainingResult:
-        """Train a single model with optimal performance."""
+        """Train a single model with configured parameters."""
         start_time = time.time()
         
         if self.logger:
@@ -1148,9 +1007,23 @@ class ModelTrainer:
         else:
             hyperparameters = {}
         
+        # Extract imputer from model if it exists
+        # For ensemble models, check if any base model has an imputer
+        imputer = None
+        if hasattr(model, 'imputer') and model.imputer is not None:
+            imputer = model.imputer
+        elif hasattr(model, 'models'):
+            # For ensemble models, extract imputer from first model that has one
+            # All models in ensemble should use the same imputer if they need one
+            for base_model in model.models:
+                if hasattr(base_model, 'imputer') and base_model.imputer is not None:
+                    imputer = base_model.imputer
+                    break
+        
         return TrainingResult(
             model=model,
             scaler=scaler,
+            imputer=imputer,
             metrics=metrics,
             training_time=training_time,
             hyperparameters=hyperparameters,
@@ -1446,6 +1319,12 @@ def save_model_artifacts(
         scaler_path = output_dir / "scaler.pkl"
         joblib.dump(result.scaler, scaler_path, compress=0)
         saved_files['scaler'] = str(scaler_path)
+    
+    # Save imputer without compression if exists (for RandomForest/ExtraTrees models)
+    if result.imputer is not None:
+        imputer_path = output_dir / "imputer.pkl"
+        joblib.dump(result.imputer, imputer_path, compress=0)
+        saved_files['imputer'] = str(imputer_path)
     
     # Save minimal metadata (only what's needed for inference)
     metadata = {

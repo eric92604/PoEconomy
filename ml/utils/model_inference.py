@@ -30,10 +30,11 @@ HORIZON_SUFFIXES = {"1d", "3d", "7d", "14d", "30d"}
 
 @dataclass
 class ModelArtifact:
-    """Storage for a single model artifact (model + optional scaler)."""
+    """Storage for a single model artifact (model + optional scaler + optional imputer)."""
 
     model_dir: Path
     scaler_path: Optional[Path]
+    imputer_path: Optional[Path]  # Imputer fitted on training data (for RandomForest/ExtraTrees)
     metadata_path: Path
     metadata: Dict
 
@@ -153,9 +154,28 @@ class ModelPredictor:
                             scaler = joblib.load(artifact.scaler_path) if artifact.scaler_path and artifact.scaler_path.exists() else None
                             if scaler is not None:
                                 X = scaler.transform(X)
-
+                            
+                            # Load imputer (fitted on training data - prevents data leakage)
+                            imputer = joblib.load(artifact.imputer_path) if artifact.imputer_path and artifact.imputer_path.exists() else None
+                            
                             # Load model
                             model = joblib.load(artifact.model_dir / "ensemble_model.pkl")
+                            
+                            # Set imputer on models that need it (RandomForest/ExtraTrees)
+                            # The imputer must be set on the model object so predict() can use it
+                            if imputer is not None:
+                                from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
+                                if hasattr(model, 'models'):
+                                    # Ensemble model - set imputer on base models that need it
+                                    for base_model in model.models:
+                                        if hasattr(base_model, 'model') and isinstance(base_model.model, (RandomForestRegressor, ExtraTreesRegressor)):
+                                            base_model.imputer = imputer
+                                elif hasattr(model, 'model') and isinstance(model.model, (RandomForestRegressor, ExtraTreesRegressor)):
+                                    # Single model that needs imputation
+                                    model.imputer = imputer
+                                elif hasattr(model, 'imputer'):
+                                    # Model already has imputer attribute (e.g., BaseModel instance)
+                                    model.imputer = imputer
                             
                             latest_features = X[-1].reshape(1, -1)
                             
@@ -325,9 +345,11 @@ class ModelPredictor:
                 continue
 
             scaler_path = model_dir / "scaler.pkl"
+            imputer_path = model_dir / "imputer.pkl"
             artifact = ModelArtifact(
                 model_dir=model_dir,
                 scaler_path=scaler_path if scaler_path.exists() else None,
+                imputer_path=imputer_path if imputer_path.exists() else None,
                 metadata_path=metadata_path,
                 metadata=metadata,
             )
