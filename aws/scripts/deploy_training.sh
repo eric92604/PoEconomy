@@ -39,10 +39,7 @@ PARAMS=(
 [[ -n "${N_HYPERPARAMETER_TRIALS:-}" ]] && PARAMS+=("NHyperparameterTrials=$N_HYPERPARAMETER_TRIALS")
 [[ -n "${N_MODEL_TRIALS:-}" ]] && PARAMS+=("NModelTrials=$N_MODEL_TRIALS")
 [[ -n "${CV_FOLDS:-}" ]] && PARAMS+=("CVFolds=$CV_FOLDS")
-[[ -n "${MAX_DEPTH:-}" ]] && PARAMS+=("MaxDepth=$MAX_DEPTH")
-[[ -n "${LEARNING_RATE:-}" ]] && PARAMS+=("LearningRate=$LEARNING_RATE")
-[[ -n "${MAX_OPTUNA_WORKERS:-}" ]] && PARAMS+=("MaxOptunaWorkers=$MAX_OPTUNA_WORKERS")
-[[ -n "${MODEL_N_JOBS:-}" ]] && PARAMS+=("ModelNJobs=$MODEL_N_JOBS")
+[[ -n "${MAX_CURRENCY_WORKERS:-}" ]] && PARAMS+=("MaxCurrencyWorkers=$MAX_CURRENCY_WORKERS")
 [[ -n "${MIN_AVG_VALUE_THRESHOLD:-}" ]] && PARAMS+=("MinAvgValueThreshold=$MIN_AVG_VALUE_THRESHOLD")
 
 deploy_cloudformation_stack "$TRAINING_STACK_NAME" "$TRAINING_TEMPLATE" "${PARAMS[@]}"

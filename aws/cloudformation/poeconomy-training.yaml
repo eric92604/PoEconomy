@@ -35,6 +35,10 @@ Parameters:
     Type: Number
     Default: 0
     Description: Maximum number of currencies to train (0 = no limit)
+  MaxCurrencyWorkers:
+    Type: Number
+    Default: 8
+    Description: Number of parallel currency workers for training
   NHyperparameterTrials:
     Type: Number
     Default: 200
@@ -47,22 +51,6 @@ Parameters:
     Type: Number
     Default: 5
     Description: Number of cross-validation folds
-  MaxDepth:
-    Type: Number
-    Default: 8
-    Description: Maximum tree depth for models
-  LearningRate:
-    Type: String
-    Default: '0.1'
-    Description: Learning rate for models
-  MaxOptunaWorkers:
-    Type: Number
-    Default: 2
-    Description: Number of Optuna workers per currency
-  ModelNJobs:
-    Type: Number
-    Default: 2
-    Description: Number of model training jobs per currency
   MinAvgValueThreshold:
     Type: String
     Default: '0.25'
@@ -247,9 +235,9 @@ Resources:
               Value: !Ref DataLakeBucketName
             # Threading and Parallelization
             - Name: MAX_CURRENCY_WORKERS
-              Value: '8'
+              Value: !Ref MaxCurrencyWorkers
             - Name: MAX_OPTUNA_WORKERS
-              Value: !Ref MaxOptunaWorkers
+              Value: '2'
             - Name: MODEL_N_JOBS
               Value: '4'
             # Logging
@@ -264,14 +252,7 @@ Resources:
               Value: !Ref NModelTrials
             - Name: CV_FOLDS
               Value: !Ref CVFolds
-            # Model Performance
-            - Name: MAX_DEPTH
-              Value: !Ref MaxDepth
-            - Name: LEARNING_RATE
-              Value: !Ref LearningRate
             # Data Selection
-            - Name: MIN_RECORDS_THRESHOLD
-              Value: !Ref MinRecordsThreshold
             - Name: MIN_AVG_VALUE_THRESHOLD
               Value: !Ref MinAvgValueThreshold
           StopTimeout: 60
