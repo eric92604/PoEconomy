@@ -822,6 +822,7 @@ class S3DataSource(BaseDataSource):
                     
                 except Exception as e:
                     self.logger.warning(f"Failed to load {csv_key}: {e}")
+                    continue
                 finally:
                     # Always clean up temporary file
                     if temp_path and os.path.exists(temp_path):
@@ -829,7 +830,6 @@ class S3DataSource(BaseDataSource):
                             os.unlink(temp_path)
                         except Exception as cleanup_error:
                             self.logger.warning(f"Failed to clean up temporary file {temp_path}: {cleanup_error}")
-                    continue
             
             if not all_dataframes:
                 self.logger.error("Failed to load any CSV files")
@@ -958,8 +958,11 @@ class S3DataSource(BaseDataSource):
                 # Extract experiment ID from filename
                 filename = os.path.basename(s3_key)
                 if filename.startswith('combined_currency_features_') and filename.endswith('.parquet'):
-                    # Prefix 'combined_currency_features_' is 27 characters
-                    found_experiment_id = filename[27:-8]  # Remove prefix and suffix
+                    # Use string methods instead of hardcoded indices for robustness
+                    # This avoids errors if the prefix length changes
+                    prefix = 'combined_currency_features_'
+                    suffix = '.parquet'
+                    found_experiment_id = filename[len(prefix):-len(suffix)]
                 else:
                     found_experiment_id = "unknown"
 
