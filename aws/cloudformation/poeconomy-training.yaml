@@ -77,6 +77,11 @@ Parameters:
   TrainingImageUri:
     Type: String
     Description: Full ECR image URI for training (including tag)
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+    Description: Logging level (DEBUG, INFO, WARNING, ERROR)
 
 Resources:
   # VPC for training tasks
@@ -247,6 +252,9 @@ Resources:
               Value: !Ref MaxOptunaWorkers
             - Name: MODEL_N_JOBS
               Value: !Ref ModelNJobs
+            # Logging
+            - Name: LOG_LEVEL
+              Value: !Ref LogLevel
             # Hyperparameter Optimization
             - Name: N_HYPERPARAMETER_TRIALS
               Value: !Ref NHyperparameterTrials

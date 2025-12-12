@@ -101,7 +101,7 @@ class FeatureEngineer:
             
             feature_names = df_processed.columns.tolist()
             
-            self.logger.info(
+            self.logger.debug(
                 f"Feature engineering completed for {currency}",
                 extra=statistics
             )
@@ -323,7 +323,7 @@ class FeatureEngineer:
             if hasattr(self, 'logger') and self.logger:
                 nan_count = df[std_col].isna().sum()
                 total_count = len(df)
-                self.logger.info(f"Rolling {window}d std: {nan_count}/{total_count} NaN values")
+                self.logger.debug(f"Rolling {window}d std: {nan_count}/{total_count} NaN values")
         
         # Add volatility features
         self._add_volatility_features(df)
@@ -537,7 +537,7 @@ class FeatureEngineer:
                 target_col = f'target_price_{horizon}d'
                 nan_count = df[target_col].isna().sum()
                 valid_count = len(df) - nan_count
-                self.logger.info(
+                self.logger.debug(
                     f"Target creation for {horizon}d horizon:",
                     extra={
                         'original_samples': original_len,
@@ -556,7 +556,7 @@ class FeatureEngineer:
             df['_multi_output_targets'] = ','.join(target_price_cols)
             
             if hasattr(self, 'logger') and self.logger:
-                self.logger.info(
+                self.logger.debug(
                     f"Multi-output regression enabled with targets: {target_price_cols}"
                 )
         
@@ -568,7 +568,7 @@ class FeatureEngineer:
         
         if hasattr(self, 'logger') and self.logger:
             final_len = len(df)
-            self.logger.info(
+            self.logger.debug(
                 "Final target filtering:",
                 extra={
                     'original_samples': original_len,
@@ -600,7 +600,7 @@ class FeatureEngineer:
         
         removed_count = original_len - len(df_clean)
         if removed_count > 0:
-            self.logger.info(f"Removed {removed_count} outliers ({removed_count/original_len:.2%})")
+            self.logger.debug(f"Removed {removed_count} outliers ({removed_count/original_len:.2%})")
         
         return df_clean
     

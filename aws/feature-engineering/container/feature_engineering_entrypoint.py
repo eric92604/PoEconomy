@@ -24,7 +24,7 @@ from ml.config.training_config import get_default_config, get_all_currencies_con
 from ml.utils.common_utils import setup_standard_logging
 logger = setup_standard_logging(
     name="FeatureEngineeringEntrypoint",
-    level="INFO",
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
     console_output=True,
     suppress_external=True
 )
@@ -45,6 +45,8 @@ def setup_timeout():
     """Setup timeout mechanism."""
     global timeout_seconds, start_time
     
+    # TASK_TIMEOUT_MINUTES should be set by CloudFormation (default: 60 for feature engineering)
+    # Using 60 as fallback to match CloudFormation default
     timeout_minutes = int(os.getenv('TASK_TIMEOUT_MINUTES', '60'))
     timeout_seconds = timeout_minutes * 60
     start_time = datetime.now()

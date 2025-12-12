@@ -8,8 +8,8 @@ Environment Variables:
     MODEL_N_JOBS: Number of model training jobs per currency (default: 2)
     
     # Hyperparameter Optimization
-    N_HYPERPARAMETER_TRIALS: Number of hyperparameter optimization trials (default: 50)
-    N_MODEL_TRIALS: Number of model training iterations (default: 500)
+    N_HYPERPARAMETER_TRIALS: Number of hyperparameter optimization trials (default: 200)
+    N_MODEL_TRIALS: Number of model training iterations (default: 1000)
     CV_FOLDS: Number of cross-validation folds (default: 5)
     
     # Model Performance
@@ -17,14 +17,17 @@ Environment Variables:
     LEARNING_RATE: Learning rate for models (default: 0.1)
     
     # Data Selection
-    MIN_RECORDS_THRESHOLD: Minimum records required for training (default: 5)
-    MAX_CURRENCIES_TO_TRAIN: Maximum number of currencies to train (default: None)
-    MIN_AVG_VALUE_THRESHOLD: Minimum average value threshold (default: 5.0)
+    MIN_RECORDS_THRESHOLD: Minimum records required for training (default: 50)
+    MAX_CURRENCIES_TO_TRAIN: Maximum number of currencies to train (default: 0, 0 = no limit)
+    MIN_AVG_VALUE_THRESHOLD: Minimum average value threshold (default: 0.25)
     
     # AWS Configuration
     AWS_REGION: AWS region (default: us-west-2)
     DATA_LAKE_BUCKET: S3 bucket for data lake
     DYNAMO_*: Various DynamoDB table and attribute configurations
+    
+    # Logging
+    LOG_LEVEL: Logging level (DEBUG, INFO, WARNING, ERROR) (default: INFO)
 """
 
 from dataclasses import dataclass, field
@@ -204,7 +207,7 @@ def _get_logs_dir() -> Path:
 class LoggingConfig:
     """Configuration for logging setup."""
     
-    level: str = "INFO"
+    level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO").upper())
     format: str = "%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s"
     console_logging: bool = True
     file_logging: bool = True
@@ -397,7 +400,7 @@ def get_default_config() -> MLConfig:
     
     # Set production-optimized defaults (environment variables are already handled by dataclass fields)
     # Only set non-environment-variable properties
-    config.logging.level = "INFO"
+    # Note: logging.level is set from LOG_LEVEL env var in LoggingConfig, defaulting to "INFO"
     config.logging.suppress_lightgbm = True
     config.logging.suppress_optuna = True
     config.experiment.tags = ["production"]
