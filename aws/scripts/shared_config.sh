@@ -16,7 +16,15 @@ else
   AWS_CMD="aws"
 fi
 
-ACCOUNT_ID=$($AWS_CMD sts get-caller-identity --query Account --output text | tr -d '\r\n')
+# Get account ID and strip Windows line endings (works cross-platform)
+# Use bash parameter expansion instead of tr/sed for better Windows compatibility
+ACCOUNT_ID_RAW=$($AWS_CMD sts get-caller-identity --query Account --output text)
+# Remove carriage returns and newlines using bash parameter expansion
+ACCOUNT_ID="${ACCOUNT_ID_RAW//$'\r'/}"
+ACCOUNT_ID="${ACCOUNT_ID//$'\n'/}"
+# Trim any remaining leading/trailing whitespace (handles spaces, tabs, etc.)
+ACCOUNT_ID="${ACCOUNT_ID#"${ACCOUNT_ID%%[![:space:]]*}"}"  # Remove leading whitespace
+ACCOUNT_ID="${ACCOUNT_ID%"${ACCOUNT_ID##*[![:space:]]}"}"  # Remove trailing whitespace
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -221,8 +229,11 @@ find_latest_experiment() {
         fi
         
         # Fallback: use directory name for comparison if date parsing fails
+        # Extract digits using bash parameter expansion (more portable than tr)
         if [[ $epoch_time -eq 0 ]]; then
-          epoch_time=$(echo "$exp_name" | tr -cd '0-9' | head -c 14)
+          # Remove all non-digit characters using bash parameter expansion
+          digits_only="${exp_name//[^0-9]/}"
+          epoch_time="${digits_only:0:14}"
         fi
         
         if [[ $epoch_time -gt $latest_timestamp ]]; then
