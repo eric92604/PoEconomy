@@ -40,7 +40,7 @@ import os
 
 @dataclass
 class ModelConfig:
-    """Configuration for ML model training with optimal threading strategy."""
+    """Configuration for ML model training with configurable threading."""
     
     # Model Selection
     use_lightgbm: bool = True
@@ -210,7 +210,9 @@ class LoggingConfig:
     level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO").upper())
     format: str = "%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s"
     console_logging: bool = True
-    file_logging: bool = True
+    # Disable file logging in Fargate (logs go to CloudWatch via awslogs driver)
+    # Set DISABLE_FILE_LOGGING=true to disable file logging and reduce storage writes
+    file_logging: bool = field(default_factory=lambda: os.getenv("DISABLE_FILE_LOGGING", "false").lower() != "true")
     
     # S3 log upload configuration
     upload_logs_to_s3: bool = True

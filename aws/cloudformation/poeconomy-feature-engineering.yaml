@@ -198,8 +198,8 @@ Resources:
       NetworkMode: awsvpc
       RequiresCompatibilities:
         - FARGATE
-      Cpu: 1024
-      Memory: 2048
+      Cpu: 4096
+      Memory: 8192
       ExecutionRoleArn: !GetAtt FeatureEngineeringTaskRole.Arn
       TaskRoleArn: !GetAtt FeatureEngineeringTaskRole.Arn
       ContainerDefinitions:
@@ -225,6 +225,8 @@ Resources:
               Value: !Ref TaskTimeoutMinutes
             - Name: LOG_LEVEL
               Value: !Ref LogLevel
+            - Name: DISABLE_FILE_LOGGING
+              Value: 'true'
           StopTimeout: 60
       Tags:
         - Key: App

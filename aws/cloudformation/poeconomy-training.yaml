@@ -247,14 +247,16 @@ Resources:
               Value: !Ref DataLakeBucketName
             # Threading and Parallelization
             - Name: MAX_CURRENCY_WORKERS
-              Value: '4'
+              Value: '8'
             - Name: MAX_OPTUNA_WORKERS
               Value: !Ref MaxOptunaWorkers
             - Name: MODEL_N_JOBS
-              Value: !Ref ModelNJobs
+              Value: '4'
             # Logging
             - Name: LOG_LEVEL
               Value: !Ref LogLevel
+            - Name: DISABLE_FILE_LOGGING
+              Value: 'true'
             # Hyperparameter Optimization
             - Name: N_HYPERPARAMETER_TRIALS
               Value: !Ref NHyperparameterTrials

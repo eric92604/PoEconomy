@@ -797,6 +797,7 @@ class S3DataSource(BaseDataSource):
             all_dataframes = []
             
             for csv_key in csv_files:
+                temp_path = None
                 try:
                     with tempfile.NamedTemporaryFile(mode='w+', suffix='.csv', delete=False) as temp_file:
                         temp_path = temp_file.name
@@ -816,12 +817,18 @@ class S3DataSource(BaseDataSource):
                     df['League'] = league_name
                     
                     all_dataframes.append(df)
-                    os.unlink(temp_path)
                     
                     self.logger.debug(f"Loaded {len(df)} records from {csv_key}")
                     
                 except Exception as e:
                     self.logger.warning(f"Failed to load {csv_key}: {e}")
+                finally:
+                    # Always clean up temporary file
+                    if temp_path and os.path.exists(temp_path):
+                        try:
+                            os.unlink(temp_path)
+                        except Exception as cleanup_error:
+                            self.logger.warning(f"Failed to clean up temporary file {temp_path}: {cleanup_error}")
                     continue
             
             if not all_dataframes:
@@ -883,15 +890,23 @@ class S3DataSource(BaseDataSource):
             self.logger.debug(f"Loading processed data from s3://{data_lake_bucket}/{s3_key}")
             
             # Download and load the parquet file
-            with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as temp_file:
-                temp_path = temp_file.name
-            
-            self.s3_client.download_file(data_lake_bucket, s3_key, temp_path)
-            df = pd.read_parquet(temp_path)
-            os.unlink(temp_path)
-            
-            self.logger.debug(f"Successfully loaded processed data: {df.shape}")
-            return df
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as temp_file:
+                    temp_path = temp_file.name
+                
+                self.s3_client.download_file(data_lake_bucket, s3_key, temp_path)
+                df = pd.read_parquet(temp_path)
+                
+                self.logger.debug(f"Successfully loaded processed data: {df.shape}")
+                return df
+            finally:
+                # Always clean up temporary file
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.unlink(temp_path)
+                    except Exception as cleanup_error:
+                        self.logger.warning(f"Failed to clean up temporary file {temp_path}: {cleanup_error}")
             
         except Exception as e:
             self.logger.warning(f"Failed to load processed parquet data from S3: {e}")
@@ -951,15 +966,23 @@ class S3DataSource(BaseDataSource):
             self.logger.debug(f"Loading processed data from s3://{data_lake_bucket}/{s3_key}")
 
             # Download and load the parquet file
-            with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as temp_file:
-                temp_path = temp_file.name
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as temp_file:
+                    temp_path = temp_file.name
 
-            self.s3_client.download_file(data_lake_bucket, s3_key, temp_path)
-            df = pd.read_parquet(temp_path)
-            os.unlink(temp_path)
+                self.s3_client.download_file(data_lake_bucket, s3_key, temp_path)
+                df = pd.read_parquet(temp_path)
 
-            self.logger.debug(f"Successfully loaded processed data: {df.shape}")
-            return df, found_experiment_id
+                self.logger.debug(f"Successfully loaded processed data: {df.shape}")
+                return df, found_experiment_id
+            finally:
+                # Always clean up temporary file
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.unlink(temp_path)
+                    except Exception as cleanup_error:
+                        self.logger.warning(f"Failed to clean up temporary file {temp_path}: {cleanup_error}")
 
         except Exception as e:
             self.logger.warning(f"Failed to load processed parquet data from S3: {e}")

@@ -25,7 +25,7 @@ from ml.config.training_config import get_default_config
 from ml.utils.common_utils import setup_standard_logging
 logger = setup_standard_logging(
     name="TrainingEntrypoint",
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    level="INFO",
     console_output=True,
     suppress_external=True
 )

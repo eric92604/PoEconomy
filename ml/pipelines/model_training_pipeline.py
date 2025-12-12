@@ -54,10 +54,12 @@ class ModelTrainingPipeline:
         data_lake_bucket = os.getenv('DATA_LAKE_BUCKET', '')
         
         # Setup logging
+        # Only enable file logging if configured (disable in Fargate to reduce storage writes)
+        log_dir = str(config.paths.logs_dir) if config.logging.file_logging else None
         self.logger = setup_ml_logging(
             name="CurrencyTrainer",
             level=config.logging.level,
-            log_dir=str(config.paths.logs_dir),
+            log_dir=log_dir,
             experiment_id=config.experiment.experiment_id,
             console_output=config.logging.console_logging,
             suppress_external=config.logging.suppress_external
@@ -403,15 +405,8 @@ class ModelTrainingPipeline:
             # Reconstruct configuration from dict
             config = MLConfig.from_dict(shared_data['config_dict'])
             
-            # Calculate optimal threading based on system resources
-            import multiprocessing
-            total_cores = multiprocessing.cpu_count()
-            max_currency_workers = config.model.max_currency_workers
-            optimal_model_threads = min(4, max(2, total_cores // max_currency_workers))
-            
-            # Set optimal threading for this worker
-            config.model.model_n_jobs = optimal_model_threads
-            config.model.max_optuna_workers = max(1, min(config.model.max_optuna_workers, optimal_model_threads))
+            # Configuration values are set via environment variables (MODEL_N_JOBS, MAX_OPTUNA_WORKERS)
+            # No need to calculate optimal values - they're already configured
             
             # Create pipeline instance for this worker
             pipeline = ModelTrainingPipeline(config)
@@ -1413,6 +1408,18 @@ class ModelTrainingPipeline:
             
             if uploaded_count > 0:
                 self.logger.info(f"Uploaded {uploaded_count} model files for {currency_name} to S3 (experiment: {experiment_id})")
+                
+                # Clean up model artifacts from disk after successful upload to save storage
+                try:
+                    import shutil
+                    for model_dir in currency_model_dirs:
+                        if model_dir.exists():
+                            shutil.rmtree(model_dir, ignore_errors=True)
+                            self.logger.debug(f"Cleaned up local model directory: {model_dir}")
+                    self.logger.info(f"Cleaned up local model artifacts for {currency_name} after S3 upload")
+                except Exception as cleanup_error:
+                    self.logger.warning(f"Failed to clean up local model artifacts for {currency_name}: {cleanup_error}")
+            
             if failed_count > 0:
                 self.logger.warning(f"Failed to upload {failed_count} files for {currency_name}")
                 
