@@ -53,18 +53,6 @@ FEATURE_ENGINEERING_CRON="cron(0 2 * * ? *)"
 API_STAGE_NAME="api"
 
 # Task configuration
-TASK_TIMEOUT_MINUTES=1440
-MAX_CURRENCIES_TO_TRAIN=0  # 0 = no limit
-
-# Training hyperparameters (can be overridden via environment variables)
-N_HYPERPARAMETER_TRIALS=${N_HYPERPARAMETER_TRIALS:-50}
-N_MODEL_TRIALS=${N_MODEL_TRIALS:-100}
-CV_FOLDS=${CV_FOLDS:-5}
-MAX_DEPTH=${MAX_DEPTH:-6}
-LEARNING_RATE=${LEARNING_RATE:-0.1}
-MAX_OPTUNA_WORKERS=${MAX_OPTUNA_WORKERS:-2}
-MODEL_N_JOBS=${MODEL_N_JOBS:-2}
-MIN_AVG_VALUE_THRESHOLD=${MIN_AVG_VALUE_THRESHOLD:-0.25}
 
 # Load environment variables if file exists
 if [[ -f "$ENV_FILE" ]]; then
