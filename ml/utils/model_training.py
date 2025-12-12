@@ -246,6 +246,20 @@ class BaseModel(ABC):
         start_time = time.time()
         training_history = {}
         
+        # Handle NaN values for models that don't support them (RandomForest, ExtraTrees)
+        # LightGBM handles NaN natively, but RandomForest and ExtraTrees require imputation
+        needs_imputation = isinstance(self.model, (RandomForestRegressor, ExtraTreesRegressor))
+        if needs_imputation:
+            # Check for NaN values and impute if necessary
+            if np.isnan(X).any() or (X_val is not None and np.isnan(X_val).any()):
+                from sklearn.impute import SimpleImputer
+                imputer = SimpleImputer(strategy='median')
+                X = imputer.fit_transform(X)
+                if X_val is not None:
+                    X_val = imputer.transform(X_val)
+                if self.logger:
+                    self.logger.debug(f"Applied median imputation for {self.get_model_type()} model")
+        
         if X_val is not None and y_val is not None:
             # Always use early stopping when validation data exists
             if isinstance(self.model, lgb.LGBMRegressor):
@@ -267,46 +281,6 @@ class BaseModel(ABC):
                         'val_loss': evals_result.get('validation', {}).get('l2', []),
                         'epochs': len(evals_result.get('validation', {}).get('l2', []))
                     }
-            elif isinstance(self.model, xgb.XGBRegressor):
-                # XGBoost early stopping - use parameter-based approach when available
-                try:
-                    # Check if early_stopping_rounds is set in model params
-                    model_params = self.model.get_params()
-                    evals_result = {}
-                    if 'early_stopping_rounds' in model_params and model_params['early_stopping_rounds'] is not None:
-                        # Use parameter-based early stopping (for non-Optuna training)
-                        self.model.fit(
-                            X, y,
-                            eval_set=[(X_val, y_val)],
-                            verbose=False
-                        )
-                    else:
-                        # When Optuna is active, train without XGBoost's built-in early stopping
-                        # Optuna will handle pruning based on validation scores
-                        self.model.fit(
-                            X, y,
-                            eval_set=[(X_val, y_val)],
-                            verbose=False
-                        )
-                    # Extract training history from evals_result (XGBoost stores it in model)
-                    if hasattr(self.model, 'evals_result_') and self.model.evals_result_:
-                        evals_result = self.model.evals_result_
-                        # XGBoost uses different key structure
-                        if 'validation' in evals_result or 0 in evals_result:
-                            val_key = 'validation' if 'validation' in evals_result else 0
-                            val_losses = evals_result[val_key].get('rmse', evals_result[val_key].get('l2', []))
-                            train_key = 'train' if 'train' in evals_result else 0
-                            train_losses = evals_result.get(train_key, {}).get('rmse', evals_result.get(train_key, {}).get('l2', []))
-                            training_history = {
-                                'train_loss': train_losses if train_losses else [],
-                                'val_loss': val_losses if val_losses else [],
-                                'epochs': len(val_losses) if val_losses else 0
-                            }
-                except (TypeError, AttributeError, ImportError) as e:
-                    # If early stopping fails, train without it
-                    if self.logger:
-                        self.logger.warning(f"XGBoost early stopping failed: {e}. Training without early stopping.")
-                    self.model.fit(X, y, verbose=False)
             else:
                 # Other models without early stopping
                 self.model.fit(X, y)
@@ -330,6 +304,15 @@ class BaseModel(ABC):
         """Make predictions using the trained model."""
         if self.model is None:
             raise ValueError("Model has not been trained yet")
+        
+        # Handle NaN values for models that don't support them (RandomForest, ExtraTrees)
+        # LightGBM handles NaN natively, but RandomForest and ExtraTrees require imputation
+        needs_imputation = isinstance(self.model, (RandomForestRegressor, ExtraTreesRegressor))
+        if needs_imputation and np.isnan(X).any():
+            from sklearn.impute import SimpleImputer
+            # Use median imputation (same as during training)
+            imputer = SimpleImputer(strategy='median')
+            X = imputer.fit_transform(X)
         
         predictions = self.model.predict(X)
         
@@ -864,7 +847,7 @@ class HyperparameterOptimizer:
         study.optimize(objective, n_trials=self.config.n_hyperparameter_trials, n_jobs=optuna_workers)
         
         if self.logger:
-            self.logger.info(f"Optimization completed. Best MAE: {study.best_value:.4f}")
+            self.logger.debug(f"Optimization completed. Best MAE: {study.best_value:.4f}")
         
         # Clean up temporary database file if it exists
         if storage_file is not None:
@@ -1034,7 +1017,7 @@ class EnsembleWeightOptimizer:
         study.optimize(objective, n_trials=n_trials, n_jobs=optuna_workers)
         
         if self.logger:
-            self.logger.info(f"Weight optimization completed. Best MAE: {study.best_value:.4f}")
+            self.logger.debug(f"Weight optimization completed. Best MAE: {study.best_value:.4f}")
         
         # Extract optimized weights
         best_weights = []
@@ -1049,7 +1032,7 @@ class EnsembleWeightOptimizer:
         if self.logger:
             model_types = [model.get_model_type() for model in models]
             weight_str = ', '.join([f"{mt}: {w:.3f}" for mt, w in zip(model_types, normalized_weights)])
-            self.logger.info(f"Optimized weights for {currency}: {weight_str}")
+            self.logger.debug(f"Optimized weights for {currency}: {weight_str}")
         
         # Clean up temporary database file if it exists
         if storage_file is not None:
@@ -1104,7 +1087,7 @@ class ModelTrainer:
         start_time = time.time()
         
         if self.logger:
-            self.logger.info(f"Training {model_type} model for {currency}")
+            self.logger.debug(f"Training {model_type} model for {currency}")
         
         # Split data
         split_idx = int(len(X) * (1 - self.config.test_size))
@@ -1200,7 +1183,7 @@ class ModelTrainer:
                 
                 # Perform individual optimization for this currency
                 if self.logger:
-                    self.logger.info(f"Optimizing LightGBM hyperparameters for {currency}")
+                    self.logger.debug(f"Optimizing LightGBM hyperparameters for {currency}")
                 
                 try:
                     optimized_params = self.hyperparameter_optimizer.optimize(
@@ -1208,7 +1191,7 @@ class ModelTrainer:
                     )
                     lgb_model.model = lgb_model._create_model_with_params(optimized_params)
                     if self.logger:
-                        self.logger.info(f"Using optimized LightGBM params for {currency}")
+                        self.logger.debug(f"Using optimized LightGBM params for {currency}")
                 except Exception as e:
                     if self.logger:
                         self.logger.warning(f"LightGBM optimization failed for {currency}: {e}. Using default parameters.")
@@ -1221,7 +1204,7 @@ class ModelTrainer:
                 
                 # Perform individual optimization for this currency
                 if self.logger:
-                    self.logger.info(f"Optimizing RandomForest hyperparameters for {currency}")
+                    self.logger.debug(f"Optimizing RandomForest hyperparameters for {currency}")
                 
                 try:
                     optimized_params = self.hyperparameter_optimizer.optimize(
@@ -1229,7 +1212,7 @@ class ModelTrainer:
                     )
                     rf_model.model = rf_model._create_model_with_params(optimized_params)
                     if self.logger:
-                        self.logger.info(f"Using optimized RandomForest params for {currency}")
+                        self.logger.debug(f"Using optimized RandomForest params for {currency}")
                 except Exception as e:
                     if self.logger:
                         self.logger.warning(f"RandomForest optimization failed for {currency}: {e}. Using default parameters.")
@@ -1242,7 +1225,7 @@ class ModelTrainer:
                 
                 # Perform individual optimization for this currency
                 if self.logger:
-                    self.logger.info(f"Optimizing ExtraTrees hyperparameters for {currency}")
+                    self.logger.debug(f"Optimizing ExtraTrees hyperparameters for {currency}")
                 
                 try:
                     optimized_params = self.hyperparameter_optimizer.optimize(
@@ -1250,7 +1233,7 @@ class ModelTrainer:
                     )
                     et_model.model = et_model._create_model_with_params(optimized_params)
                     if self.logger:
-                        self.logger.info(f"Using optimized ExtraTrees params for {currency}")
+                        self.logger.debug(f"Using optimized ExtraTrees params for {currency}")
                 except Exception as e:
                     if self.logger:
                         self.logger.warning(f"ExtraTrees optimization failed for {currency}: {e}. Using default parameters.")
@@ -1283,7 +1266,7 @@ class ModelTrainer:
         
         if self.logger:
             model_types = [model.get_model_type() for model in models]
-            self.logger.info(f"Training ensemble for {currency} with models: {', '.join(model_types)}")
+            self.logger.debug(f"Training ensemble for {currency} with models: {', '.join(model_types)}")
         
         # Train all models
         for model in models:
@@ -1295,7 +1278,7 @@ class ModelTrainer:
         optimized_weights = None
         if self.config.optimize_ensemble_weights and len(models) >= 2:
             if self.logger:
-                self.logger.info(f"Optimizing ensemble weights for {currency}")
+                self.logger.debug(f"Optimizing ensemble weights for {currency}")
             
             try:
                 weight_optimizer = EnsembleWeightOptimizer(self.config, self.logger)
@@ -1306,7 +1289,7 @@ class ModelTrainer:
                 if self.logger:
                     model_types = [model.get_model_type() for model in models]
                     weight_str = ', '.join([f"{mt}: {w:.3f}" for mt, w in zip(model_types, optimized_weights)])
-                    self.logger.info(f"Optimized ensemble weights for {currency}: {weight_str}")
+                    self.logger.debug(f"Optimized ensemble weights for {currency}: {weight_str}")
             except Exception as e:
                 if self.logger:
                     self.logger.warning(f"Ensemble weight optimization failed for {currency}: {e}. Using equal weights.")
@@ -1353,7 +1336,7 @@ class ModelTrainer:
                 raise ValueError(f"Unknown model type: {model_type}")
             
             if self.logger:
-                self.logger.info(f"{model_type} optimized params: {params}")
+                self.logger.debug(f"{model_type} optimized params: {params}")
         else:
             # Use default parameters for fast training
             if model_type == "lightgbm":

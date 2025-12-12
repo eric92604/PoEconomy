@@ -79,6 +79,9 @@ class ModelTrainingPipeline:
         # Store S3 configuration for log uploads
         self.data_lake_bucket = data_lake_bucket
         
+        # Get models bucket for model uploads
+        self.models_bucket = os.getenv('MODELS_BUCKET', '')
+        
         # Note: Models directory will be created after experiment_id is potentially updated from processed data
         
         # Initialize tracking
@@ -278,6 +281,13 @@ class ModelTrainingPipeline:
                         self.results.append(result)
                         self.processing_stats['successful_training'] += 1
                         self.logger.info(f"✅ {currency_name} training completed successfully")
+                        
+                        # Upload models for this currency immediately after training
+                        try:
+                            self._upload_currency_models(currency_name, result)
+                        except Exception as upload_error:
+                            # Log error but don't fail the training
+                            self.logger.warning(f"Failed to upload models for {currency_name}: {upload_error}")
                     else:
                         self.processing_stats['failed_training'] += 1
                         self.logger.warning(f"❌ {currency_name} training failed")
@@ -327,6 +337,13 @@ class ModelTrainingPipeline:
                             
                             # Log detailed completion statistics for parallel training
                             self._log_currency_completion_stats(currency_name, result)
+                            
+                            # Upload models for this currency immediately after training
+                            try:
+                                self._upload_currency_models(currency_name, result)
+                            except Exception as upload_error:
+                                # Log error but don't fail the training
+                                self.logger.warning(f"Failed to upload models for {currency_name}: {upload_error}")
                         else:
                             self.processing_stats['failed_training'] += 1
                             self.logger.warning(f"❌ {currency_name}: Training returned None")
@@ -525,7 +542,7 @@ class ModelTrainingPipeline:
             if currencies:
                 examples = currencies[:5]
                 for example in examples:
-                    self.logger.info(f"  - {example['get_currency']} (avg_value: {example['avg_value']:.2f})")
+                    self.logger.debug(f"  - {example['get_currency']} (avg_value: {example['avg_value']:.2f})")
             
             return currencies
             
@@ -609,7 +626,7 @@ class ModelTrainingPipeline:
                 # Update the experiment ID in the config to match the processed data
                 if experiment_id:
                     self.config.experiment.experiment_id = experiment_id
-                    self.logger.info(f"Using experiment ID from processed data: {experiment_id}")
+                    self.logger.debug(f"Using experiment ID from processed data: {experiment_id}")
                 
                 return processed_data
             else:
@@ -656,21 +673,21 @@ class ModelTrainingPipeline:
                 self.processing_stats['insufficient_data'] += 1
                 return None
             
-            self.logger.info(f"Using processed data for {currency_name}: {len(currency_data)} records")
+            self.logger.debug(f"Using processed data for {currency_name}: {len(currency_data)} records")
             
             # Log overall data statistics for this currency
-            self.logger.info(f"Currency data overview for {currency_name}:")
-            self.logger.info(f"  Total records: {len(currency_data):,}")
+            self.logger.debug(f"Currency data overview for {currency_name}:")
+            self.logger.debug(f"  Total records: {len(currency_data):,}")
             if 'timestamp' in currency_data.columns:
                 date_range = currency_data['timestamp'].agg(['min', 'max'])
-                self.logger.info(f"  Date range: {date_range['min']} to {date_range['max']}")
+                self.logger.debug(f"  Date range: {date_range['min']} to {date_range['max']}")
             
             # Log league distribution for this currency
             if 'league_name' in currency_data.columns:
                 league_dist = currency_data['league_name'].value_counts()
-                self.logger.info(f"League distribution for {currency_name}:")
+                self.logger.debug(f"League distribution for {currency_name}:")
                 for league, count in league_dist.items():
-                    self.logger.info(f"  {league}: {count:,} records")
+                    self.logger.debug(f"  {league}: {count:,} records")
                 
                 # Check for included leagues data
                 if self.config.data.included_leagues:
@@ -678,7 +695,7 @@ class ModelTrainingPipeline:
                     for league in included_leagues:
                         league_data = currency_data[currency_data['league_name'].str.contains(league, case=False, na=False)]
                         if not league_data.empty:
-                            self.logger.info(f"{league} data available for training: {len(league_data):,} records")
+                            self.logger.debug(f"{league} data available for training: {len(league_data):,} records")
                         else:
                             self.logger.warning(f"No {league} data found for {currency_name}")
             
@@ -709,21 +726,21 @@ class ModelTrainingPipeline:
             
             # Log target column information
             if isinstance(target_column, list):
-                self.logger.info(f"Found {len(target_column)} target horizons: {target_column}")
+                self.logger.debug(f"Found {len(target_column)} target horizons: {target_column}")
                 # Log NaN statistics for each target column
                 for target_col in target_column:
                     if target_col in processed_data.columns:
                         nan_count = processed_data[target_col].isna().sum()
                         total_count = len(processed_data[target_col])
                         nan_pct = (nan_count / total_count) * 100 if total_count > 0 else 0
-                        self.logger.info(f"  {target_col}: {nan_count:,}/{total_count:,} NaN ({nan_pct:.1f}%)")
+                        self.logger.debug(f"  {target_col}: {nan_count:,}/{total_count:,} NaN ({nan_pct:.1f}%)")
             else:
-                self.logger.info(f"Found single target: {target_column}")
+                self.logger.debug(f"Found single target: {target_column}")
                 if target_column in processed_data.columns:
                     nan_count = processed_data[target_column].isna().sum()
                     total_count = len(processed_data[target_column])
                     nan_pct = (nan_count / total_count) * 100 if total_count > 0 else 0
-                    self.logger.info(f"  {target_column}: {nan_count:,}/{total_count:,} NaN ({nan_pct:.1f}%)")
+                    self.logger.debug(f"  {target_column}: {nan_count:,}/{total_count:,} NaN ({nan_pct:.1f}%)")
             
             # Validate target columns exist
             if isinstance(target_column, list):
@@ -732,28 +749,28 @@ class ModelTrainingPipeline:
                     self.logger.warning(f"Missing target columns for {currency_name}: {missing_targets}")
                     self.processing_stats['validation_failures'] += 1
                     return None
-                self.logger.info(f"Found {len(target_column)} target horizons: {target_column}")
+                self.logger.debug(f"Found {len(target_column)} target horizons: {target_column}")
             else:
                 if target_column not in processed_data.columns:
                     self.logger.warning(f"Target column {target_column} not found for {currency_name}")
                     self.processing_stats['validation_failures'] += 1
                     return None
-                self.logger.info(f"Found single target: {target_column}")
+                self.logger.debug(f"Found single target: {target_column}")
             
             # Prepare feature matrix
             X = processed_data[feature_columns].values
-            self.logger.info(f"Initial feature matrix shape: X={X.shape}")
+            self.logger.debug(f"Initial feature matrix shape: X={X.shape}")
             
             # Check for NaN values in features
             if X.dtype.kind in 'biufc':  # binary, integer, unsigned, float, complex
                 nan_count = np.isnan(X).sum()
-                self.logger.info(f"Initial NaN count in features: {nan_count}")
+                self.logger.debug(f"Initial NaN count in features: {nan_count}")
             else:
-                self.logger.info(f"Features contain non-numeric data (dtype: {X.dtype})")
+                self.logger.debug(f"Features contain non-numeric data (dtype: {X.dtype})")
                 try:
                     X = X.astype(float)
                     nan_count = np.isnan(X).sum()
-                    self.logger.info(f"Converted to numeric. NaN count in features: {nan_count}")
+                    self.logger.debug(f"Converted to numeric. NaN count in features: {nan_count}")
                 except (ValueError, TypeError) as e:
                     self.logger.error(f"Cannot convert features to numeric: {e}")
                     return None
@@ -765,7 +782,7 @@ class ModelTrainingPipeline:
             X = X[valid_rows]
             processed_data = processed_data[valid_rows].reset_index(drop=True)
             
-            self.logger.info(
+            self.logger.debug(
                 f"Feature NaN filtering results:",
                 extra={
                     'samples_before': len(row_nan_ratio),
@@ -780,7 +797,7 @@ class ModelTrainingPipeline:
             if np.isnan(X).any():
                 imputer = SimpleImputer(strategy='median')
                 X = imputer.fit_transform(X)
-                self.logger.info(f"Applied median imputation for remaining NaN values")
+                self.logger.debug(f"Applied median imputation for remaining NaN values")
 
             if len(X) < 5:  # Reduced minimum from 50 to 5
                 self.logger.warning(f"Insufficient data for {currency_name}: {len(X)} samples")
@@ -790,14 +807,14 @@ class ModelTrainingPipeline:
             # Train model(s) for different prediction horizons
             if isinstance(target_column, list) and len(target_column) > 1:
                 # Multi-horizon training: train separate models for each horizon
-                self.logger.info(f"Multi-horizon training for {len(target_column)} horizons: {target_column}")
+                self.logger.debug(f"Multi-horizon training for {len(target_column)} horizons: {target_column}")
                 
                 horizon_results = {}
                 horizon_models = {}
                 
                 for target_col in target_column:
                     horizon = target_col.replace('target_price_', '')
-                    self.logger.info(f"Training model for {horizon} horizon")
+                    self.logger.debug(f"Training model for {horizon} horizon")
                     
                     # Use all available features for this horizon
                     X_horizon_filtered = processed_data[feature_columns].values
@@ -811,17 +828,17 @@ class ModelTrainingPipeline:
                     valid_count = total_samples - nan_count
                     nan_percentage = (nan_count / total_samples) * 100 if total_samples > 0 else 0
                     
-                    self.logger.info(f"Data filtering for {currency_name} {horizon}:")
-                    self.logger.info(f"  Total samples: {total_samples:,}")
-                    self.logger.info(f"  NaN values: {nan_count:,} ({nan_percentage:.1f}%)")
-                    self.logger.info(f"  Valid samples: {valid_count:,}")
+                    self.logger.debug(f"Data filtering for {currency_name} {horizon}:")
+                    self.logger.debug(f"  Total samples: {total_samples:,}")
+                    self.logger.debug(f"  NaN values: {nan_count:,} ({nan_percentage:.1f}%)")
+                    self.logger.debug(f"  Valid samples: {valid_count:,}")
                     
                     # Filter out NaN values for this specific target
                     target_valid_mask = ~pd.isna(y_horizon)
                     X_horizon = X_horizon_filtered[target_valid_mask]
                     y_horizon = y_horizon[target_valid_mask]
                     
-                    self.logger.info(f"  After filtering: {len(X_horizon):,} samples available for training")
+                    self.logger.debug(f"  After filtering: {len(X_horizon):,} samples available for training")
                     
                     # If we have very few samples, try a more lenient approach
                     if len(X_horizon) < 20:
@@ -832,7 +849,7 @@ class ModelTrainingPipeline:
                         y_horizon_ffill = y_horizon_ffill[target_valid_mask_ffill]
                         
                         if len(X_horizon_ffill) > len(X_horizon):
-                            self.logger.info(f"  Using forward-fill strategy: {len(X_horizon_ffill):,} samples (vs {len(X_horizon):,} without)")
+                            self.logger.debug(f"  Using forward-fill strategy: {len(X_horizon_ffill):,} samples (vs {len(X_horizon):,} without)")
                             X_horizon = X_horizon_ffill
                             y_horizon = y_horizon_ffill
                     
@@ -850,7 +867,7 @@ class ModelTrainingPipeline:
                     if training_result is not None:
                         horizon_results[horizon] = training_result
                         horizon_models[horizon] = training_result.model
-                        self.logger.info(f"Successfully trained {horizon} model for {currency_name}")
+                        self.logger.debug(f"Successfully trained {horizon} model for {currency_name}")
                     else:
                         self.logger.warning(f"Failed to train {horizon} model for {currency_name}")
                 
@@ -956,7 +973,7 @@ class ModelTrainingPipeline:
             self._log_currency_completion_stats(currency_name, result)
             
             # Log training result
-            self.logger.info(f"Training completed for {currency_name}")
+            self.logger.debug(f"Training completed for {currency_name}")
             
             return result
     
@@ -1027,9 +1044,20 @@ class ModelTrainingPipeline:
         model_info = result.get('model_info', {})
         if model_info:
             self.logger.info(f"💾 MODEL ARTIFACTS:")
-            model_size = model_info.get('model_size_mb', 0)
+            
+            # Handle multi-horizon models (nested structure)
+            if 'primary_model' in model_info:
+                # Multi-horizon: use primary_model info
+                primary_info = model_info.get('primary_model', {})
+                model_size = primary_info.get('model_size_mb', 0)
+                model_dir = primary_info.get('model_dir', 'N/A')
+            else:
+                # Single-horizon: direct structure
+                model_size = model_info.get('model_size_mb', 0)
+                model_dir = model_info.get('model_dir', 'N/A')
+            
             self.logger.info(f"   • Model size: {model_size:.2f} MB")
-            self.logger.info(f"   • Saved to: {model_info.get('model_dir', 'N/A')}")
+            self.logger.info(f"   • Saved to: {model_dir}")
         
         # Processing metadata
         processing_metadata = result.get('processing_metadata', {})
@@ -1285,9 +1313,9 @@ class ModelTrainingPipeline:
                 evaluation_results['data_quality_metrics'] = data_quality_metrics
                 
             # Log data quality metrics
-            self.logger.info(f"Data quality metrics calculated for {currency}")
+            self.logger.debug(f"Data quality metrics calculated for {currency}")
                 
-            self.logger.info(f"Comprehensive evaluation completed for {currency}")
+            self.logger.debug(f"Comprehensive evaluation completed for {currency}")
             
         except Exception as e:
             self.logger.error(f"Comprehensive evaluation failed for {currency}: {str(e)}")
@@ -1296,6 +1324,103 @@ class ModelTrainingPipeline:
         return evaluation_results
     
 
+    def _upload_currency_models(self, currency_name: str, result: Dict[str, Any]) -> None:
+        """
+        Upload models for a specific currency to S3 immediately after training.
+        
+        Args:
+            currency_name: Name of the currency
+            result: Training result dictionary containing model_info
+        """
+        if not self.models_bucket:
+            self.logger.debug(f"MODELS_BUCKET not configured, skipping model upload for {currency_name}")
+            return
+        
+        try:
+            import boto3
+            from botocore.exceptions import ClientError, BotoCoreError
+            
+            # Get experiment ID
+            experiment_id = self.config.experiment.experiment_id
+            if not experiment_id:
+                self.logger.warning(f"No experiment_id configured, skipping model upload for {currency_name}")
+                return
+            
+            # Get model info from result
+            model_info = result.get('model_info', {})
+            if not model_info:
+                self.logger.warning(f"No model_info in result for {currency_name}, skipping upload")
+                return
+            
+            # Create S3 client
+            s3_client = boto3.client('s3')
+            
+            # Models are saved in models_dir (which is /app/ml/models/currency/)
+            models_dir = self.config.paths.models_dir
+            
+            # Find all model directories for this currency
+            # Models are saved as {currency_name}_{horizon}/ or just {currency_name}/
+            currency_model_dirs = []
+            if models_dir.exists():
+                for item in models_dir.iterdir():
+                    if item.is_dir():
+                        # Check if this directory belongs to this currency
+                        dir_name = item.name
+                        if dir_name.startswith(f"{currency_name}_") or dir_name == currency_name:
+                            currency_model_dirs.append(item)
+            
+            if not currency_model_dirs:
+                self.logger.warning(f"No model directories found for {currency_name} in {models_dir}")
+                return
+            
+            # Upload all files from currency model directories
+            uploaded_count = 0
+            failed_count = 0
+            
+            for model_dir in currency_model_dirs:
+                try:
+                    # Walk through the model directory and upload all files
+                    for file_path in model_dir.rglob('*'):
+                        if file_path.is_file():
+                            # Calculate relative path from models_dir
+                            relative_path = file_path.relative_to(models_dir)
+                            # Normalize path separators for S3 (use forward slashes)
+                            relative_path_str = str(relative_path).replace(os.sep, '/')
+                            
+                            # Create S3 key with experiment_id
+                            s3_key = f"models/currency/{experiment_id}/{relative_path_str}"
+                            
+                            try:
+                                # Upload file
+                                s3_client.upload_file(str(file_path), self.models_bucket, s3_key)
+                                uploaded_count += 1
+                                self.logger.debug(f"Uploaded {file_path.name} to s3://{self.models_bucket}/{s3_key}")
+                            except ClientError as e:
+                                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+                                error_msg = e.response.get('Error', {}).get('Message', str(e))
+                                self.logger.warning(f"Failed to upload {file_path} to s3://{self.models_bucket}/{s3_key}: {error_code} - {error_msg}")
+                                failed_count += 1
+                            except BotoCoreError as e:
+                                self.logger.warning(f"Boto3 error uploading {file_path} to s3://{self.models_bucket}/{s3_key}: {str(e)}")
+                                failed_count += 1
+                            except Exception as e:
+                                self.logger.warning(f"Unexpected error uploading {file_path} to s3://{self.models_bucket}/{s3_key}: {str(e)}")
+                                failed_count += 1
+                
+                except Exception as e:
+                    self.logger.warning(f"Error processing model directory {model_dir} for {currency_name}: {e}")
+                    failed_count += 1
+            
+            if uploaded_count > 0:
+                self.logger.info(f"Uploaded {uploaded_count} model files for {currency_name} to S3 (experiment: {experiment_id})")
+            if failed_count > 0:
+                self.logger.warning(f"Failed to upload {failed_count} files for {currency_name}")
+                
+        except ImportError:
+            self.logger.warning("boto3 not available, cannot upload models to S3")
+        except Exception as e:
+            self.logger.warning(f"Failed to upload models for {currency_name} to S3: {e}")
+    
     def _upload_logs_to_s3(self) -> None:
         """
         Upload training logs to S3 bucket.
@@ -1338,7 +1463,7 @@ class ModelTrainingPipeline:
                     
                     # Upload file
                     s3_client.upload_file(str(log_file), self.data_lake_bucket, s3_key)
-                    self.logger.info(f"Uploaded log file to s3://{self.data_lake_bucket}/{s3_key}")
+                    self.logger.debug(f"Uploaded log file to s3://{self.data_lake_bucket}/{s3_key}")
                     uploaded_count += 1
                     
                 except ClientError as e:

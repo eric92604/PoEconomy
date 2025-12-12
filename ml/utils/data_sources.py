@@ -635,7 +635,7 @@ class S3DataSource(BaseDataSource):
         if self._metadata_cache is not None:
             return self._metadata_cache
             
-        self.logger.info("Loading currency metadata from S3...")
+        self.logger.debug("Loading currency metadata from S3...")
         
         all_data = self._load_all_historical_data()
         
@@ -678,7 +678,7 @@ class S3DataSource(BaseDataSource):
             ))
         
         self._metadata_cache = stats
-        self.logger.info(f"Loaded statistics for {len(stats)} currencies")
+        self.logger.debug(f"Loaded statistics for {len(stats)} currencies")
         return stats
     
     def get_available_leagues(self) -> List[str]:
@@ -689,7 +689,7 @@ class S3DataSource(BaseDataSource):
             return []
         
         available_leagues = all_data['League'].unique().tolist()
-        self.logger.info(f"Discovered {len(available_leagues)} leagues in S3: {available_leagues}")
+        self.logger.debug(f"Discovered {len(available_leagues)} leagues in S3: {available_leagues}")
         return list(available_leagues)
     
     def get_most_recent_league(self) -> Optional[str]:
@@ -719,7 +719,7 @@ class S3DataSource(BaseDataSource):
         min_league_days: int = 0,
     ) -> Optional[pd.DataFrame]:
         """Build price dataframe from S3 historical data."""
-        self.logger.info(f"Building price dataframe for {len(currencies)} currencies")
+        self.logger.debug(f"Building price dataframe for {len(currencies)} currencies")
         
         all_data = self._load_all_historical_data()
         
@@ -730,10 +730,10 @@ class S3DataSource(BaseDataSource):
         # Filter by included leagues
         if included_leagues:
             all_data = all_data[all_data['League'].isin(included_leagues)]
-            self.logger.info(f"Filtered to leagues: {included_leagues}")
+            self.logger.debug(f"Filtered to leagues: {included_leagues}")
         else:
             available_leagues = all_data['League'].unique().tolist()
-            self.logger.info(f"Using all available leagues from S3: {available_leagues}")
+            self.logger.debug(f"Using all available leagues from S3: {available_leagues}")
         
         # Filter by currencies
         all_data = all_data[all_data['Get'].isin(currencies)]
@@ -764,7 +764,7 @@ class S3DataSource(BaseDataSource):
         # Sort by date
         df = df.sort_values(['currency', 'date']).reset_index(drop=True)
         
-        self.logger.info(f"Built price dataframe: {df.shape}")
+        self.logger.debug(f"Built price dataframe: {df.shape}")
         return df
     
     def _load_all_historical_data(self) -> pd.DataFrame:
@@ -774,7 +774,7 @@ class S3DataSource(BaseDataSource):
         if cache_key in self._data_cache:
             return self._data_cache[cache_key]
         
-        self.logger.info("Loading all historical data from S3...")
+        self.logger.debug("Loading all historical data from S3...")
         
         try:
             response = self.s3_client.list_objects_v2(
@@ -792,7 +792,7 @@ class S3DataSource(BaseDataSource):
                 self.logger.warning("No currency CSV files found in historical-data/")
                 return pd.DataFrame()
             
-            self.logger.info(f"Found {len(csv_files)} CSV files to process")
+            self.logger.debug(f"Found {len(csv_files)} CSV files to process")
             
             all_dataframes = []
             
@@ -831,7 +831,7 @@ class S3DataSource(BaseDataSource):
             combined_df = pd.concat(all_dataframes, ignore_index=True)
             self._data_cache[cache_key] = combined_df
             
-            self.logger.info(f"Loaded {len(combined_df)} total records from {len(all_dataframes)} files")
+            self.logger.debug(f"Loaded {len(combined_df)} total records from {len(all_dataframes)} files")
             return combined_df
             
         except Exception as e:
@@ -880,7 +880,7 @@ class S3DataSource(BaseDataSource):
                 parquet_files.sort(key=lambda x: response['Contents'][next(i for i, obj in enumerate(response['Contents']) if obj['Key'] == x)]['LastModified'], reverse=True)
                 s3_key = parquet_files[0]
             
-            self.logger.info(f"Loading processed data from s3://{data_lake_bucket}/{s3_key}")
+            self.logger.debug(f"Loading processed data from s3://{data_lake_bucket}/{s3_key}")
             
             # Download and load the parquet file
             with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as temp_file:
@@ -890,7 +890,7 @@ class S3DataSource(BaseDataSource):
             df = pd.read_parquet(temp_path)
             os.unlink(temp_path)
             
-            self.logger.info(f"Successfully loaded processed data: {df.shape}")
+            self.logger.debug(f"Successfully loaded processed data: {df.shape}")
             return df
             
         except Exception as e:
@@ -943,11 +943,12 @@ class S3DataSource(BaseDataSource):
                 # Extract experiment ID from filename
                 filename = os.path.basename(s3_key)
                 if filename.startswith('combined_currency_features_') and filename.endswith('.parquet'):
-                    found_experiment_id = filename[28:-8]  # Remove prefix and suffix
+                    # Prefix 'combined_currency_features_' is 27 characters
+                    found_experiment_id = filename[27:-8]  # Remove prefix and suffix
                 else:
                     found_experiment_id = "unknown"
 
-            self.logger.info(f"Loading processed data from s3://{data_lake_bucket}/{s3_key}")
+            self.logger.debug(f"Loading processed data from s3://{data_lake_bucket}/{s3_key}")
 
             # Download and load the parquet file
             with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as temp_file:
@@ -957,7 +958,7 @@ class S3DataSource(BaseDataSource):
             df = pd.read_parquet(temp_path)
             os.unlink(temp_path)
 
-            self.logger.info(f"Successfully loaded processed data: {df.shape}")
+            self.logger.debug(f"Successfully loaded processed data: {df.shape}")
             return df, found_experiment_id
 
         except Exception as e:
