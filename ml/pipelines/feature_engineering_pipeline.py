@@ -57,7 +57,8 @@ class FeatureEngineeringPipeline:
             log_dir=str(config.paths.logs_dir),
             experiment_id=config.experiment.experiment_id,
             console_output=config.logging.console_logging,
-            suppress_external=config.logging.suppress_external
+            suppress_external=config.logging.suppress_external,
+            file_logging=config.logging.file_logging
         )
         
         # Initialize components
