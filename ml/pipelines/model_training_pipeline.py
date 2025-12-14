@@ -788,11 +788,16 @@ class ModelTrainingPipeline:
                 }
             )
             
-            # Impute remaining NaN values with median (column-wise)
+            # Create and fit imputer on full dataset (will be reused for all horizons)
+            # This ensures consistent imputation values across all horizons
+            fitted_imputer = None
             if np.isnan(X).any():
-                imputer = SimpleImputer(strategy='median')
-                X = imputer.fit_transform(X)
+                fitted_imputer = SimpleImputer(strategy='median')
+                fitted_imputer.fit(X)  # Fit on full dataset
+                X = fitted_imputer.transform(X)  # Transform full dataset
                 self.logger.debug(f"Applied median imputation for remaining NaN values")
+            else:
+                self.logger.debug(f"No NaN values found, skipping imputation")
 
             if len(X) < 5:  # Reduced minimum from 50 to 5
                 self.logger.warning(f"Insufficient data for {currency_name}: {len(X)} samples")
@@ -814,8 +819,18 @@ class ModelTrainingPipeline:
                     # Use all available features for this horizon
                     X_horizon_filtered = processed_data[feature_columns].values
                     
-                    # Get target for this horizon
-                    y_horizon = processed_data[target_col].values
+                    # Apply same NaN filtering threshold (90%) as training
+                    row_nan_ratio_horizon = np.isnan(X_horizon_filtered).sum(axis=1) / X_horizon_filtered.shape[1]
+                    valid_rows_horizon = row_nan_ratio_horizon <= 0.9
+                    X_horizon_filtered = X_horizon_filtered[valid_rows_horizon]
+                    processed_data_horizon = processed_data[valid_rows_horizon].reset_index(drop=True)
+                    
+                    # Apply the fitted imputer to this horizon's data
+                    if fitted_imputer is not None:
+                        X_horizon_filtered = fitted_imputer.transform(X_horizon_filtered)
+                    
+                    # Get target for this horizon (using filtered processed_data)
+                    y_horizon = processed_data_horizon[target_col].values
                     
                     # Log data filtering statistics
                     total_samples = len(y_horizon)
@@ -838,7 +853,7 @@ class ModelTrainingPipeline:
                     # If we have very few samples, try a more lenient approach
                     if len(X_horizon) < 20:
                         # Try using forward-fill for NaN values to preserve more data
-                        y_horizon_ffill = processed_data[target_col].fillna(method='ffill').values
+                        y_horizon_ffill = processed_data_horizon[target_col].fillna(method='ffill').values
                         target_valid_mask_ffill = ~pd.isna(y_horizon_ffill)
                         X_horizon_ffill = X_horizon_filtered[target_valid_mask_ffill]
                         y_horizon_ffill = y_horizon_ffill[target_valid_mask_ffill]
@@ -860,6 +875,9 @@ class ModelTrainingPipeline:
                     )
                     
                     if training_result is not None:
+                        # Attach the fitted imputer to the training result
+                        # This ensures it gets saved with model artifacts
+                        training_result.imputer = fitted_imputer
                         horizon_results[horizon] = training_result
                         horizon_models[horizon] = training_result.model
                         self.logger.debug(f"Successfully trained {horizon} model for {currency_name}")
@@ -918,23 +936,21 @@ class ModelTrainingPipeline:
                 # Extract horizon from target column name (e.g., "target_price_3d" -> "3d")
                 horizon = target_col.replace('target_price_', '') if 'target_price_' in target_col else '1d'
                 
-                # Use all available features
-                X_horizon_filtered = processed_data[feature_columns].values
+                # X is already imputed from above, so we can use it directly
+                # Filter out NaN values for target
                 y = processed_data[target_col].values
-                
-                # Filter out NaN values
                 target_valid_mask = ~pd.isna(y)
-                X = X_horizon_filtered[target_valid_mask]
-                y = y[target_valid_mask]
+                X_filtered = X[target_valid_mask]
+                y_filtered = y[target_valid_mask]
                 
-                if len(X) < 5:  # Reduced minimum from 50 to 5
-                    self.logger.warning(f"Insufficient data for {currency_name}: {len(X)} samples")
+                if len(X_filtered) < 5:  # Reduced minimum from 50 to 5
+                    self.logger.warning(f"Insufficient data for {currency_name}: {len(X_filtered)} samples")
                     self.processing_stats['insufficient_data'] += 1
                     return None
                 
                 # Train single model
                 training_result = self.model_trainer.train_single_model(
-                    X, y, currency_name, 
+                    X_filtered, y_filtered, currency_name, 
                     target_names=[target_col],
                     feature_names=feature_columns
                 )
@@ -942,6 +958,9 @@ class ModelTrainingPipeline:
                 if training_result is None:
                     self.logger.error(f"Model training failed for {currency_name}")
                     return None
+                
+                # Attach the fitted imputer to the training result
+                training_result.imputer = fitted_imputer
                 
                 # Save model artifacts
                 try:

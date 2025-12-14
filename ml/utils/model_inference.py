@@ -154,9 +154,23 @@ class ModelPredictor:
                         X, feature_rows = self._extract_feature_matrix(processed_df, feature_columns)
                         if len(feature_rows) > 0:
                             # Load imputer and apply transformation BEFORE scaling
-                            imputer = joblib.load(artifact.imputer_path) if artifact.imputer_path and artifact.imputer_path.exists() else None
-                            if imputer is not None:
-                                X = imputer.transform(X)
+                            imputer = None
+                            if artifact.imputer_path and artifact.imputer_path.exists():
+                                try:
+                                    imputer = joblib.load(artifact.imputer_path)
+                                    X = imputer.transform(X)
+                                    self.logger.debug(f"Applied saved imputer from training for {currency} ({horizon})")
+                                except Exception as e:
+                                    self.logger.warning(f"Failed to load imputer for {currency} ({horizon}): {e}")
+                                    # If imputer fails to load, we cannot proceed safely
+                                    raise ValueError(f"Failed to load required imputer for {currency} ({horizon}). Model artifacts may be incomplete.")
+                            else:
+                                self.logger.warning(f"No imputer found for {currency} ({horizon}). This model may have been trained before imputation was saved.")
+                                # Fallback: use median imputation (but log warning)
+                                from sklearn.impute import SimpleImputer
+                                fallback_imputer = SimpleImputer(strategy='median')
+                                X = fallback_imputer.fit_transform(X)
+                                self.logger.warning(f"Used fallback imputation for {currency} ({horizon}) - this may cause prediction inconsistencies")
                             
                             # Load scaler and apply after imputation
                             scaler = joblib.load(artifact.scaler_path) if artifact.scaler_path and artifact.scaler_path.exists() else None
@@ -216,7 +230,7 @@ class ModelPredictor:
                                 prediction_lower=lower,
                                 prediction_upper=upper,
                                 features_used=len(feature_columns),
-                                model_dir=str(artifact.model_dir),
+                                model_path=str(artifact.model_dir),
                                 metadata=artifact.metadata,
                             )
 
@@ -546,18 +560,15 @@ class ModelPredictor:
         feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
         feature_matrix = feature_frame.to_numpy(dtype=float, na_value=np.nan)
 
-        # More robust handling of NaN values for small datasets
-        # Instead of requiring ALL features to be finite, we'll:
-        # 1. Impute NaN values with column means/medians
-        # 2. Use a more lenient filtering approach
+        # Standardized NaN filtering - use same threshold as training (90%)
+        # This ensures consistency between training and inference
         
         # Count NaN values per row
         nan_counts = np.isnan(feature_matrix).sum(axis=1)
         total_features = feature_matrix.shape[1]
         
-        # For small datasets, be more lenient with NaN tolerance
-        # Allow rows with up to 50% NaN values (for 5 data points, this is reasonable)
-        max_nan_ratio = 0.5
+        # Use same threshold as training: remove rows with >90% NaN features
+        max_nan_ratio = 0.9
         max_nan_count = int(total_features * max_nan_ratio)
         
         # Filter rows with too many NaN values
@@ -573,17 +584,9 @@ class ModelPredictor:
         filtered_matrix = feature_matrix[valid_mask]
         filtered_rows = processed_df[valid_mask].reset_index(drop=True)
         
-        # Impute remaining NaN values with column means
-        for col_idx in range(filtered_matrix.shape[1]):
-            col_data = filtered_matrix[:, col_idx]
-            if np.any(np.isnan(col_data)):
-                # Use median for imputation (more robust than mean)
-                median_val = np.nanmedian(col_data)
-                if np.isnan(median_val):
-                    # If all values are NaN, use 0
-                    median_val = 0.0
-                filtered_matrix[np.isnan(col_data), col_idx] = median_val
-                self.logger.debug(f"Imputed {np.isnan(col_data).sum()} NaN values in column {col_idx} with {median_val}")
+        # Note: Imputation will be handled by the saved imputer from training
+        # Do NOT perform manual imputation here to avoid double imputation
+        # The saved imputer will be applied in predict_currency() method
         
         self.logger.debug(f"Feature matrix extraction: {len(filtered_matrix)} rows, {filtered_matrix.shape[1]} features")
         return filtered_matrix, filtered_rows

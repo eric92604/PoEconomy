@@ -294,8 +294,18 @@ class DirectModelPredictor(ModelPredictor):
                             try:
                                 imputer = joblib.load(artifact.imputer_path)
                                 X = imputer.transform(X)
+                                self.logger.debug(f"Applied saved imputer from training for {currency} ({horizon})")
                             except Exception as e:
-                                self.logger.warning(f"Failed to load or apply imputer for {currency} ({horizon}): {e}")
+                                self.logger.warning(f"Failed to load imputer for {currency} ({horizon}): {e}")
+                                # If imputer fails to load, we cannot proceed safely
+                                raise ValueError(f"Failed to load required imputer for {currency} ({horizon}). Model artifacts may be incomplete.")
+                        else:
+                            self.logger.warning(f"No imputer found for {currency} ({horizon}). This model may have been trained before imputation was saved.")
+                            # Fallback: use median imputation (but log warning)
+                            from sklearn.impute import SimpleImputer
+                            fallback_imputer = SimpleImputer(strategy='median')
+                            X = fallback_imputer.fit_transform(X)
+                            self.logger.warning(f"Used fallback imputation for {currency} ({horizon}) - this may cause prediction inconsistencies")
                         
                         scaler = self._load_scaler_from_direct(artifact)
                         model = self._load_model_from_direct(artifact)
