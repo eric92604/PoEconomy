@@ -5,7 +5,7 @@
 numpy>=1.21.0,<2.0.0
 pandas>=1.5.0,<2.0.0
 scipy>=1.10.0
-scikit-learn>=1.3.0
+scikit-learn==1.3.0
 
 # ML Models (exact versions for compatibility)
 lightgbm>=3.3.0,<4.0.0
