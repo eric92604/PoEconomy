@@ -110,6 +110,9 @@ class ModelPredictor:
 
         self.data_processor = DataProcessor(self.config.data, self.config.processing, self.logger)  # type: ignore[arg-type]
         self.model_registry = self._discover_models()
+        
+        # Cache most recent league per invocation (doesn't change during Lambda execution)
+        self._cached_most_recent_league: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -150,32 +153,19 @@ class ModelPredictor:
                     if processed_df is not None and not processed_df.empty:
                         X, feature_rows = self._extract_feature_matrix(processed_df, feature_columns)
                         if len(feature_rows) > 0:
-                            # Load scaler
+                            # Load imputer and apply transformation BEFORE scaling
+                            imputer = joblib.load(artifact.imputer_path) if artifact.imputer_path and artifact.imputer_path.exists() else None
+                            if imputer is not None:
+                                X = imputer.transform(X)
+                            
+                            # Load scaler and apply after imputation
                             scaler = joblib.load(artifact.scaler_path) if artifact.scaler_path and artifact.scaler_path.exists() else None
                             if scaler is not None:
                                 X = scaler.transform(X)
                             
-                            # Load imputer (fitted on training data - prevents data leakage)
-                            imputer = joblib.load(artifact.imputer_path) if artifact.imputer_path and artifact.imputer_path.exists() else None
-                            
                             # Load model
                             model = joblib.load(artifact.model_dir / "ensemble_model.pkl")
                             
-                            # Set imputer on models that need it (RandomForest/ExtraTrees)
-                            # The imputer must be set on the model object so predict() can use it
-                            if imputer is not None:
-                                from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
-                                if hasattr(model, 'models'):
-                                    # Ensemble model - set imputer on base models that need it
-                                    for base_model in model.models:
-                                        if hasattr(base_model, 'model') and isinstance(base_model.model, (RandomForestRegressor, ExtraTreesRegressor)):
-                                            base_model.imputer = imputer
-                                elif hasattr(model, 'model') and isinstance(model.model, (RandomForestRegressor, ExtraTreesRegressor)):
-                                    # Single model that needs imputation
-                                    model.imputer = imputer
-                                elif hasattr(model, 'imputer'):
-                                    # Model already has imputer attribute (e.g., BaseModel instance)
-                                    model.imputer = imputer
                             
                             latest_features = X[-1].reshape(1, -1)
                             
@@ -251,14 +241,16 @@ class ModelPredictor:
 
 
     def _get_current_league(self) -> str:
-        """Get the current active league."""
-        try:
-            # Try to get from data source
-            latest_league = self.data_source.get_most_recent_league()
-            if latest_league:
-                return latest_league
-        except Exception:
-            pass
+        """Get the current active league (cached per invocation)."""
+        # Use cached most recent league (fetched once per Lambda invocation)
+        if self._cached_most_recent_league is None:
+            try:
+                self._cached_most_recent_league = self.data_source.get_most_recent_league()
+            except Exception:
+                pass
+        
+        if self._cached_most_recent_league:
+            return self._cached_most_recent_league
         
         # No fallback - this should not happen in production
         raise RuntimeError("Could not determine current league from data source. This indicates a data source configuration issue.")
@@ -391,10 +383,14 @@ class ModelPredictor:
             if self.config.data.included_leagues:
                 leagues = list(self.config.data.included_leagues)
             else:
-                latest_league = self.data_source.get_most_recent_league()
-                if latest_league:
-                    leagues = [latest_league]
-                    self.logger.info(f"Auto-selected most recent league: {latest_league}")
+                # Use cached most recent league (fetched once per Lambda invocation)
+                if self._cached_most_recent_league is None:
+                    self._cached_most_recent_league = self.data_source.get_most_recent_league()
+                    if self._cached_most_recent_league:
+                        self.logger.info(f"Auto-selected most recent league (cached for this invocation): {self._cached_most_recent_league}")
+                
+                if self._cached_most_recent_league:
+                    leagues = [self._cached_most_recent_league]
                 else:
                     leagues = None
         else:
@@ -455,14 +451,29 @@ class ModelPredictor:
             else:
                 missing_features.append(feat_name)
         
+        # Create missing conditional features that were used during training
+        # This handles cases where features like price_log are conditionally created
+        # based on data characteristics that may differ between training and inference
         if missing_features:
-            error_msg = (
-                f"Missing {len(missing_features)} stored features in processed data for {currency} ({horizon}). "
-                f"This indicates a mismatch between training and inference feature engineering. "
-                f"Missing features: {missing_features[:10]}{'...' if len(missing_features) > 10 else ''}"
-            )
-            self.logger.error(error_msg, extra={"missing_features": missing_features})
-            raise ValueError(error_msg)
+            processed_data = self._ensure_required_features(processed_data, missing_features, currency)
+            
+            # Re-check after attempting to create missing features
+            still_missing = []
+            for feat_name in missing_features:
+                if feat_name in processed_data.columns:
+                    available_features.append(feat_name)
+                    self.logger.info(f"Created missing conditional feature: {feat_name} for {currency} ({horizon})")
+                else:
+                    still_missing.append(feat_name)
+            
+            if still_missing:
+                error_msg = (
+                    f"Missing {len(still_missing)} stored features in processed data for {currency} ({horizon}). "
+                    f"This indicates a mismatch between training and inference feature engineering. "
+                    f"Missing features: {still_missing[:10]}{'...' if len(still_missing) > 10 else ''}"
+                )
+                self.logger.error(error_msg, extra={"missing_features": still_missing})
+                raise ValueError(error_msg)
         
         if not available_features:
             error_msg = (
@@ -477,6 +488,51 @@ class ModelPredictor:
         self.logger.debug(f"Using {len(feature_columns)} features from stored metadata (expected {len(stored_feature_names)})")
         
         return processed_data, feature_columns
+
+    def _ensure_required_features(
+        self,
+        df: pd.DataFrame,
+        missing_features: List[str],
+        currency: str
+    ) -> pd.DataFrame:
+        """
+        Ensure required features from model metadata are created, even if conditions aren't met.
+        
+        This handles conditional features like price_log that are only created under certain conditions
+        during training (e.g., price_range > threshold), but must be present during inference to match
+        the model's expected features.
+        
+        Args:
+            df: Processed dataframe after feature engineering
+            missing_features: List of feature names that are missing but required by the model
+            currency: Currency identifier for logging
+            
+        Returns:
+            Dataframe with missing features created
+        """
+        df = df.copy()
+        
+        for feat_name in missing_features:
+            try:
+                if feat_name == 'price_log':
+                    # price_log is conditionally created based on price range during training
+                    # During inference, we must create it if it was used during training
+                    if 'price' in df.columns and 'price_log' not in df.columns:
+                        import numpy as np
+                        # Use log1p to match training (handles zero/negative values safely)
+                        # Clip to ensure non-negative values for log
+                        df['price_log'] = np.log1p(df['price'].clip(lower=0))
+                        self.logger.debug(f"Created missing conditional feature: {feat_name} for {currency}")
+                # Add more conditional features here as needed
+                # elif feat_name == 'other_conditional_feature':
+                #     ...
+            except Exception as e:
+                self.logger.warning(
+                    f"Could not create missing feature {feat_name} for {currency}: {e}"
+                )
+                # Continue with other features even if one fails
+        
+        return df
 
     def _extract_feature_matrix(
         self,

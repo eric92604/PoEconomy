@@ -17,6 +17,7 @@ Event structure examples:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import os
@@ -25,7 +26,7 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -92,6 +93,10 @@ class DirectModelPredictor(ModelPredictor):
             raise FileNotFoundError(f"No model directories found in models directory: {self.models_dir}")
         
         self.model_registry = self._discover_models_from_directories()
+        
+        
+        # Cache most recent league per invocation (doesn't change during Lambda execution)
+        self._cached_most_recent_league: Optional[str] = None
     
     def _discover_models_from_directories(self) -> Dict[str, CurrencyModelBundle]:
         """Scan model directories and group artifacts per currency."""
@@ -124,9 +129,11 @@ class DirectModelPredictor(ModelPredictor):
                         self.logger.debug(f"Discovered model: {currency_label} -> {model_file.parent}")
                         
                         # Create direct artifact
+                        imputer_file = metadata_file.parent / "imputer.pkl"
                         artifact = DirectModelArtifact(
                             model_dir=metadata_file.parent,
                             scaler_path=scaler_file if scaler_file.exists() else None,
+                            imputer_path=imputer_file if imputer_file.exists() else None,
                             metadata_path=metadata_file,
                             metadata=metadata,
                         )
@@ -278,8 +285,21 @@ class DirectModelPredictor(ModelPredictor):
                 if processed_df is not None and not processed_df.empty:
                     X, feature_rows = self._extract_feature_matrix(processed_df, feature_columns)
                     if len(feature_rows) > 0:
-                        # Load scaler and model from filesystem
+                        # Load imputer, scaler, and model directly from filesystem
+                        self.logger.debug(f"Loading model for {currency} ({horizon}) from filesystem")
+                        
+                        # Load imputer and apply transformation BEFORE scaling
+                        imputer = None
+                        if artifact.imputer_path and artifact.imputer_path.exists():
+                            try:
+                                imputer = joblib.load(artifact.imputer_path)
+                                X = imputer.transform(X)
+                            except Exception as e:
+                                self.logger.warning(f"Failed to load or apply imputer for {currency} ({horizon}): {e}")
+                        
                         scaler = self._load_scaler_from_direct(artifact)
+                        model = self._load_model_from_direct(artifact)
+                        
                         if scaler is not None:
                             # Validate feature count before scaling
                             expected_features = scaler.n_features_in_ if hasattr(scaler, 'n_features_in_') else None
@@ -296,8 +316,6 @@ class DirectModelPredictor(ModelPredictor):
                                     f"trained with {expected_features} features but inference is using {X.shape[1]} features."
                                 )
                             X = scaler.transform(X)
-
-                        model = self._load_model_from_direct(artifact)
                         latest_features = X[-1].reshape(1, -1)
                         
                         # Make prediction with uncertainty using ensemble spread
@@ -355,6 +373,11 @@ class DirectModelPredictor(ModelPredictor):
                             f"Prediction for {currency} ({horizon}): {current_price:.2f} -> {prediction_value:.2f} "
                             f"({price_change_pct:+.1f}%, confidence: {confidence:.2f})"
                         )
+                        
+                        # Explicit cleanup of DataFrames and models to free memory
+                        del raw_df, processed_df, feature_rows, X, latest_features, model, scaler
+                        if 'imputer' in locals() and imputer is not None:
+                            del imputer
                         return result
 
         except ValueError as exc:
@@ -402,6 +425,7 @@ class DirectModelArtifact:
     """Model artifact stored directly in filesystem."""
     model_dir: Path
     scaler_path: Optional[Path]
+    imputer_path: Optional[Path]  # Imputer fitted on training data (for RandomForest/ExtraTrees)
     metadata_path: Path
     metadata: Dict[str, Any]
 
@@ -470,17 +494,14 @@ def _select_currencies(
     logger.info("No currencies supplied; selecting defaults from metadata")
     stats = data_source.list_currency_stats()
     
-    # Try to get current active seasonal league first
+    # Get most recent league once (cached per invocation in predictor, but this function is called separately)
+    # Note: This is called once per Lambda invocation, so caching here is less critical but still good practice
     current_league = data_source.get_most_recent_league()
     if current_league:
         stats = [stat for stat in stats if stat.league == current_league]
         logger.info("Auto-selected current active seasonal league for currency selection", extra={"league": current_league})
     else:
-        # Fallback to most recent league if no seasonal league found
-        current_league = data_source.get_most_recent_league()
-        if current_league:
-            stats = [stat for stat in stats if stat.league == current_league]
-            logger.info("No active seasonal league found, using most recent league", extra={"league": current_league})
+        logger.info("No active seasonal league found, using all available leagues")
     
     # Get currencies that have both data availability AND trained models
     available_currencies_with_models = set(predictor.list_available_currencies())
@@ -730,6 +751,10 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
         predictions: List[PredictionResult] = []
         failed_predictions = 0
         
+        # Track processed count for memory management
+        processed_count = 0
+        memory_cleanup_interval = int(os.getenv("MEMORY_CLEANUP_INTERVAL", "10"))  # Cleanup every N predictions
+        
         for currency in target_currencies:
             for horizon in options.horizons:
                 logger.info(f"Processing {currency} for horizon {horizon}")
@@ -765,6 +790,15 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
                         prediction.predicted_price > 0):  # Ensure positive predicted price
                         predictions.append(prediction)
                         logger.info(f"Successfully generated prediction for {currency} ({horizon})")
+                        
+                        processed_count += 1
+                        
+                        # Periodic memory cleanup to prevent OOM
+                        if processed_count % memory_cleanup_interval == 0:
+                            logger.info(f"Performing periodic memory cleanup (processed {processed_count} predictions)")
+                            # Force garbage collection to free memory from models and DataFrames
+                            gc.collect()
+                            logger.debug("Memory cleanup completed")
                     else:
                         # Log more detailed information about why the prediction failed
                         failure_reasons = []
@@ -804,6 +838,15 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
                         extra={"currency": currency, "horizon": horizon},
                     )
                     failed_predictions += 1
+                    
+                    # Cleanup on failure too to prevent memory accumulation
+                    processed_count += 1
+                    if processed_count % memory_cleanup_interval == 0:
+                        gc.collect()
+
+        # Final memory cleanup before writing to DynamoDB
+        logger.info("Performing final memory cleanup before writing predictions")
+        gc.collect()
 
         if not predictions:
             logger.warning("No valid predictions generated")
