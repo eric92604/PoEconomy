@@ -940,7 +940,9 @@ class ModelTrainer:
         currency: str,
         model_type: str = "ensemble",
         target_names: Optional[List[str]] = None,
-        feature_names: Optional[List[str]] = None
+        feature_names: Optional[List[str]] = None,
+        X_val: Optional[np.ndarray] = None,
+        y_val: Optional[np.ndarray] = None
     ) -> TrainingResult:
         """Train a single model with configured parameters."""
         start_time = time.time()
@@ -948,15 +950,19 @@ class ModelTrainer:
         if self.logger:
             self.logger.debug(f"Training {model_type} model for {currency}")
         
-        # Split data
-        split_idx = int(len(X) * (1 - self.config.test_size))
-        X_train, X_test = X[:split_idx], X[split_idx:]
-        y_train, y_test = y[:split_idx], y[split_idx:]
+        if X_val is None or y_val is None:
+            raise ValueError(
+                f"Validation data is required for training {currency}. "
+                "Please ensure DynamoDB validation data is available and properly configured."
+            )
         
-        # Further split training data for validation (always create validation split)
-        val_split_idx = int(len(X_train) * 0.8)
-        X_train_split, X_val = X_train[:val_split_idx], X_train[val_split_idx:]
-        y_train_split, y_val = y_train[:val_split_idx], y_train[val_split_idx:]
+        # Use provided validation data from DynamoDB
+        X_train_split = X  # All historical data for training
+        y_train_split = y
+        # X_val and y_val already provided
+        validation_data_source = 'dynamodb_daily_prices'
+        if self.logger:
+            self.logger.debug(f"Using DynamoDB validation data: {len(X_val)} samples")
         
         # Scale features if needed
         scaler = None
@@ -965,7 +971,6 @@ class ModelTrainer:
             X_train_split = scaler.fit_transform(X_train_split)
             if X_val is not None:
                 X_val = scaler.transform(X_val)
-            X_test = scaler.transform(X_test)
         
         # Train model (validation data is always available now)
         training_history = None
@@ -984,19 +989,19 @@ class ModelTrainer:
             if hasattr(model, 'training_history'):
                 training_history = model.training_history
         
-        # Make predictions and calculate metrics
-        y_pred = model.predict(X_test)
-        metrics = ModelMetrics.from_predictions(y_test, y_pred, target_names)
+        # Make predictions and calculate metrics on validation set
+        y_pred = model.predict(X_val)
+        metrics = ModelMetrics.from_predictions(y_val, y_pred, target_names)
         
-        # Get number of test samples and features
-        n_test = len(y_test)
-        n_features = X_test.shape[1]
+        # Get number of validation samples and features
+        n_test = len(y_val)
+        n_features = X_val.shape[1]
         
         # Get feature importance with feature names
         feature_importance = model.get_feature_importance(feature_names=feature_names)
         
         # Calculate cross-validation scores
-        cv_scores = self._calculate_cv_scores(model, X_train, y_train)
+        cv_scores = self._calculate_cv_scores(model, X_train_split, y_train_split)
         training_time = time.time() - start_time
         
         # Get hyperparameters

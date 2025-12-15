@@ -111,6 +111,9 @@ class DataConfig:
     
     # Data validation
     min_variance_threshold: float = 1e-8
+    
+    # Validation data configuration
+    validation_max_days: int = 60  # Maximum days of current league data to use for validation
 
 
 @dataclass
@@ -292,6 +295,7 @@ class DynamoConfig:
     currency_metadata_table: str = os.getenv("DYNAMO_CURRENCY_METADATA_TABLE", "")
     currency_prices_table: str = os.getenv("DYNAMO_CURRENCY_PRICES_TABLE", "")
     league_metadata_table: Optional[str] = os.getenv("DYNAMO_LEAGUE_METADATA_TABLE", "")
+    daily_prices_table: str = os.getenv("DYNAMO_DAILY_PRICES_TABLE", "poeconomy-production-daily-prices")
     predictions_table: str = os.getenv("DYNAMO_PREDICTIONS_TABLE", "")
     currency_timestamp_index: Optional[str] = os.getenv("DYNAMO_CURRENCY_TIMESTAMP_INDEX", "currency-timestamp-index")
     partition_key: str = os.getenv("DYNAMO_PARTITION_KEY", "currency_league")

@@ -59,6 +59,7 @@ class DataSourceConfig:
     currency_metadata_table: Optional[str] = None
     currency_prices_table: Optional[str] = None
     league_metadata_table: Optional[str] = None
+    daily_prices_table: Optional[str] = None
     
     # S3 config
     data_lake_bucket: Optional[str] = None
@@ -76,7 +77,8 @@ class DataSourceConfig:
             region_name=dynamo_config.region_name,
             currency_metadata_table=dynamo_config.currency_metadata_table,
             currency_prices_table=dynamo_config.currency_prices_table,
-            league_metadata_table=dynamo_config.league_metadata_table
+            league_metadata_table=dynamo_config.league_metadata_table,
+            daily_prices_table=dynamo_config.daily_prices_table
         )
     
     @classmethod
@@ -273,6 +275,11 @@ class DynamoDBDataSource(BaseDataSource):
         self._league_table = (
             self._dynamodb.Table(config.league_metadata_table)
             if config.league_metadata_table
+            else None
+        )
+        self._daily_prices_table = (
+            self._dynamodb.Table(config.daily_prices_table)
+            if config.daily_prices_table
             else None
         )
         
@@ -612,6 +619,135 @@ class DynamoDBDataSource(BaseDataSource):
             return None
 
         return pd.DataFrame.from_records(records)
+    
+    def build_validation_dataframe(
+        self,
+        currencies: Sequence[str],
+        current_league: str,
+        pay_currency: str = "Chaos Orb",
+        max_days: int = 60,
+    ) -> Optional[pd.DataFrame]:
+        """
+        Build validation dataframe from current league daily prices in DynamoDB.
+        
+        This fetches data from the daily-prices table for the current active league,
+        which will be used as the validation set during model training.
+        
+        Args:
+            currencies: List of currency names to fetch
+            current_league: Name of current active league
+            pay_currency: Pay currency (default: Chaos Orb) - not used in daily prices table
+            max_days: Maximum number of days of league data to fetch
+            
+        Returns:
+            DataFrame with same structure as build_price_dataframe output,
+            or None if no data found
+        """
+        if not self._daily_prices_table:
+            self.logger.warning("Daily prices table not configured; cannot fetch validation data")
+            return None
+        
+        items = []
+        
+        try:
+            # Calculate date range (last max_days)
+            end_date = datetime.now(timezone.utc).date()
+            start_date = end_date - timedelta(days=max_days)
+            
+            # Query using league-date-index GSI
+            response = self._daily_prices_table.query(
+                IndexName='league-date-index',
+                KeyConditionExpression=Key('league').eq(current_league) & 
+                                     Key('date').between(
+                                         start_date.strftime('%Y-%m-%d'), 
+                                         end_date.strftime('%Y-%m-%d')
+                                     ),
+                ScanIndexForward=True  # Oldest first
+            )
+            
+            items.extend(response.get('Items', []))
+            
+            # Handle pagination
+            while 'LastEvaluatedKey' in response:
+                response = self._daily_prices_table.query(
+                    IndexName='league-date-index',
+                    KeyConditionExpression=Key('league').eq(current_league) & 
+                                         Key('date').between(
+                                             start_date.strftime('%Y-%m-%d'), 
+                                             end_date.strftime('%Y-%m-%d')
+                                         ),
+                    ScanIndexForward=True,
+                    ExclusiveStartKey=response['LastEvaluatedKey']
+                )
+                items.extend(response.get('Items', []))
+            
+            if not items:
+                self.logger.warning(f"No daily price records found for league {current_league}")
+                return None
+            
+            # Load league metadata for league_start, league_day calculation
+            league_metadata = self._load_league_metadata()
+            league_info = league_metadata.get(current_league, {})
+            league_start = league_info.get('start')
+            
+            records: List[Dict[str, Any]] = []
+            
+            for item in items:
+                currency = item.get('currency')
+                if currency not in currencies:
+                    continue
+                
+                # Convert date string to datetime
+                date_str = item.get('date')
+                if not date_str:
+                    continue
+                
+                try:
+                    date_obj = pd.to_datetime(date_str)
+                except (ValueError, TypeError):
+                    self.logger.warning(f"Invalid date format in daily prices: {date_str}")
+                    continue
+                
+                # Use avg_price as the price value
+                price = self._coerce_float(item.get('avg_price'))
+                if price is None or price <= 0:
+                    continue
+                
+                # Calculate league_day if league_start is available
+                if league_start:
+                    try:
+                        league_day = (date_obj - league_start).days
+                    except (TypeError, ValueError):
+                        league_day = 0
+                else:
+                    league_day = 0
+                
+                records.append({
+                    'currency': currency,
+                    'get_currency': currency,
+                    'price': price,
+                    'date': date_obj,
+                    'league_name': current_league,
+                    'league_start': league_start,
+                    'league_end': league_info.get('end'),
+                    'league_active': league_info.get('is_active', True),
+                    'league_day': league_day,
+                })
+            
+            if not records:
+                self.logger.warning(f"No qualifying records for currencies {currencies} in league {current_league}")
+                return None
+            
+            df = pd.DataFrame.from_records(records)
+            df.sort_values(['league_name', 'date'], inplace=True)
+            df.reset_index(drop=True, inplace=True)
+            
+            self.logger.info(f"Fetched {len(df)} validation records for {len(currencies)} currencies in league {current_league}")
+            return df
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching validation data from daily prices table: {e}")
+            return None
 
 
 class S3DataSource(BaseDataSource):

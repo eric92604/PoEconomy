@@ -78,6 +78,24 @@ class ModelTrainingPipeline:
         self.data_source = create_s3_data_source(s3_config, self.logger)
         self.logger.info(f"Using S3 data source for processed data from bucket: {data_lake_bucket}")
         
+        # Initialize DynamoDB data source for validation data (if needed)
+        self.dynamo_data_source = None
+        if config.data.use_current_league_validation:
+            try:
+                from ml.utils.data_sources import create_data_source, DataSourceConfig
+                dynamo_config_obj = DataSourceConfig.from_dynamo_config(config.dynamo)
+                self.dynamo_data_source = create_data_source(dynamo_config_obj, self.logger)
+                self.logger.info("Initialized DynamoDB data source for validation data")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize DynamoDB data source for validation: {e}")
+                self.logger.error("Validation data is required. Training will fail if validation data cannot be fetched.")
+        
+        # Initialize data processor for processing validation data
+        from ml.utils.data_processing import DataProcessor
+        self.data_processor = DataProcessor(
+            config.data, config.processing, self.logger
+        )
+        
         # Store S3 configuration for log uploads
         self.data_lake_bucket = data_lake_bucket
         
@@ -804,6 +822,55 @@ class ModelTrainingPipeline:
                 self.processing_stats['insufficient_data'] += 1
                 return None
 
+            # Fetch validation data from DynamoDB
+            validation_data = None
+            validation_features = None
+            validation_targets = None
+            current_league = None
+            
+            if self.config.data.use_current_league_validation:
+                try:
+                    # Get current active league
+                    if self.dynamo_data_source:
+                        current_league = self.dynamo_data_source.get_most_recent_league()
+                    
+                    if current_league:
+                        self.logger.info(f"Fetching validation data from current league: {current_league}")
+                        validation_data = self._fetch_validation_data(currency_name, current_league)
+                        
+                        if validation_data is not None and not validation_data.empty:
+                            # Extract validation features and targets
+                            validation_features_raw = validation_data[feature_columns].values
+                            
+                            # Apply same NaN filtering threshold (90%) to validation data
+                            row_nan_ratio_val = np.isnan(validation_features_raw).sum(axis=1) / validation_features_raw.shape[1]
+                            valid_rows_val = row_nan_ratio_val <= 0.9
+                            validation_features_raw = validation_features_raw[valid_rows_val]
+                            validation_data_filtered = validation_data[valid_rows_val].reset_index(drop=True)
+                            
+                            # Apply same imputer (fitted on training data)
+                            if fitted_imputer is not None:
+                                validation_features = fitted_imputer.transform(validation_features_raw)
+                            else:
+                                validation_features = validation_features_raw
+                            
+                            # Extract validation targets (will be extracted per horizon)
+                            validation_targets = validation_data_filtered
+                            
+                            self.logger.info(f"Validation data ready: {len(validation_features)} samples with {len(feature_columns)} features")
+                        else:
+                            self.logger.error(f"Could not fetch validation data for {currency_name}")
+                            self.processing_stats['validation_failures'] += 1
+                            return None
+                    else:
+                        self.logger.error(f"No current league found for {currency_name}")
+                        self.processing_stats['validation_failures'] += 1
+                        return None
+                except Exception as e:
+                    self.logger.error(f"Error fetching validation data for {currency_name}: {e}")
+                    self.processing_stats['validation_failures'] += 1
+                    return None
+
             # Train model(s) for different prediction horizons
             if isinstance(target_column, list) and len(target_column) > 1:
                 # Multi-horizon training: train separate models for each horizon
@@ -867,11 +934,41 @@ class ModelTrainingPipeline:
                         self.logger.warning(f"Insufficient data for {currency_name} {horizon} horizon: {len(X_horizon)} samples (need at least 10)")
                         continue
                     
+                    # Prepare validation data for this horizon
+                    if validation_features is None or validation_targets is None:
+                        self.logger.error(f"Validation data not available for {currency_name} {horizon} horizon. Skipping training.")
+                        continue
+                    
+                    try:
+                        # Extract validation target for this horizon
+                        if target_col not in validation_targets.columns:
+                            self.logger.error(f"Target column {target_col} not found in validation data for {horizon} horizon")
+                            continue
+                        
+                        y_val_horizon_raw = validation_targets[target_col].values
+                        
+                        # Filter out NaN targets
+                        target_valid_mask_val = ~pd.isna(y_val_horizon_raw)
+                        X_val_horizon = validation_features[target_valid_mask_val]
+                        y_val_horizon = y_val_horizon_raw[target_valid_mask_val]
+                        
+                        if len(X_val_horizon) == 0:
+                            self.logger.error(f"No valid validation samples for {horizon} horizon")
+                            continue
+                        
+                        self.logger.debug(f"Using {len(X_val_horizon)} validation samples for {horizon} horizon")
+                        
+                    except Exception as e:
+                        self.logger.error(f"Error preparing validation data for {horizon} horizon: {e}")
+                        continue
+                    
                     # Train model for this horizon
                     training_result = self.model_trainer.train_single_model(
                         X_horizon, y_horizon, f"{currency_name}_{horizon}", 
                         target_names=[target_col],
-                        feature_names=feature_columns
+                        feature_names=feature_columns,
+                        X_val=X_val_horizon,
+                        y_val=y_val_horizon
                     )
                     
                     if training_result is not None:
@@ -1130,6 +1227,91 @@ class ModelTrainingPipeline:
         # Sort by modification time
         latest_file = max(files, key=lambda f: f.stat().st_mtime)
         return str(latest_file)
+    
+    def _fetch_validation_data(
+        self,
+        currency: str,
+        current_league: str,
+        pay_currency: str = "Chaos Orb"
+    ) -> Optional[pd.DataFrame]:
+        """
+        Fetch current league validation data from DynamoDB.
+        
+        Args:
+            currency: Currency name
+            current_league: Current active league name
+            pay_currency: Pay currency (default: Chaos Orb)
+            
+        Returns:
+            DataFrame with validation data, or None if not available
+        """
+        if not self.dynamo_data_source:
+            self.logger.warning("DynamoDB data source not available for validation data")
+            return None
+        
+        try:
+            # Fetch extended range to ensure future targets are available
+            # Features are backward-looking, so we only need future data for targets
+            max_horizon = max(self.config.data.prediction_horizons) if self.config.data.prediction_horizons else 7
+            buffer_days = 7  # Extra buffer for safety
+            days_to_fetch = self.config.data.validation_max_days + max_horizon + buffer_days
+            
+            self.logger.debug(f"Fetching validation data: {days_to_fetch} days (validation={self.config.data.validation_max_days}, horizon={max_horizon}, buffer={buffer_days})")
+            
+            # Fetch raw daily prices from DynamoDB
+            validation_df = self.dynamo_data_source.build_validation_dataframe(
+                currencies=[currency],
+                current_league=current_league,
+                pay_currency=pay_currency,
+                max_days=days_to_fetch
+            )
+            
+            if validation_df is None or validation_df.empty:
+                self.logger.warning(f"No validation data fetched for {currency} in league {current_league}")
+                return None
+            
+            self.logger.info(f"Fetched {len(validation_df)} raw validation records for {currency}")
+            
+            # Process through SAME feature engineering pipeline as training data
+            validation_processed, validation_metadata = self.data_processor.process_currency_data(
+                validation_df, 
+                currency
+            )
+            
+            if validation_processed is None or validation_processed.empty:
+                self.logger.warning(f"Feature engineering failed for validation data for {currency}")
+                return None
+            
+            self.logger.debug(f"Processed validation data: {len(validation_processed)} records after feature engineering")
+            
+            # Filter to only samples with complete target variables
+            # This automatically excludes recent dates that don't have future prices yet
+            target_cols = [f'target_price_{h}d' for h in self.config.data.prediction_horizons]
+            complete_mask = validation_processed[target_cols].notna().all(axis=1)
+            validation_complete = validation_processed[complete_mask]
+            
+            if len(validation_complete) == 0:
+                self.logger.warning(f"No validation samples with complete targets for {currency}")
+                return None
+            
+            # Additional safety: Exclude most recent max_horizon days
+            # (they won't have future targets, but double-check anyway)
+            if 'date' in validation_complete.columns:
+                max_date = validation_complete['date'].max()
+                cutoff_date = max_date - pd.Timedelta(days=max_horizon)
+                validation_complete = validation_complete[validation_complete['date'] <= cutoff_date]
+            
+            if len(validation_complete) < 10:
+                self.logger.warning(f"Insufficient validation data with complete targets: {len(validation_complete)} samples (minimum: 10)")
+                return None
+            
+            self.logger.info(f"Validation data ready: {len(validation_complete)} samples with complete target variables for {currency}")
+            self.logger.debug(f"Features are backward-looking (no future data needed for features)")
+            return validation_complete
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching validation data for {currency}: {e}", exception=e)
+            return None
     
     def _get_feature_columns(self, df: pd.DataFrame) -> Optional[List[str]]:
         """Get feature columns from dataframe.
