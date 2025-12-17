@@ -58,7 +58,10 @@ def _resolve_leagues(app_env: AppEnvironment, event: Optional[dict]) -> List[str
         )
         data_source_config = DataSourceConfig.from_dynamo_config(dynamo_config)
         data_source = create_data_source(data_source_config)
-        current_league = data_source.get_most_recent_league()
+        current_league = None
+        if hasattr(data_source, '_league_table') and data_source._league_table:
+            from ml.utils.data_sources import get_current_seasonal_league_from_table
+            current_league = get_current_seasonal_league_from_table(data_source._league_table, LOGGER)
         if current_league:
             LOGGER.info("Using current active seasonal league: %s", current_league)
             return [current_league]

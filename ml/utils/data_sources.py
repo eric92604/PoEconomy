@@ -24,6 +24,58 @@ from ml.config.training_config import DynamoConfig
 from ml.utils.common_utils import MLLogger
 
 
+def get_current_seasonal_league_from_table(league_metadata_table: Any, logger: Optional[MLLogger] = None) -> Optional[str]:
+    """
+    Get the current active seasonal league from the league metadata table.
+    
+    Args:
+        league_metadata_table: DynamoDB table resource for league metadata
+        logger: Optional logger instance
+        
+    Returns:
+        Name of the current seasonal league or None if not found
+    """
+    if logger is None:
+        logger = MLLogger("get_current_seasonal_league")
+    
+    try:
+        # Query for active seasonal leagues
+        response = league_metadata_table.scan(
+            FilterExpression=Attr("isActive").eq(True) & Attr("league_type").eq("seasonal")
+        )
+        
+        active_seasonal_leagues = response.get("Items", [])
+        
+        if not active_seasonal_leagues:
+            logger.warning("No active seasonal leagues found")
+            return None
+        
+        # Filter out leagues with "Event" in the name
+        active_seasonal_leagues = [
+            league for league in active_seasonal_leagues
+            if league.get("league_name") and "Event" not in league.get("league_name", "")
+        ]
+        
+        if not active_seasonal_leagues:
+            logger.warning("No active seasonal leagues found after filtering out Event leagues")
+            return None
+        
+        # If multiple active seasonal leagues, prefer the most recent one
+        # Sort by last_updated or startDate
+        active_seasonal_leagues.sort(
+            key=lambda x: x.get("last_updated", ""), 
+            reverse=True
+        )
+        
+        current_league = active_seasonal_leagues[0]["league_name"]
+        logger.info(f"Current seasonal league: {current_league}")
+        return current_league
+        
+    except Exception as e:
+        logger.error(f"Error getting current seasonal league: {e}")
+        return None
+
+
 @dataclass
 class CurrencyStat:
     """Lightweight representation of currency metadata."""
@@ -170,10 +222,6 @@ class BaseDataSource(ABC):
         """Get list of available leagues."""
         pass
     
-    @abstractmethod
-    def get_most_recent_league(self) -> Optional[str]:
-        """Get the most recent league."""
-        pass
     
     def select_currencies(
         self,
@@ -270,16 +318,25 @@ class DynamoDBDataSource(BaseDataSource):
         session = boto3.session.Session(region_name=config.region_name)
         self._dynamodb = session.resource("dynamodb")
         
-        self._prices_table = self._dynamodb.Table(config.currency_prices_table)
-        self._metadata_table = self._dynamodb.Table(config.currency_metadata_table)
+        # Strip whitespace from table names to prevent lookup failures
+        # Required tables (should always be present)
+        currency_prices_table = config.currency_prices_table.strip() if config.currency_prices_table else ""
+        currency_metadata_table = config.currency_metadata_table.strip() if config.currency_metadata_table else ""
+        
+        # Optional tables (may be None or empty)
+        league_metadata_table = config.league_metadata_table.strip() if config.league_metadata_table else ""
+        daily_prices_table = config.daily_prices_table.strip() if config.daily_prices_table else ""
+        
+        self._prices_table = self._dynamodb.Table(currency_prices_table)
+        self._metadata_table = self._dynamodb.Table(currency_metadata_table)
         self._league_table = (
-            self._dynamodb.Table(config.league_metadata_table)
-            if config.league_metadata_table
+            self._dynamodb.Table(league_metadata_table)
+            if league_metadata_table
             else None
         )
         self._daily_prices_table = (
-            self._dynamodb.Table(config.daily_prices_table)
-            if config.daily_prices_table
+            self._dynamodb.Table(daily_prices_table)
+            if daily_prices_table
             else None
         )
         
@@ -316,20 +373,26 @@ class DynamoDBDataSource(BaseDataSource):
             self._league_cache = metadata
             return metadata
 
-        items = self._scan_table(self._league_table)
-        for item in items:
-            league_name = item.get("league") or item.get("name")
-            if not league_name:
-                continue
+        try:
+            items = self._scan_table(self._league_table)
+            for item in items:
+                league_name = item.get("league") or item.get("name")
+                if not league_name:
+                    continue
 
-            start_raw = item.get("startDate") or item.get("start_date")
-            end_raw = item.get("endDate") or item.get("end_date")
+                start_raw = item.get("startDate") or item.get("start_date")
+                end_raw = item.get("endDate") or item.get("end_date")
 
-            metadata[league_name] = {
-                "start": self._coerce_datetime(start_raw),
-                "end": self._coerce_datetime(end_raw),
-                "is_active": bool(item.get("isActive", False)),
-            }
+                metadata[league_name] = {
+                    "start": self._coerce_datetime(start_raw),
+                    "end": self._coerce_datetime(end_raw),
+                    "is_active": bool(item.get("isActive", False)),
+                }
+            
+            if not metadata:
+                self.logger.warning(f"League metadata table {self._league_table.name} exists but returned no items")
+        except Exception as e:
+            self.logger.warning(f"Failed to load league metadata from table {self._league_table.name if self._league_table else 'unknown'}: {e}")
 
         self._league_cache = metadata
         return metadata
@@ -428,82 +491,21 @@ class DynamoDBDataSource(BaseDataSource):
         return list(league_metadata.keys())
     
     def get_most_recent_league(self) -> Optional[str]:
-        """Get the most recent active seasonal league."""
-        league_metadata = self._load_league_metadata()
-        if not league_metadata:
+        """
+        Get the most recent active seasonal league from DynamoDB.
+        
+        This method provides a consistent interface with S3DataSource.get_most_recent_league().
+        It uses the league metadata table to find the current active seasonal league.
+        
+        Returns:
+            Name of the most recent active seasonal league, or None if not found
+        """
+        if not self._league_table:
+            self.logger.warning("League metadata table not configured; cannot get most recent league")
             return None
         
-        # First, try to get the current active seasonal league from league metadata
-        # Look for leagues with league_type = "seasonal" and is_active = True
-        active_seasonal_leagues = []
-        
-        # We need to check the actual league metadata table for league_type
-        if self._league_table:
-            try:
-                items = self._scan_table(self._league_table)
-                for item in items:
-                    league_name = item.get("league") or item.get("name")
-                    league_type = item.get("league_type", "").lower()
-                    is_active = item.get("isActive", False)
-                    
-                    # Filter out leagues with "Event" in the name
-                    if league_name and "Event" in league_name:
-                        continue
-                    
-                    if league_name and league_type == "seasonal" and is_active:
-                        start_raw = item.get("startDate") or item.get("start_date")
-                        start_date = self._coerce_datetime(start_raw)
-                        if start_date:
-                            active_seasonal_leagues.append((league_name, start_date))
-                
-                if active_seasonal_leagues:
-                    # Return the seasonal league with the latest start date
-                    latest_seasonal = max(active_seasonal_leagues, key=lambda x: x[1])
-                    self.logger.info(f"Found current active seasonal league: {latest_seasonal[0]} (started: {latest_seasonal[1]})")
-                    return latest_seasonal[0]
-                    
-            except Exception as e:
-                self.logger.warning(f"Failed to get seasonal league from metadata table: {e}")
-        
-        # Fallback: try to find the most recent league from currency stats
-        stats = self.list_currency_stats()
-        if stats:
-            best_league = None
-            best_timestamp = None
-
-            for stat in stats:
-                # Filter out leagues with "Event" in the name
-                if stat.league and "Event" in stat.league:
-                    continue
-                    
-                timestamp = stat.last_updated or stat.last_availability_check
-                dt = self._coerce_datetime(timestamp) if timestamp else None
-                if dt is None:
-                    continue
-                if best_timestamp is None or dt > best_timestamp:
-                    best_timestamp = dt
-                    best_league = stat.league
-
-            if best_league:
-                self.logger.info(f"Using most recent league from currency stats: {best_league}")
-                return best_league
-
-        # Final fallback: use the league with the latest start date from metadata
-        if league_metadata:
-            # Filter out leagues with "Event" in the name
-            filtered_metadata = {
-                league: metadata for league, metadata in league_metadata.items()
-                if league and "Event" not in league
-            }
-            if filtered_metadata:
-                latest_league = max(
-                    filtered_metadata.items(),
-                    key=lambda item: item[1].get("start") or datetime.min,
-                )[0]
-                self.logger.info(f"Using fallback league with latest start date: {latest_league}")
-                return latest_league
-        
-        return None
+        return get_current_seasonal_league_from_table(self._league_table, self.logger)
+    
     
     def build_price_dataframe(
         self,
@@ -742,7 +744,6 @@ class DynamoDBDataSource(BaseDataSource):
             df.sort_values(['league_name', 'date'], inplace=True)
             df.reset_index(drop=True, inplace=True)
             
-            self.logger.info(f"Fetched {len(df)} validation records for {len(currencies)} currencies in league {current_league}")
             return df
             
         except Exception as e:
@@ -1166,4 +1167,5 @@ __all__ = [
     "create_data_source",
     "create_dynamo_data_source",
     "create_s3_data_source",
+    "get_current_seasonal_league_from_table",
 ]

@@ -24,6 +24,7 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent))
 
 from ml.utils.common_utils import MLLogger
+from ml.utils.data_sources import get_current_seasonal_league_from_table
 from config.training_config import MLConfig
 
 
@@ -76,42 +77,7 @@ class DailyPriceAggregator:
         Returns:
             Name of the current seasonal league or None if not found
         """
-        try:
-            # Query for active seasonal leagues
-            response = self.league_metadata_table.scan(
-                FilterExpression=Key("isActive").eq(True) & Key("league_type").eq("seasonal")
-            )
-            
-            active_seasonal_leagues = response.get("Items", [])
-            
-            if not active_seasonal_leagues:
-                self.logger.warning("No active seasonal leagues found")
-                return None
-            
-            # Filter out leagues with "Event" in the name
-            active_seasonal_leagues = [
-                league for league in active_seasonal_leagues
-                if league.get("league_name") and "Event" not in league.get("league_name", "")
-            ]
-            
-            if not active_seasonal_leagues:
-                self.logger.warning("No active seasonal leagues found after filtering out Event leagues")
-                return None
-            
-            # If multiple active seasonal leagues, prefer the most recent one
-            # Sort by last_updated or startDate
-            active_seasonal_leagues.sort(
-                key=lambda x: x.get("last_updated", ""), 
-                reverse=True
-            )
-            
-            current_league = active_seasonal_leagues[0]["league_name"]
-            self.logger.info(f"Current seasonal league: {current_league}")
-            return current_league
-            
-        except Exception as e:
-            self.logger.error(f"Error getting current seasonal league: {e}")
-            return None
+        return get_current_seasonal_league_from_table(self.league_metadata_table, self.logger)
     
     def get_available_currencies(self, league: str = None) -> List[str]:
         """Get currencies that exist in both metadata and live prices tables.

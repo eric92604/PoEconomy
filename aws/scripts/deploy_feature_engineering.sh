@@ -31,7 +31,6 @@ echo "Deploying feature engineering infrastructure..."
 PARAMS=(
   "EnvironmentName=$ENVIRONMENT"
   "FeatureEngineeringImageUri=$FEATURE_ENGINEERING_IMAGE_URI"
-  "ScheduleExpression=$FEATURE_ENGINEERING_CRON"
   "DataLakeBucketName=$DATA_LAKE_BUCKET_NAME"
   "BaseStackName=$BASE_STACK_NAME"
 )

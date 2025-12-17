@@ -233,6 +233,104 @@ class DirectModelPredictor(ModelPredictor):
             self.logger.warning(f"Failed to load scaler from filesystem: {e}")
             return None
     
+    def _model_requires_imputation(self, artifact: DirectModelArtifact) -> bool:
+        """
+        Determine if a model requires imputation based on its structure.
+        
+        RandomForest and ExtraTrees models require imputation because they cannot
+        handle NaN values. LightGBM handles NaN natively, so it doesn't need imputation.
+        
+        Args:
+            artifact: Model artifact containing model metadata and paths
+            
+        Returns:
+            True if the model requires imputation, False otherwise
+        """
+        # If imputer path exists, the model definitely requires imputation
+        if artifact.imputer_path and artifact.imputer_path.exists():
+            return True
+        
+        # Check metadata for model type information
+        metadata = artifact.metadata
+        if metadata:
+            model_type = metadata.get('model_type', '').lower()
+            # If metadata explicitly says it's an ensemble, we need to inspect the model
+            if model_type == 'ensemble' or 'ensemble' in model_type:
+                # Load model to inspect its structure
+                try:
+                    model = self._load_model_from_direct(artifact)
+                    return self._inspect_model_for_imputation_requirement(model)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to load model for imputation check: {e}. "
+                        "Assuming imputation is required for safety."
+                    )
+                    return True
+            # If it's a single model type that requires imputation
+            elif model_type in ('random_forest', 'randomforest', 'extra_trees', 'extratrees'):
+                return True
+            # If it's LightGBM only, no imputation needed
+            elif model_type == 'lightgbm':
+                return False
+        
+        # If metadata doesn't have clear information, inspect the model directly
+        try:
+            model = self._load_model_from_direct(artifact)
+            return self._inspect_model_for_imputation_requirement(model)
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to inspect model for imputation requirement: {e}. "
+                "Assuming imputation is required for safety."
+            )
+            return True
+    
+    def _inspect_model_for_imputation_requirement(self, model: Any) -> bool:
+        """
+        Inspect a loaded model to determine if it requires imputation.
+        
+        Args:
+            model: Loaded model object (could be EnsembleModel or single model)
+            
+        Returns:
+            True if the model requires imputation, False otherwise
+        """
+        from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
+        
+        # Check if it's an EnsembleModel with a models attribute
+        if hasattr(model, 'models') and model.models:
+            # Check each base model in the ensemble
+            for base_model in model.models:
+                # Check if base_model has a model attribute (BaseModel wrapper)
+                if hasattr(base_model, 'model') and base_model.model is not None:
+                    if isinstance(base_model.model, (RandomForestRegressor, ExtraTreesRegressor)):
+                        return True
+                # Check if base_model is directly a RandomForest or ExtraTrees
+                elif isinstance(base_model, (RandomForestRegressor, ExtraTreesRegressor)):
+                    return True
+                # Check if base_model has get_model_type method
+                elif hasattr(base_model, 'get_model_type'):
+                    model_type = base_model.get_model_type().lower()
+                    if model_type in ('random_forest', 'randomforest', 'extra_trees', 'extratrees'):
+                        return True
+            # If we get here, no RandomForest or ExtraTrees found in ensemble
+            return False
+        
+        # Check if it's directly a RandomForest or ExtraTrees
+        if isinstance(model, (RandomForestRegressor, ExtraTreesRegressor)):
+            return True
+        
+        # Check if it has a get_model_type method (BaseModel wrapper)
+        if hasattr(model, 'get_model_type'):
+            model_type = model.get_model_type().lower()
+            if model_type in ('random_forest', 'randomforest', 'extra_trees', 'extratrees'):
+                return True
+            elif model_type == 'lightgbm':
+                return False
+        
+        # If we can't determine, assume imputation is not required
+        # (safer to assume LightGBM-only behavior than to require imputation unnecessarily)
+        return False
+    
     def predict_currency(
         self,
         currency: str,
@@ -300,12 +398,26 @@ class DirectModelPredictor(ModelPredictor):
                                 # If imputer fails to load, we cannot proceed safely
                                 raise ValueError(f"Failed to load required imputer for {currency} ({horizon}). Model artifacts may be incomplete.")
                         else:
-                            self.logger.warning(f"No imputer found for {currency} ({horizon}). This model may have been trained before imputation was saved.")
-                            # Fallback: use median imputation (but log warning)
-                            from sklearn.impute import SimpleImputer
-                            fallback_imputer = SimpleImputer(strategy='median')
-                            X = fallback_imputer.fit_transform(X)
-                            self.logger.warning(f"Used fallback imputation for {currency} ({horizon}) - this may cause prediction inconsistencies")
+                            # Check if model requires imputation (RandomForest/ExtraTrees)
+                            # LightGBM handles NaN natively, so it doesn't need imputation
+                            model_requires_imputation = self._model_requires_imputation(artifact)
+                            
+                            if model_requires_imputation:
+                                # If model requires imputation but imputer is missing, we cannot proceed safely
+                                # Fitting imputer on inference data would cause data leakage and inconsistency
+                                raise ValueError(
+                                    f"Imputer required but not found for {currency} ({horizon}). "
+                                    "Model artifacts may be incomplete. Cannot proceed with prediction as fitting "
+                                    "imputer on inference data would cause data leakage."
+                                )
+                            else:
+                                # Model doesn't require imputation (e.g., LightGBM-only ensemble)
+                                # Check if there are NaN values that would cause issues
+                                if np.isnan(X).any():
+                                    self.logger.warning(
+                                        f"NaN values found in features for {currency} ({horizon}), "
+                                        "but model should handle them natively. Proceeding with prediction."
+                                    )
                         
                         scaler = self._load_scaler_from_direct(artifact)
                         model = self._load_model_from_direct(artifact)
@@ -506,7 +618,10 @@ def _select_currencies(
     
     # Get most recent league once (cached per invocation in predictor, but this function is called separately)
     # Note: This is called once per Lambda invocation, so caching here is less critical but still good practice
-    current_league = data_source.get_most_recent_league()
+    current_league = None
+    if hasattr(data_source, '_league_table') and data_source._league_table:
+        from ml.utils.data_sources import get_current_seasonal_league_from_table
+        current_league = get_current_seasonal_league_from_table(data_source._league_table, logger)
     if current_league:
         stats = [stat for stat in stats if stat.league == current_league]
         logger.info("Auto-selected current active seasonal league for currency selection", extra={"league": current_league})

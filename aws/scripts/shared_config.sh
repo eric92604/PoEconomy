@@ -1192,17 +1192,16 @@ DAILY_AGGREGATION_LAMBDA_LOG_GROUP=$DAILY_AGGREGATION_LAMBDA_LOG_GROUP
 PREDICTION_REFRESH_LAMBDA_LOG_GROUP=$PREDICTION_REFRESH_LAMBDA_LOG_GROUP
 
 # Latest Container Images (for reference)
-LATEST_LAMBDA_IMAGE=917891821999.dkr.ecr.us-west-2.amazonaws.com/poeconomy-production-lambda:latest
-LATEST_FEATURE_ENGINEERING_IMAGE=917891821999.dkr.ecr.us-west-2.amazonaws.com/poeconomy-production-feature-engineering:latest
-LATEST_TRAINING_IMAGE=917891821999.dkr.ecr.us-west-2.amazonaws.com/poeconomy-production-training:latest
+LATEST_LAMBDA_IMAGE=${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/poeconomy-${ENVIRONMENT}-lambdas:latest
+LATEST_FEATURE_ENGINEERING_IMAGE=${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/poeconomy-${ENVIRONMENT}-feature-engineering:latest
+LATEST_TRAINING_IMAGE=${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/poeconomy-${ENVIRONMENT}-training:latest
 
 # Environment Metadata
-ENVIRONMENT_NAME=production
-AWS_ACCOUNT_ID=917891821999
+ENVIRONMENT_NAME=${ENVIRONMENT}
+AWS_ACCOUNT_ID=${ACCOUNT_ID}
 EOF
 
   echo "✅ .env file updated successfully"
   echo "Updated .env file contents:"
   cat "$ENV_FILE"
 }
-

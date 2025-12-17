@@ -124,7 +124,9 @@ def main() -> None:
     stats = data_source.list_currency_stats()
     selected_league = args.league
     if selected_league is None:
-        selected_league = data_source.get_most_recent_league()
+        # Use consistent interface method to get most recent league
+        if hasattr(data_source, 'get_most_recent_league'):
+            selected_league = data_source.get_most_recent_league()
         if selected_league:
             logger.info("Auto-selected most recent league", extra={"league": selected_league})
 
