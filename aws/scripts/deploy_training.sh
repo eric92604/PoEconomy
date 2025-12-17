@@ -29,6 +29,7 @@ PARAMS=(
   "EnvironmentName=$ENVIRONMENT"
   "TrainingImageUri=$TRAINING_IMAGE_URI"
   "BaseStackName=$BASE_STACK_NAME"
+  "IngestionStackName=$INGESTION_STACK_NAME"
   "DataLakeBucketName=$DATA_LAKE_BUCKET_NAME"
 )
 

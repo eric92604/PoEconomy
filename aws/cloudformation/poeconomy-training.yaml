@@ -59,6 +59,9 @@ Parameters:
     Type: String
     Default: poeconomy-production-base
     Description: Name of the base infrastructure stack
+  IngestionStackName:
+    Type: String
+    Description: Name of the ingestion stack to import DynamoDB tables from
   DataLakeBucketName:
     Type: String
     Description: Name of the data lake bucket from base stack
@@ -255,6 +258,11 @@ Resources:
             # Data Selection
             - Name: MIN_AVG_VALUE_THRESHOLD
               Value: !Ref MinAvgValueThreshold
+            # DynamoDB Tables
+            - Name: DYNAMO_LEAGUE_METADATA_TABLE
+              Value:
+                Fn::ImportValue:
+                  Fn::Sub: '${IngestionStackName}-LeagueMetadataTable'
           StopTimeout: 60
       Tags:
         - Key: App
@@ -315,6 +323,37 @@ Resources:
                   - logs:PutLogEvents
                   - logs:DescribeLogStreams
                 Resource: '*'
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub 
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeagueMetadataTable}'
+                    - LeagueMetadataTable: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-LeagueMetadataTable'
+                  - !Sub 
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DailyPricesTable}'
+                    - DailyPricesTable: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-DailyPricesTable'
+                  - !Sub 
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DailyPricesTable}/index/league-date-index'
+                    - DailyPricesTable: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-DailyPricesTable'
+                  - !Sub 
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DailyPricesTable}/index/currency-date-index'
+                    - DailyPricesTable: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-DailyPricesTable'
       Tags:
         - Key: Name
           Value: !Sub 'poeconomy-${EnvironmentName}-training-task-role'
