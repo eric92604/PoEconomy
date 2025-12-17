@@ -22,6 +22,7 @@ from ml.config.inference_config import InferenceConfig, get_inference_config_fro
 from ml.utils.data_processing import DataProcessor
 from ml.utils.data_sources import create_data_source, DataSourceConfig, BaseDataSource
 from ml.utils.common_utils import MLLogger
+from ml.utils.feature_engineering import ensure_required_features
 
 HORIZON_SUFFIXES = {"1d", "3d", "7d", "14d", "30d"}
 
@@ -259,9 +260,20 @@ class ModelPredictor:
         # Use cached most recent league (fetched once per Lambda invocation)
         if self._cached_most_recent_league is None:
             try:
-                self._cached_most_recent_league = self.data_source.get_most_recent_league()
-            except Exception:
-                pass
+                # Use get_current_seasonal_league_from_table for DynamoDBDataSource
+                # or get_most_recent_league for S3DataSource
+                if hasattr(self.data_source, '_league_table') and self.data_source._league_table:
+                    from ml.utils.data_sources import get_current_seasonal_league_from_table
+                    self._cached_most_recent_league = get_current_seasonal_league_from_table(
+                        self.data_source._league_table, self.logger
+                    )
+                elif hasattr(self.data_source, 'get_most_recent_league'):
+                    # S3DataSource still has this method
+                    self._cached_most_recent_league = self.data_source.get_most_recent_league()
+                else:
+                    self.logger.warning("Data source does not support getting current league")
+            except Exception as e:
+                self.logger.warning(f"Failed to get current league: {e}")
         
         if self._cached_most_recent_league:
             return self._cached_most_recent_league
@@ -399,7 +411,22 @@ class ModelPredictor:
             else:
                 # Use cached most recent league (fetched once per Lambda invocation)
                 if self._cached_most_recent_league is None:
-                    self._cached_most_recent_league = self.data_source.get_most_recent_league()
+                    try:
+                        # Use get_current_seasonal_league_from_table for DynamoDBDataSource
+                        # or get_most_recent_league for S3DataSource
+                        if hasattr(self.data_source, '_league_table') and self.data_source._league_table:
+                            from ml.utils.data_sources import get_current_seasonal_league_from_table
+                            self._cached_most_recent_league = get_current_seasonal_league_from_table(
+                                self.data_source._league_table, self.logger
+                            )
+                        elif hasattr(self.data_source, 'get_most_recent_league'):
+                            # S3DataSource still has this method
+                            self._cached_most_recent_league = self.data_source.get_most_recent_league()
+                        else:
+                            self.logger.warning("Data source does not support getting current league")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to get current league: {e}")
+                    
                     if self._cached_most_recent_league:
                         self.logger.info(f"Auto-selected most recent league (cached for this invocation): {self._cached_most_recent_league}")
                 
@@ -469,7 +496,12 @@ class ModelPredictor:
         # This handles cases where features like price_log are conditionally created
         # based on data characteristics that may differ between training and inference
         if missing_features:
-            processed_data = self._ensure_required_features(processed_data, missing_features, currency)
+            processed_data = ensure_required_features(
+                processed_data, 
+                stored_feature_names,  # Pass all required features, function will filter
+                currency,
+                logger=self.logger
+            )
             
             # Re-check after attempting to create missing features
             still_missing = []
@@ -503,50 +535,6 @@ class ModelPredictor:
         
         return processed_data, feature_columns
 
-    def _ensure_required_features(
-        self,
-        df: pd.DataFrame,
-        missing_features: List[str],
-        currency: str
-    ) -> pd.DataFrame:
-        """
-        Ensure required features from model metadata are created, even if conditions aren't met.
-        
-        This handles conditional features like price_log that are only created under certain conditions
-        during training (e.g., price_range > threshold), but must be present during inference to match
-        the model's expected features.
-        
-        Args:
-            df: Processed dataframe after feature engineering
-            missing_features: List of feature names that are missing but required by the model
-            currency: Currency identifier for logging
-            
-        Returns:
-            Dataframe with missing features created
-        """
-        df = df.copy()
-        
-        for feat_name in missing_features:
-            try:
-                if feat_name == 'price_log':
-                    # price_log is conditionally created based on price range during training
-                    # During inference, we must create it if it was used during training
-                    if 'price' in df.columns and 'price_log' not in df.columns:
-                        import numpy as np
-                        # Use log1p to match training (handles zero/negative values safely)
-                        # Clip to ensure non-negative values for log
-                        df['price_log'] = np.log1p(df['price'].clip(lower=0))
-                        self.logger.debug(f"Created missing conditional feature: {feat_name} for {currency}")
-                # Add more conditional features here as needed
-                # elif feat_name == 'other_conditional_feature':
-                #     ...
-            except Exception as e:
-                self.logger.warning(
-                    f"Could not create missing feature {feat_name} for {currency}: {e}"
-                )
-                # Continue with other features even if one fails
-        
-        return df
 
     def _extract_feature_matrix(
         self,

@@ -678,5 +678,74 @@ class FeatureEngineer:
                     df[f'volatility_clustering_{window}d'] = df[vol_col].rolling(window=window//2, min_periods=window//4).std()
         
         return df
+
+
+# ------------------------------------------------------------------
+# Shared Feature Utilities
+# ------------------------------------------------------------------
+
+
+def ensure_required_features(
+    df: pd.DataFrame,
+    required_features: List[str],
+    currency: str,
+    logger: Optional[MLLogger] = None
+) -> pd.DataFrame:
+    """
+    Ensure required features are created in a dataframe, even if conditions aren't met.
     
+    This handles conditional features like price_log that are only created under certain
+    conditions during feature engineering (e.g., price_range > threshold), but must be
+    present in validation/inference data to match the training feature set.
+    
+    This is a shared utility used by both training (validation data) and inference pipelines.
+    
+    Args:
+        df: Dataframe after feature engineering
+        required_features: List of feature names that are required (will filter to missing ones)
+        currency: Currency identifier for logging
+        logger: Optional logger instance (creates default if not provided)
+        
+    Returns:
+        Dataframe with missing features created
+    """
+    if logger is None:
+        logger = MLLogger("ensure_required_features")
+    
+    df = df.copy()
+    missing_features = [feat for feat in required_features if feat not in df.columns]
+    
+    if not missing_features:
+        return df
+    
+    logger.debug(
+        f"Missing features in data for {currency}: {missing_features}. "
+        "Creating them to match expected feature set."
+    )
+    
+    for feat_name in missing_features:
+        try:
+            if feat_name == 'price_log':
+                # price_log is conditionally created based on price range during training
+                # During validation/inference, we must create it if it was used during training
+                if 'price' in df.columns:
+                    # Use log1p to match training (handles zero/negative values safely)
+                    # Clip to ensure non-negative values for log
+                    df['price_log'] = np.log1p(df['price'].clip(lower=0))
+                    logger.debug(f"Created missing conditional feature: {feat_name} for {currency}")
+                else:
+                    logger.warning(
+                        f"Cannot create {feat_name} for {currency}: 'price' column not found"
+                    )
+            # Add more conditional features here as needed
+            # elif feat_name == 'other_conditional_feature':
+            #     ...
+        except Exception as e:
+            logger.warning(
+                f"Could not create missing feature {feat_name} for {currency}: {e}"
+            )
+            # Continue with other features even if one fails
+    
+    return df
+
     
