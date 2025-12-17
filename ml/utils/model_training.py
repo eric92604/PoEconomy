@@ -950,19 +950,37 @@ class ModelTrainer:
         if self.logger:
             self.logger.debug(f"Training {model_type} model for {currency}")
         
+        # Use provided validation data from DynamoDB if available, otherwise use train/test split
+        validation_data_source = None
         if X_val is None or y_val is None:
-            raise ValueError(
-                f"Validation data is required for training {currency}. "
-                "Please ensure DynamoDB validation data is available and properly configured."
-            )
-        
-        # Use provided validation data from DynamoDB
-        X_train_split = X  # All historical data for training
-        y_train_split = y
-        # X_val and y_val already provided
-        validation_data_source = 'dynamodb_daily_prices'
-        if self.logger:
-            self.logger.debug(f"Using DynamoDB validation data: {len(X_val)} samples")
+            # No validation data provided - use train/test split from training data
+            if self.logger:
+                self.logger.warning(
+                    f"Validation data not available for {currency}. "
+                    "Using train/test split from training data instead."
+                )
+            
+            # Use 80/20 split for train/validation (maintaining temporal order for time series)
+            split_idx = int(len(X) * 0.8)
+            if split_idx < 10:
+                # If we have very few samples, use at least 10 for training
+                split_idx = max(10, len(X) - 5) if len(X) > 15 else len(X) - 1
+            
+            X_train_split = X[:split_idx]
+            y_train_split = y[:split_idx]
+            X_val = X[split_idx:]
+            y_val = y[split_idx:]
+            validation_data_source = 'train_test_split'
+            
+            if self.logger:
+                self.logger.debug(f"Using train/test split: {len(X_train_split)} training, {len(X_val)} validation samples")
+        else:
+            # Use provided validation data from DynamoDB
+            X_train_split = X  # All historical data for training
+            y_train_split = y
+            validation_data_source = 'dynamodb_daily_prices'
+            if self.logger:
+                self.logger.debug(f"Using DynamoDB validation data: {len(X_val)} samples")
         
         # Scale features if needed
         scaler = None

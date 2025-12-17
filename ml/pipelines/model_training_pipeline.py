@@ -78,17 +78,21 @@ class ModelTrainingPipeline:
         self.data_source = create_s3_data_source(s3_config, self.logger)
         self.logger.info(f"Using S3 data source for processed data from bucket: {data_lake_bucket}")
         
-        # Initialize DynamoDB data source for validation data (if needed)
+        # Initialize DynamoDB data source for validation data (required)
         self.dynamo_data_source = None
-        if config.data.use_current_league_validation:
-            try:
-                from ml.utils.data_sources import create_data_source, DataSourceConfig
-                dynamo_config_obj = DataSourceConfig.from_dynamo_config(config.dynamo)
-                self.dynamo_data_source = create_data_source(dynamo_config_obj, self.logger)
-                self.logger.info("Initialized DynamoDB data source for validation data")
-            except Exception as e:
-                self.logger.error(f"Failed to initialize DynamoDB data source for validation: {e}")
-                self.logger.error("Validation data is required. Training will fail if validation data cannot be fetched.")
+        try:
+            from ml.utils.data_sources import create_data_source, DataSourceConfig
+            dynamo_config_obj = DataSourceConfig.from_dynamo_config(config.dynamo)
+            self.dynamo_data_source = create_data_source(dynamo_config_obj, self.logger)
+            self.logger.info("Initialized DynamoDB data source for validation data")
+        except Exception as e:
+            error_msg = (
+                f"Failed to initialize DynamoDB data source for validation: {e}. "
+                "Validation data is required for training. Please check your DynamoDB configuration "
+                "and ensure the tables are accessible."
+            )
+            self.logger.error(error_msg)
+            raise RuntimeError(error_msg) from e
         
         # Initialize data processor for processing validation data
         from ml.utils.data_processing import DataProcessor
@@ -333,64 +337,93 @@ class ModelTrainingPipeline:
             'processed_data_path': processed_data_path
         }
         
+        executor = None
         try:
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                # Submit training tasks with timeout
-                future_to_currency = {
-                    executor.submit(
-                        self._train_currency_worker,
-                        currency,
-                        shared_data
-                    ): currency for currency in target_currencies
-                }
+            executor = ProcessPoolExecutor(max_workers=max_workers)
+            # Submit training tasks
+            future_to_currency = {
+                executor.submit(
+                    self._train_currency_worker,
+                    currency,
+                    shared_data
+                ): currency for currency in target_currencies
+            }
+            
+            self.logger.info(f"Submitted {len(future_to_currency)} training tasks to process pool")
+            
+            # Collect results
+            completed_count = 0
+            total_tasks = len(future_to_currency)
+            
+            for future in as_completed(future_to_currency):
+                currency = future_to_currency[future]
+                currency_name = currency.get('get_currency', 'Unknown')
+                completed_count += 1
                 
-                # Collect results
-                for future in as_completed(future_to_currency):
-                    currency = future_to_currency[future]
-                    currency_name = currency.get('get_currency', 'Unknown')
-                    
-                    try:
-                        result = future.result()
-                        if result:
-                            self.results.append(result)
-                            self.processing_stats['successful_training'] += 1
-                            
-                            # Log detailed completion statistics for parallel training
-                            self._log_currency_completion_stats(currency_name, result)
-                            
-                            # Upload models for this currency immediately after training
-                            try:
-                                self._upload_currency_models(currency_name, result)
-                            except Exception as upload_error:
-                                # Log error but don't fail the training
-                                self.logger.warning(f"Failed to upload models for {currency_name}: {upload_error}")
-                        else:
-                            self.processing_stats['failed_training'] += 1
-                            self.logger.warning(f"❌ {currency_name}: Training returned None")
-                    
-                    except Exception as e:
-                        error_msg = str(e)
-                        if "process pool was terminated" in error_msg:
-                            self.logger.error(f"💥 {currency_name}: Process pool terminated - likely due to resource exhaustion")
-                        else:
-                            self.logger.error(f"💥 {currency_name}: Training crashed - {error_msg}")
+                try:
+                    result = future.result()
+                    if result:
+                        self.results.append(result)
+                        self.processing_stats['successful_training'] += 1
                         
-                        self.failed_currencies.append({
-                            'currency': currency,
-                            'error': error_msg,
-                            'timestamp': datetime.now().isoformat()
-                        })
+                        # Log detailed completion statistics for parallel training
+                        self._log_currency_completion_stats(currency_name, result)
+                        
+                        # Upload models for this currency immediately after training
+                        try:
+                            self._upload_currency_models(currency_name, result)
+                        except Exception as upload_error:
+                            # Log error but don't fail the training
+                            self.logger.warning(f"Failed to upload models for {currency_name}: {upload_error}")
+                    else:
                         self.processing_stats['failed_training'] += 1
+                        self.logger.warning(f"❌ {currency_name}: Training returned None")
+                
+                except Exception as e:
+                    error_msg = str(e)
+                    if "process pool was terminated" in error_msg:
+                        self.logger.error(f"💥 {currency_name}: Process pool terminated - likely due to resource exhaustion")
+                    else:
+                        self.logger.error(f"💥 {currency_name}: Training crashed - {error_msg}")
                     
-                    finally:
-                        progress.update()
+                    self.failed_currencies.append({
+                        'currency': currency,
+                        'error': error_msg,
+                        'timestamp': datetime.now().isoformat()
+                    })
+                    self.processing_stats['failed_training'] += 1
+                
+                finally:
+                    progress.update()
+                    if completed_count % 10 == 0 or completed_count == total_tasks:
+                        self.logger.debug(f"Completed {completed_count}/{total_tasks} currencies")
+            
+            # All futures have completed - verify this
+            remaining_futures = [f for f in future_to_currency.keys() if not f.done()]
+            if remaining_futures:
+                self.logger.warning(f"Warning: {len(remaining_futures)} futures still pending after as_completed loop")
+            else:
+                self.logger.info(f"All {completed_count} training tasks completed successfully")
                         
         except Exception as e:
             self.logger.error(f"💥 Process pool executor failed: {str(e)}")
             # Cancel remaining futures
-            for future in future_to_currency:
-                future.cancel()
+            if executor and 'future_to_currency' in locals():
+                for future in future_to_currency:
+                    if not future.done():
+                        future.cancel()
         finally:
+            # Explicitly shutdown executor - use wait=False to prevent hanging on stuck processes
+            # All futures should already be done at this point
+            if executor:
+                try:
+                    self.logger.debug("Shutting down ProcessPoolExecutor...")
+                    # Shutdown without waiting - all futures should already be done
+                    executor.shutdown(wait=False)
+                    self.logger.debug("ProcessPoolExecutor shutdown completed")
+                except Exception as shutdown_error:
+                    self.logger.warning(f"Error during executor shutdown: {shutdown_error}")
+            
             # Clean up temporary file
             if processed_data_path and os.path.exists(processed_data_path):
                 try:
@@ -828,11 +861,34 @@ class ModelTrainingPipeline:
             validation_targets = None
             current_league = None
             
-            if self.config.data.use_current_league_validation:
-                try:
+            try:
+                # Check if DynamoDB data source is available (optional for validation data)
+                if not self.dynamo_data_source:
+                    warning_msg = (
+                        f"DynamoDB data source is not available for {currency_name}. "
+                        "Training will continue without validation data. "
+                        "Please check your DynamoDB configuration if validation metrics are needed."
+                    )
+                    self.logger.warning(warning_msg)
+                    self.processing_stats['validation_failures'] += 1
+                    validation_features = None
+                    validation_targets = None
+                else:
                     # Get current active league
-                    if self.dynamo_data_source:
-                        current_league = self.dynamo_data_source.get_most_recent_league()
+                    if hasattr(self.dynamo_data_source, '_league_table') and self.dynamo_data_source._league_table:
+                        from ml.utils.data_sources import get_current_seasonal_league_from_table
+                        current_league = get_current_seasonal_league_from_table(self.dynamo_data_source._league_table, self.logger)
+                    else:
+                        warning_msg = (
+                            f"League metadata table is not available for {currency_name}. "
+                            "Training will continue without validation data. "
+                            "Please ensure the league_metadata_table is configured if validation metrics are needed."
+                        )
+                        self.logger.warning(warning_msg)
+                        self.processing_stats['validation_failures'] += 1
+                        validation_features = None
+                        validation_targets = None
+                        current_league = None
                     
                     if current_league:
                         self.logger.info(f"Fetching validation data from current league: {current_league}")
@@ -859,17 +915,30 @@ class ModelTrainingPipeline:
                             
                             self.logger.info(f"Validation data ready: {len(validation_features)} samples with {len(feature_columns)} features")
                         else:
-                            self.logger.error(f"Could not fetch validation data for {currency_name}")
+                            warning_msg = (
+                                f"Could not fetch validation data for {currency_name} from league {current_league}. "
+                                "Training will continue without validation data."
+                            )
+                            self.logger.warning(warning_msg)
                             self.processing_stats['validation_failures'] += 1
-                            return None
+                            validation_features = None
+                            validation_targets = None
                     else:
-                        self.logger.error(f"No current league found for {currency_name}")
+                        warning_msg = (
+                            f"No current league found for {currency_name}. "
+                            "Training will continue without validation data. "
+                            "Please ensure the league metadata table contains an active seasonal league if validation metrics are needed."
+                        )
+                        self.logger.warning(warning_msg)
                         self.processing_stats['validation_failures'] += 1
-                        return None
-                except Exception as e:
-                    self.logger.error(f"Error fetching validation data for {currency_name}: {e}")
-                    self.processing_stats['validation_failures'] += 1
-                    return None
+                        validation_features = None
+                        validation_targets = None
+            except Exception as e:
+                warning_msg = f"Error fetching validation data for {currency_name}: {e}. Training will continue without validation data."
+                self.logger.warning(warning_msg, exception=e)
+                self.processing_stats['validation_failures'] += 1
+                validation_features = None
+                validation_targets = None
 
             # Train model(s) for different prediction horizons
             if isinstance(target_column, list) and len(target_column) > 1:
@@ -934,35 +1003,35 @@ class ModelTrainingPipeline:
                         self.logger.warning(f"Insufficient data for {currency_name} {horizon} horizon: {len(X_horizon)} samples (need at least 10)")
                         continue
                     
-                    # Prepare validation data for this horizon
-                    if validation_features is None or validation_targets is None:
-                        self.logger.error(f"Validation data not available for {currency_name} {horizon} horizon. Skipping training.")
-                        continue
+                    # Prepare validation data for this horizon (optional - will use train/test split if not available)
+                    X_val_horizon = None
+                    y_val_horizon = None
                     
-                    try:
-                        # Extract validation target for this horizon
-                        if target_col not in validation_targets.columns:
-                            self.logger.error(f"Target column {target_col} not found in validation data for {horizon} horizon")
-                            continue
-                        
-                        y_val_horizon_raw = validation_targets[target_col].values
-                        
-                        # Filter out NaN targets
-                        target_valid_mask_val = ~pd.isna(y_val_horizon_raw)
-                        X_val_horizon = validation_features[target_valid_mask_val]
-                        y_val_horizon = y_val_horizon_raw[target_valid_mask_val]
-                        
-                        if len(X_val_horizon) == 0:
-                            self.logger.error(f"No valid validation samples for {horizon} horizon")
-                            continue
-                        
-                        self.logger.debug(f"Using {len(X_val_horizon)} validation samples for {horizon} horizon")
-                        
-                    except Exception as e:
-                        self.logger.error(f"Error preparing validation data for {horizon} horizon: {e}")
-                        continue
+                    if validation_features is not None and validation_targets is not None:
+                        try:
+                            # Extract validation target for this horizon
+                            if target_col in validation_targets.columns:
+                                y_val_horizon_raw = validation_targets[target_col].values
+                                
+                                # Filter out NaN targets
+                                target_valid_mask_val = ~pd.isna(y_val_horizon_raw)
+                                X_val_horizon = validation_features[target_valid_mask_val]
+                                y_val_horizon = y_val_horizon_raw[target_valid_mask_val]
+                                
+                                if len(X_val_horizon) == 0:
+                                    self.logger.warning(f"No valid validation samples for {horizon} horizon. Using train/test split instead.")
+                                    X_val_horizon = None
+                                    y_val_horizon = None
+                                else:
+                                    self.logger.debug(f"Using {len(X_val_horizon)} validation samples for {horizon} horizon")
+                            else:
+                                self.logger.warning(f"Target column {target_col} not found in validation data for {horizon} horizon. Using train/test split instead.")
+                        except Exception as e:
+                            self.logger.warning(f"Error preparing validation data for {horizon} horizon: {e}. Using train/test split instead.")
+                    else:
+                        self.logger.warning(f"Validation data not available for {currency_name} {horizon} horizon. Using train/test split instead.")
                     
-                    # Train model for this horizon
+                    # Train model for this horizon (validation data is optional - will use train/test split if not provided)
                     training_result = self.model_trainer.train_single_model(
                         X_horizon, y_horizon, f"{currency_name}_{horizon}", 
                         target_names=[target_col],
@@ -1045,11 +1114,38 @@ class ModelTrainingPipeline:
                     self.processing_stats['insufficient_data'] += 1
                     return None
                 
-                # Train single model
+                # Prepare validation data for single-horizon training if available
+                X_val_single = None
+                y_val_single = None
+                if validation_features is not None and validation_targets is not None:
+                    try:
+                        # Extract validation target for this horizon
+                        if target_col in validation_targets.columns:
+                            y_val_single_raw = validation_targets[target_col].values
+                            
+                            # Filter out NaN targets
+                            target_valid_mask_val = ~pd.isna(y_val_single_raw)
+                            X_val_single = validation_features[target_valid_mask_val]
+                            y_val_single = y_val_single_raw[target_valid_mask_val]
+                            
+                            if len(X_val_single) == 0:
+                                self.logger.warning(f"No valid validation samples for {currency_name} {horizon} horizon. Using train/test split instead.")
+                                X_val_single = None
+                                y_val_single = None
+                            else:
+                                self.logger.debug(f"Using {len(X_val_single)} validation samples for {currency_name} {horizon} horizon")
+                        else:
+                            self.logger.warning(f"Target column {target_col} not found in validation data. Using train/test split instead.")
+                    except Exception as e:
+                        self.logger.warning(f"Error preparing validation data for {currency_name} {horizon}: {e}. Using train/test split instead.")
+                
+                # Train single model (validation data is optional - will use train/test split if not provided)
                 training_result = self.model_trainer.train_single_model(
                     X_filtered, y_filtered, currency_name, 
                     target_names=[target_col],
-                    feature_names=feature_columns
+                    feature_names=feature_columns,
+                    X_val=X_val_single,
+                    y_val=y_val_single
                 )
                 
                 if training_result is None:
