@@ -211,8 +211,8 @@ export const InvestmentCurrencyTable = memo(function InvestmentCurrencyTable({
                                                null;
 
                       if (predictionWithRange) {
-                        // Clamp negative values to 0 (shouldn't happen with ensemble range, but handle old data)
-                        const lower = Math.max(0, predictionWithRange.prediction_lower ?? 0);
+                        // Clamp negative values to 0.01
+                        const lower = Math.max(0.01, predictionWithRange.prediction_lower ?? 0.01);
                         const upper = Math.max(lower, predictionWithRange.prediction_upper ?? 0);
                         
                         return (
