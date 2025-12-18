@@ -441,8 +441,9 @@ class DirectModelPredictor(ModelPredictor):
                         latest_features = X[-1].reshape(1, -1)
                         
                         # Make prediction with uncertainty using ensemble spread
+                        # Use 60% confidence for narrower, more practical prediction ranges
                         prediction_value, lower, upper = self._compute_interval_from_ensemble(
-                            model, latest_features, confidence_level=0.95
+                            model, latest_features, confidence_level=0.60
                         )
                         
                         # Validate prediction value

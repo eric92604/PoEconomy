@@ -553,7 +553,7 @@ class EnsembleModel:
     def predict_with_uncertainty(
         self, 
         X: np.ndarray, 
-        confidence_level: float = 0.95
+        confidence_level: float = 0.60
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Make ensemble predictions with uncertainty estimates using ensemble spread.
@@ -563,7 +563,7 @@ class EnsembleModel:
         
         Args:
             X: Input features
-            confidence_level: Confidence level for prediction intervals (default 0.95)
+            confidence_level: Confidence level for prediction intervals (default 0.80 for narrower ranges)
         
         Returns:
             Tuple of (mean_prediction, lower_bound, upper_bound)
