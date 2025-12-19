@@ -49,8 +49,8 @@ export default function InvestmentsPage() {
   });
 
   // Fetch data
-  const { data: currenciesData, isLoading: currenciesLoading } = useCurrencies();
-  const { data: leaguesData, isLoading: leaguesLoading } = useLeagues();
+  const { data: currenciesData, isLoading: currenciesLoading, isFetching: currenciesFetching } = useCurrencies();
+  const { data: leaguesData, isLoading: leaguesLoading, isFetching: leaguesFetching } = useLeagues();
 
   // Preload all currency icons when data is available
   useEffect(() => {
@@ -76,7 +76,7 @@ export default function InvestmentsPage() {
 
   // Fetch latest predictions using the optimized endpoint
   // Load all currencies with all horizons for comprehensive investment analysis
-  const { data: predictionsData, isLoading: predictionsLoading } = useLatestPredictions({
+  const { data: predictionsData, isLoading: predictionsLoading, isFetching: predictionsFetching } = useLatestPredictions({
     league: selectedLeague || undefined,
     horizons: ["1d", "3d", "7d"], // All horizons for investment analysis
     limit: 500, // Increase limit to get more currencies
@@ -285,6 +285,9 @@ export default function InvestmentsPage() {
   }, [currenciesWithPredictions, selectedTab, filters]);
 
   const isLoading = currenciesLoading || leaguesLoading || predictionsLoading;
+  const isFetching = currenciesFetching || leaguesFetching || predictionsFetching;
+  // Show loading state during both initial load and refresh
+  const showLoading = isLoading || isFetching;
 
   return (
     <div className="py-8 space-y-8">
@@ -301,8 +304,9 @@ export default function InvestmentsPage() {
           variant="outline"
           size="sm"
           className="flex items-center gap-2"
+          disabled={isFetching}
         >
-          <RefreshCw className="h-4 w-4" />
+          <RefreshCw className={`h-4 w-4 ${isFetching ? "animate-spin" : ""}`} />
           Refresh
         </Button>
       </div>
@@ -315,7 +319,7 @@ export default function InvestmentsPage() {
             <Clock className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            {isLoading ? (
+            {showLoading ? (
               <div className="text-2xl font-bold">-</div>
             ) : (
               <div className="text-2xl font-bold">
@@ -337,7 +341,7 @@ export default function InvestmentsPage() {
             <Target className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            {isLoading ? (
+            {showLoading ? (
               <div className="text-2xl font-bold">-</div>
             ) : (
               <div className="text-2xl font-bold">
@@ -359,7 +363,7 @@ export default function InvestmentsPage() {
             <TrendingUp className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            {isLoading ? (
+            {showLoading ? (
               <div className="text-2xl font-bold">-</div>
             ) : (
               <div className="text-2xl font-bold">
@@ -534,7 +538,7 @@ export default function InvestmentsPage() {
               {filteredCurrencies.length} currencies
             </Badge>
           </div>
-          {isLoading ? (
+          {showLoading ? (
             <CurrencyTableSkeleton />
           ) : (
             <InvestmentCurrencyTable 
@@ -568,7 +572,7 @@ export default function InvestmentsPage() {
               {filteredCurrencies.length} opportunities
             </Badge>
           </div>
-          {isLoading ? (
+          {showLoading ? (
             <CurrencyTableSkeleton />
           ) : (
             <InvestmentCurrencyTable 
@@ -602,7 +606,7 @@ export default function InvestmentsPage() {
               {filteredCurrencies.length} opportunities
             </Badge>
           </div>
-          {isLoading ? (
+          {showLoading ? (
             <CurrencyTableSkeleton />
           ) : (
             <InvestmentCurrencyTable 

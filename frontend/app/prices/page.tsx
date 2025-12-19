@@ -53,8 +53,8 @@ export default function PricesPage() {
   });
 
   // Fetch leagues and currencies
-  const { data: leaguesData, isLoading: leaguesLoading } = useLeagues();
-  const { data: currenciesData, isLoading: currenciesLoading } = useCurrencies();
+  const { data: leaguesData, isLoading: leaguesLoading, isFetching: leaguesFetching } = useLeagues();
+  const { data: currenciesData, isLoading: currenciesLoading, isFetching: currenciesFetching } = useCurrencies();
 
   // Get available leagues
   const leagues = useMemo(() => {
@@ -72,7 +72,7 @@ export default function PricesPage() {
   }, [leagues, selectedLeague]);
 
   // Fetch all latest predictions for the league to get list of currencies with predictions
-  const { data: latestPredictionsData, isLoading: latestPredictionsLoading } = useLatestPredictions(
+  const { data: latestPredictionsData, isLoading: latestPredictionsLoading, isFetching: latestPredictionsFetching } = useLatestPredictions(
     {
       league: selectedLeague,
       horizons: ["1d"],
@@ -82,7 +82,7 @@ export default function PricesPage() {
   );
 
   // Fetch predictions for the selected currency only (1d, 3d, 7d)
-  const { data: batchPredictionsData, isLoading: predictionsLoading } = useBatchPredictions(
+  const { data: batchPredictionsData, isLoading: predictionsLoading, isFetching: predictionsFetching } = useBatchPredictions(
     {
       requests: [
         { currency: selectedCurrency, league: selectedLeague, horizon: "1d" },
@@ -94,7 +94,7 @@ export default function PricesPage() {
   );
 
   // Fetch historical prices for the selected currency (no date filtering - get all available data)
-  const { data: historicalData, isLoading: historicalLoading } = useHistoricalPrices(
+  const { data: historicalData, isLoading: historicalLoading, isFetching: historicalFetching } = useHistoricalPrices(
     {
       currency: selectedCurrency,
       league: selectedLeague,
@@ -240,7 +240,12 @@ export default function PricesPage() {
   };
 
   const isLoading = leaguesLoading || latestPredictionsLoading;
+  const isFetching = leaguesFetching || latestPredictionsFetching;
   const isChartLoading = historicalLoading || predictionsLoading;
+  const isChartFetching = historicalFetching || predictionsFetching;
+  // Show loading state during both initial load and refresh
+  const showLoading = isLoading || isFetching;
+  const showChartLoading = isChartLoading || isChartFetching;
 
   return (
     <div className="py-8 space-y-8">
@@ -254,8 +259,9 @@ export default function PricesPage() {
           variant="outline"
           size="sm"
           className="flex items-center gap-2"
+          disabled={isFetching}
         >
-          <RefreshCw className="h-4 w-4" />
+          <RefreshCw className={`h-4 w-4 ${isFetching ? "animate-spin" : ""}`} />
           Refresh
         </Button>
       </div>
@@ -409,7 +415,7 @@ export default function PricesPage() {
         {/* Right Content - Interactive Chart */}
         <div className="flex-1">
           <PriceChart
-            data={isChartLoading ? [] : chartData}
+            data={showChartLoading ? [] : chartData}
             currencyName={selectedCurrency}
             timeRange="30d"
             showPredictionBands={true}

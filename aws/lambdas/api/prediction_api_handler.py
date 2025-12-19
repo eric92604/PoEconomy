@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import time
 from dataclasses import dataclass
@@ -20,26 +19,16 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 from boto3.dynamodb.conditions import Key
 
-class AppEnvironment:
-    def __init__(self):
-        self.region_name = os.getenv("AWS_DEFAULT_REGION", "us-west-2")
-        self.currency_metadata_table = os.getenv("DYNAMO_CURRENCY_METADATA_TABLE")
-        self.live_prices_table = os.getenv("DYNAMO_CURRENCY_PRICES_TABLE")
-        self.predictions_table = os.getenv("DYNAMO_PREDICTIONS_TABLE")
-        self.league_metadata_table = os.getenv("DYNAMO_LEAGUE_METADATA_TABLE")
-        self.daily_prices_table = os.getenv("DAILY_PRICES_TABLE")
+from ml.utils.common_utils import setup_standard_logging
+from ..config import AppEnvironment, load_environment
 
-def load_environment() -> AppEnvironment:
-    return AppEnvironment()
-
-# Simple logging setup
-LOGGER = logging.getLogger("MinimalAPIHandler")
-LOGGER.setLevel(logging.INFO)
-if not LOGGER.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    LOGGER.addHandler(handler)
+# Set up standardized logging
+LOGGER = setup_standard_logging(
+    name="PredictionAPIHandler",
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    console_output=True,
+    suppress_external=True
+)
 
 _APP_ENV: Optional[AppEnvironment] = None
 _DYNAMO_RESOURCE = None
@@ -457,8 +446,8 @@ def _get_available_currencies(league: str) -> List[str]:
         ]
 
 
-def _format_prediction_item(item: Dict[str, Any], currency: str, league: str, horizon: str) -> Dict[str, Any]:
-    """Format a prediction item for consistent API response."""
+def _parse_prediction_data_from_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract prediction data from DynamoDB item, handling both old and new formats."""
     # Handle both old and new data formats
     if "prediction_data" in item:
         # Old format: prediction_data field contains JSON (legacy support)
@@ -483,7 +472,17 @@ def _format_prediction_item(item: Dict[str, Any], currency: str, league: str, ho
             "prediction_upper": float(item.get("prediction_upper", 0)) if item.get("prediction_upper") else None,
             "features_used": item.get("features_used", []),
         }
-    
+    return prediction_dict
+
+
+def _normalize_prediction_dict(
+    prediction_dict: Dict[str, Any],
+    item: Dict[str, Any],
+    currency: str,
+    league: str,
+    horizon: str
+) -> Dict[str, Any]:
+    """Normalize prediction dictionary with common fields, timestamps, and validation."""
     # Set common fields and ensure frontend compatibility
     prediction_dict.update({
         "currency": currency,
@@ -535,6 +534,12 @@ def _format_prediction_item(item: Dict[str, Any], currency: str, league: str, ho
     return prediction_dict
 
 
+def _format_prediction_item(item: Dict[str, Any], currency: str, league: str, horizon: str) -> Dict[str, Any]:
+    """Format a prediction item for consistent API response."""
+    prediction_dict = _parse_prediction_data_from_item(item)
+    return _normalize_prediction_dict(prediction_dict, item, currency, league, horizon)
+
+
 def _fetch_cached_prediction(currency: str, league: Optional[str], horizon: str) -> Optional[Dict[str, Any]]:
     """Fetch a cached prediction from DynamoDB."""
     assert _PREDICTIONS_TABLE is not None
@@ -568,78 +573,9 @@ def _fetch_cached_prediction(currency: str, league: Optional[str], horizon: str)
     
     item = items[0]  # Get the most recent prediction
     
-    # Handle both old and new data formats
-    if "prediction_data" in item:
-        # Old format: prediction_data field contains JSON
-        payload = item.get("prediction_data")
-        if isinstance(payload, str):
-            try:
-                payload_dict = json.loads(payload)
-            except json.JSONDecodeError:
-                payload_dict = {}
-        elif isinstance(payload, dict):
-            payload_dict = payload
-        else:
-            payload_dict = {}
-    else:
-        # New format: prediction data is stored directly in item fields
-        payload_dict = {
-            "predicted_price": float(item.get("predicted_price", 0)) if item.get("predicted_price") else None,
-            "current_price": float(item.get("current_price", 0)) if item.get("current_price") else None,
-            "price_change_percent": float(item.get("price_change_percent", 0)) if item.get("price_change_percent") else None,
-            "confidence_score": float(item.get("confidence_score", 0)) if item.get("confidence_score") else None,
-            "prediction_lower": float(item.get("prediction_lower", 0)) if item.get("prediction_lower") else None,
-            "prediction_upper": float(item.get("prediction_upper", 0)) if item.get("prediction_upper") else None,
-            "features_used": item.get("features_used", []),
-        }
-    
-    # Set common fields and ensure frontend compatibility
-    payload_dict.setdefault("currency", currency)
-    payload_dict.setdefault("league", league_value)
-    payload_dict.setdefault("horizon", horizon)
-    payload_dict["source"] = "cache"
-    
-    # Convert timestamp to string format expected by frontend
-    timestamp = item.get("prediction_timestamp", item.get("created_at", ""))
-    if isinstance(timestamp, (int, float, Decimal)):
-        # Convert Unix timestamp to ISO string (handle Decimal from DynamoDB)
-        import datetime
-        timestamp_value = float(timestamp) if isinstance(timestamp, Decimal) else timestamp
-        payload_dict["timestamp"] = datetime.datetime.fromtimestamp(timestamp_value, tz=datetime.timezone.utc).isoformat()
-    else:
-        payload_dict["timestamp"] = str(timestamp) if timestamp else ""
-    
-    # Calculate price_change if not present
-    if "price_change" not in payload_dict:
-        current_price = payload_dict.get("current_price", 0)
-        predicted_price = payload_dict.get("predicted_price", 0)
-        if current_price and predicted_price:
-            payload_dict["price_change"] = predicted_price - current_price
-        else:
-            payload_dict["price_change"] = 0
-    
-    # Ensure confidence field name matches frontend expectation
-    if "confidence_score" in payload_dict and "confidence" not in payload_dict:
-        payload_dict["confidence"] = payload_dict["confidence_score"]
-    
-    # Validate and clamp prediction bounds to ensure they're reasonable
-    # Clamp negative values to 0 (shouldn't happen with ensemble range, but handle old data)
-    if payload_dict.get("prediction_lower") is not None:
-        payload_dict["prediction_lower"] = max(0.0, float(payload_dict["prediction_lower"]))
-    if payload_dict.get("prediction_upper") is not None:
-        payload_dict["prediction_upper"] = max(0.0, float(payload_dict["prediction_upper"]))
-    
-    # Ensure upper >= lower (fix any data inconsistencies)
-    if (payload_dict.get("prediction_lower") is not None and 
-        payload_dict.get("prediction_upper") is not None):
-        if payload_dict["prediction_upper"] < payload_dict["prediction_lower"]:
-            # If upper < lower, swap them or set upper = lower
-            payload_dict["prediction_upper"] = max(
-                payload_dict["prediction_lower"], 
-                payload_dict["prediction_upper"]
-            )
-    
-    return payload_dict
+    # Use shared formatting logic
+    prediction_dict = _parse_prediction_data_from_item(item)
+    return _normalize_prediction_dict(prediction_dict, item, currency, league_value, horizon)
 
 
 def _infer_latest_league(currency: str) -> Optional[str]:
@@ -803,7 +739,7 @@ def _fetch_historical_prices_from_db(
     limit: int = 1000
 ) -> Dict[str, Any]:
     """Fetch historical daily prices from DynamoDB."""
-    # Get the daily prices table name from environment
+    # Get the daily prices table name from environment (not in shared AppEnvironment)
     daily_prices_table_name = os.getenv("DAILY_PRICES_TABLE", "poeconomy-daily-prices")
     
     try:

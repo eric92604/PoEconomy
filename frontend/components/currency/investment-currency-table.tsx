@@ -85,8 +85,8 @@ export const InvestmentCurrencyTable = memo(function InvestmentCurrencyTable({
   }, []);
 
   // Get confidence variant
-  const getConfidenceVariant = useCallback((confidence: number): "default" | "secondary" | "destructive" => {
-    if (confidence >= 0.8) return "default";
+  const getConfidenceVariant = useCallback((confidence: number): "success" | "secondary" | "destructive" => {
+    if (confidence >= 0.8) return "success";
     if (confidence >= 0.6) return "secondary";
     return "destructive";
   }, []);
@@ -211,8 +211,8 @@ export const InvestmentCurrencyTable = memo(function InvestmentCurrencyTable({
                                                null;
 
                       if (predictionWithRange) {
-                        // Clamp negative values to 0 (shouldn't happen with ensemble range, but handle old data)
-                        const lower = Math.max(0, predictionWithRange.prediction_lower ?? 0);
+                        // Clamp negative values to 0.01
+                        const lower = Math.max(0.01, predictionWithRange.prediction_lower ?? 0.01);
                         const upper = Math.max(lower, predictionWithRange.prediction_upper ?? 0);
                         
                         return (

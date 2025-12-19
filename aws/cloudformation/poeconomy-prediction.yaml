@@ -165,8 +165,8 @@ Resources:
         ImageUri: !Ref LambdaImageUri
       ImageConfig:
         Command: ["lambda.prediction.prediction_refresh_handler.lambda_handler"]
-      Timeout: 300
-      MemorySize: 1024
+      Timeout: 900
+      MemorySize: 3008
       DeadLetterConfig:
         TargetArn: !GetAtt PredictionRefreshDLQ.Arn
       Environment:

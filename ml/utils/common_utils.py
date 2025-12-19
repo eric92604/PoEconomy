@@ -476,7 +476,8 @@ def setup_ml_logging(
     log_dir: Optional[str] = None,
     experiment_id: Optional[str] = None,
     console_output: bool = True,
-    suppress_external: bool = True
+    suppress_external: bool = True,
+    file_logging: bool = True
 ) -> MLLogger:
     """
     Setup ML logging with best practices.
@@ -494,6 +495,7 @@ def setup_ml_logging(
         experiment_id: Experiment ID for log file naming
         console_output: Whether to output to console
         suppress_external: Whether to suppress external library logs
+        file_logging: Whether to enable file logging (respects DISABLE_FILE_LOGGING env var)
         
     Returns:
         Configured MLLogger instance with structured logging capabilities
@@ -503,12 +505,13 @@ def setup_ml_logging(
             name="ModelTrainer",
             level="INFO",
             log_dir="/path/to/logs",
-            experiment_id="exp_001"
+            experiment_id="exp_001",
+            file_logging=True
         )
     """
-    # Setup log file path
+    # Setup log file path only if file logging is enabled
     log_file = None
-    if log_dir:
+    if file_logging and log_dir:
         log_dir_path = Path(log_dir)
         log_dir_path.mkdir(parents=True, exist_ok=True)
         

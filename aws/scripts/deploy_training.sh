@@ -22,21 +22,28 @@ build_and_push_training_image
 
 # Deploy training infrastructure
 echo "Deploying training infrastructure..."
-deploy_cloudformation_stack "$TRAINING_STACK_NAME" "$TRAINING_TEMPLATE" \
-  "EnvironmentName=$ENVIRONMENT" \
-  "TrainingImageUri=$TRAINING_IMAGE_URI" \
-  "TaskTimeoutMinutes=$TASK_TIMEOUT_MINUTES" \
-  "MaxCurrenciesToTrain=$MAX_CURRENCIES_TO_TRAIN" \
-  "BaseStackName=$BASE_STACK_NAME" \
-  "DataLakeBucketName=$DATA_LAKE_BUCKET_NAME" \
-  "NHyperparameterTrials=${N_HYPERPARAMETER_TRIALS:-50}" \
-  "NModelTrials=${N_MODEL_TRIALS:-100}" \
-  "CVFolds=${CV_FOLDS:-5}" \
-  "MaxDepth=${MAX_DEPTH:-6}" \
-  "LearningRate=${LEARNING_RATE:-0.1}" \
-  "MaxOptunaWorkers=${MAX_OPTUNA_WORKERS:-2}" \
-  "ModelNJobs=${MODEL_N_JOBS:-2}" \
-  "MinAvgValueThreshold=${MIN_AVG_VALUE_THRESHOLD:-5.0}"
+
+# Build parameter list - only include parameters if explicitly set
+# Required parameters (no defaults in CloudFormation) are always included
+PARAMS=(
+  "EnvironmentName=$ENVIRONMENT"
+  "TrainingImageUri=$TRAINING_IMAGE_URI"
+  "BaseStackName=$BASE_STACK_NAME"
+  "IngestionStackName=$INGESTION_STACK_NAME"
+  "DataLakeBucketName=$DATA_LAKE_BUCKET_NAME"
+)
+
+# Only add optional parameters if environment variables are explicitly set
+# This allows CloudFormation template defaults to be used when not specified
+[[ -n "${TASK_TIMEOUT_MINUTES:-}" ]] && PARAMS+=("TaskTimeoutMinutes=$TASK_TIMEOUT_MINUTES")
+[[ -n "${MAX_CURRENCIES_TO_TRAIN:-}" ]] && PARAMS+=("MaxCurrenciesToTrain=$MAX_CURRENCIES_TO_TRAIN")
+[[ -n "${N_HYPERPARAMETER_TRIALS:-}" ]] && PARAMS+=("NHyperparameterTrials=$N_HYPERPARAMETER_TRIALS")
+[[ -n "${N_MODEL_TRIALS:-}" ]] && PARAMS+=("NModelTrials=$N_MODEL_TRIALS")
+[[ -n "${CV_FOLDS:-}" ]] && PARAMS+=("CVFolds=$CV_FOLDS")
+[[ -n "${MAX_CURRENCY_WORKERS:-}" ]] && PARAMS+=("MaxCurrencyWorkers=$MAX_CURRENCY_WORKERS")
+[[ -n "${MIN_AVG_VALUE_THRESHOLD:-}" ]] && PARAMS+=("MinAvgValueThreshold=$MIN_AVG_VALUE_THRESHOLD")
+
+deploy_cloudformation_stack "$TRAINING_STACK_NAME" "$TRAINING_TEMPLATE" "${PARAMS[@]}"
 
 # Update .env file with current stack outputs
 update_env_file

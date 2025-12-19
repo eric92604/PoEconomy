@@ -85,8 +85,8 @@ export const CurrencyTable = memo(function CurrencyTable({
   }, []);
 
   // Get confidence badge variant
-  const getConfidenceVariant = (confidence: number): "default" | "secondary" | "destructive" => {
-    if (confidence >= 0.8) return "default";
+  const getConfidenceVariant = (confidence: number): "success" | "secondary" | "destructive" => {
+    if (confidence >= 0.8) return "success";
     if (confidence >= 0.6) return "secondary";
     return "destructive";
   };

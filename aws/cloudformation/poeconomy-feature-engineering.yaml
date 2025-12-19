@@ -19,6 +19,11 @@ Parameters:
   FeatureEngineeringImageUri:
     Type: String
     Description: Full ECR image URI for feature engineering (including tag)
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+    Description: Logging level (DEBUG, INFO, WARNING, ERROR)
 
 Resources:
   FeatureEngineeringVpc:
@@ -193,8 +198,8 @@ Resources:
       NetworkMode: awsvpc
       RequiresCompatibilities:
         - FARGATE
-      Cpu: 1024
-      Memory: 2048
+      Cpu: 4096
+      Memory: 8192
       ExecutionRoleArn: !GetAtt FeatureEngineeringTaskRole.Arn
       TaskRoleArn: !GetAtt FeatureEngineeringTaskRole.Arn
       ContainerDefinitions:
@@ -218,6 +223,10 @@ Resources:
               Value: !Ref DataLakeBucketName
             - Name: TASK_TIMEOUT_MINUTES
               Value: !Ref TaskTimeoutMinutes
+            - Name: LOG_LEVEL
+              Value: !Ref LogLevel
+            - Name: DISABLE_FILE_LOGGING
+              Value: 'true'
           StopTimeout: 60
       Tags:
         - Key: App

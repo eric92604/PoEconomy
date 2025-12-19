@@ -35,34 +35,22 @@ Parameters:
     Type: Number
     Default: 0
     Description: Maximum number of currencies to train (0 = no limit)
+  MaxCurrencyWorkers:
+    Type: Number
+    Default: 8
+    Description: Number of parallel currency workers for training
   NHyperparameterTrials:
     Type: Number
-    Default: 50
+    Default: 200
     Description: Number of hyperparameter optimization trials
   NModelTrials:
     Type: Number
-    Default: 500
+    Default: 1000
     Description: Number of model training iterations (boosting rounds)
   CVFolds:
     Type: Number
     Default: 5
     Description: Number of cross-validation folds
-  MaxDepth:
-    Type: Number
-    Default: 8
-    Description: Maximum tree depth for models
-  LearningRate:
-    Type: String
-    Default: '0.1'
-    Description: Learning rate for models
-  MaxOptunaWorkers:
-    Type: Number
-    Default: 2
-    Description: Number of Optuna workers per currency
-  ModelNJobs:
-    Type: Number
-    Default: 2
-    Description: Number of model training jobs per currency
   MinAvgValueThreshold:
     Type: String
     Default: '0.25'
@@ -71,12 +59,20 @@ Parameters:
     Type: String
     Default: poeconomy-production-base
     Description: Name of the base infrastructure stack
+  IngestionStackName:
+    Type: String
+    Description: Name of the ingestion stack to import DynamoDB tables from
   DataLakeBucketName:
     Type: String
     Description: Name of the data lake bucket from base stack
   TrainingImageUri:
     Type: String
     Description: Full ECR image URI for training (including tag)
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+    Description: Logging level (DEBUG, INFO, WARNING, ERROR)
 
 Resources:
   # VPC for training tasks
@@ -242,11 +238,16 @@ Resources:
               Value: !Ref DataLakeBucketName
             # Threading and Parallelization
             - Name: MAX_CURRENCY_WORKERS
-              Value: '4'
+              Value: !Ref MaxCurrencyWorkers
             - Name: MAX_OPTUNA_WORKERS
-              Value: !Ref MaxOptunaWorkers
+              Value: '2'
             - Name: MODEL_N_JOBS
-              Value: !Ref ModelNJobs
+              Value: '4'
+            # Logging
+            - Name: LOG_LEVEL
+              Value: !Ref LogLevel
+            - Name: DISABLE_FILE_LOGGING
+              Value: 'true'
             # Hyperparameter Optimization
             - Name: N_HYPERPARAMETER_TRIALS
               Value: !Ref NHyperparameterTrials
@@ -254,16 +255,14 @@ Resources:
               Value: !Ref NModelTrials
             - Name: CV_FOLDS
               Value: !Ref CVFolds
-            # Model Performance
-            - Name: MAX_DEPTH
-              Value: !Ref MaxDepth
-            - Name: LEARNING_RATE
-              Value: !Ref LearningRate
             # Data Selection
-            - Name: MIN_RECORDS_THRESHOLD
-              Value: !Ref MinRecordsThreshold
             - Name: MIN_AVG_VALUE_THRESHOLD
               Value: !Ref MinAvgValueThreshold
+            # DynamoDB Tables
+            - Name: DYNAMO_LEAGUE_METADATA_TABLE
+              Value:
+                Fn::ImportValue:
+                  Fn::Sub: '${IngestionStackName}-LeagueMetadataTable'
           StopTimeout: 60
       Tags:
         - Key: App
@@ -324,6 +323,37 @@ Resources:
                   - logs:PutLogEvents
                   - logs:DescribeLogStreams
                 Resource: '*'
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub 
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeagueMetadataTable}'
+                    - LeagueMetadataTable: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-LeagueMetadataTable'
+                  - !Sub 
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DailyPricesTable}'
+                    - DailyPricesTable: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-DailyPricesTable'
+                  - !Sub 
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DailyPricesTable}/index/league-date-index'
+                    - DailyPricesTable: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-DailyPricesTable'
+                  - !Sub 
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DailyPricesTable}/index/currency-date-index'
+                    - DailyPricesTable: 
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-DailyPricesTable'
       Tags:
         - Key: Name
           Value: !Sub 'poeconomy-${EnvironmentName}-training-task-role'

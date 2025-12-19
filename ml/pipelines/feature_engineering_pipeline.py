@@ -57,7 +57,8 @@ class FeatureEngineeringPipeline:
             log_dir=str(config.paths.logs_dir),
             experiment_id=config.experiment.experiment_id,
             console_output=config.logging.console_logging,
-            suppress_external=config.logging.suppress_external
+            suppress_external=config.logging.suppress_external,
+            file_logging=config.logging.file_logging
         )
         
         # Initialize components
@@ -278,7 +279,7 @@ class FeatureEngineeringPipeline:
             target_currencies: List of currencies to process
         """
         # Determine number of workers
-        max_workers = min(mp.cpu_count(), len(target_currencies), self.config.model.max_currency_workers)
+        max_workers = min(len(target_currencies), self.config.model.max_currency_workers)
         
         self.logger.info(f"Processing currencies with {max_workers} parallel workers")
         
@@ -481,19 +482,25 @@ class FeatureEngineeringPipeline:
             s3_key = f"processed_data/{filename}"
             
             # Create temporary file for upload
-            with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as temp_file:
-                temp_path = temp_file.name
-            
-            # Save to temporary file
-            combined_df.to_parquet(temp_path, index=False)
-            
-            # Upload to S3
-            s3_client.upload_file(temp_path, s3_bucket, s3_key)
-            
-            # Clean up temporary file
-            os.unlink(temp_path)
-            
-            self.logger.info(f"Successfully uploaded combined dataset to s3://{s3_bucket}/{s3_key}")
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as temp_file:
+                    temp_path = temp_file.name
+                
+                # Save to temporary file
+                combined_df.to_parquet(temp_path, index=False)
+                
+                # Upload to S3
+                s3_client.upload_file(temp_path, s3_bucket, s3_key)
+                
+                self.logger.info(f"Successfully uploaded combined dataset to s3://{s3_bucket}/{s3_key}")
+            finally:
+                # Always clean up temporary file
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.unlink(temp_path)
+                    except Exception as cleanup_error:
+                        self.logger.warning(f"Failed to clean up temporary file {temp_path}: {cleanup_error}")
             
         except Exception as e:
             self.logger.warning(f"Failed to upload combined dataset to S3: {e}")

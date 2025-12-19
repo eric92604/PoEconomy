@@ -8,8 +8,8 @@ Environment Variables:
     MODEL_N_JOBS: Number of model training jobs per currency (default: 2)
     
     # Hyperparameter Optimization
-    N_HYPERPARAMETER_TRIALS: Number of hyperparameter optimization trials (default: 50)
-    N_MODEL_TRIALS: Number of model training iterations (default: 500)
+    N_HYPERPARAMETER_TRIALS: Number of hyperparameter optimization trials (default: 200)
+    N_MODEL_TRIALS: Number of model training iterations (default: 1000)
     CV_FOLDS: Number of cross-validation folds (default: 5)
     
     # Model Performance
@@ -17,14 +17,17 @@ Environment Variables:
     LEARNING_RATE: Learning rate for models (default: 0.1)
     
     # Data Selection
-    MIN_RECORDS_THRESHOLD: Minimum records required for training (default: 5)
-    MAX_CURRENCIES_TO_TRAIN: Maximum number of currencies to train (default: None)
-    MIN_AVG_VALUE_THRESHOLD: Minimum average value threshold (default: 5.0)
+    MIN_RECORDS_THRESHOLD: Minimum records required for training (default: 50)
+    MAX_CURRENCIES_TO_TRAIN: Maximum number of currencies to train (default: 0, 0 = no limit)
+    MIN_AVG_VALUE_THRESHOLD: Minimum average value threshold (default: 0.25)
     
     # AWS Configuration
     AWS_REGION: AWS region (default: us-west-2)
     DATA_LAKE_BUCKET: S3 bucket for data lake
     DYNAMO_*: Various DynamoDB table and attribute configurations
+    
+    # Logging
+    LOG_LEVEL: Logging level (DEBUG, INFO, WARNING, ERROR) (default: INFO)
 """
 
 from dataclasses import dataclass, field
@@ -37,12 +40,17 @@ import os
 
 @dataclass
 class ModelConfig:
-    """Configuration for ML model training with optimal threading strategy."""
+    """Configuration for ML model training with configurable threading."""
     
     # Model Selection
     use_lightgbm: bool = True
-    use_xgboost: bool = True
+    use_random_forest: bool = True
+    use_extra_trees: bool = True 
     use_ensemble: bool = True
+    
+    # Ensemble Weight Optimization
+    optimize_ensemble_weights: bool = True  # Enable Optuna-based weight optimization
+    ensemble_weight_optimization_trials: int = 50  # Number of Optuna trials for weight optimization
     
     max_currency_workers: int = field(default_factory=lambda: int(os.getenv('MAX_CURRENCY_WORKERS', '4')))
     max_optuna_workers: int = field(default_factory=lambda: int(os.getenv('MAX_OPTUNA_WORKERS', '2')))
@@ -52,18 +60,18 @@ class ModelConfig:
     test_size: float = 0.2
     random_state: int = 42
     cv_folds: int = field(default_factory=lambda: int(os.getenv('CV_FOLDS', '5')))
-    early_stopping_rounds: int = 50  # Increased to allow more training before stopping
+    early_stopping_rounds: int = 50
     
     
     # Hyperparameter Optimization
-    n_hyperparameter_trials: int = field(default_factory=lambda: int(os.getenv('N_HYPERPARAMETER_TRIALS', '50')))
+    n_hyperparameter_trials: int = field(default_factory=lambda: int(os.getenv('N_HYPERPARAMETER_TRIALS', '200')))
     
     # Model Performance
     max_depth: int = field(default_factory=lambda: int(os.getenv('MAX_DEPTH', '8')))
     learning_rate: float = field(default_factory=lambda: float(os.getenv('LEARNING_RATE', '0.1')))
     
-    # Model Training Iterations (number of boosting rounds for LightGBM/XGBoost)
-    n_model_trials: int = field(default_factory=lambda: int(os.getenv('N_MODEL_TRIALS', '500')))
+    # Model Training Iterations
+    n_model_trials: int = field(default_factory=lambda: int(os.getenv('N_MODEL_TRIALS', '1000')))
 
 
 @dataclass
@@ -103,6 +111,9 @@ class DataConfig:
     
     # Data validation
     min_variance_threshold: float = 1e-8
+    
+    # Validation data configuration
+    validation_max_days: int = 60  # Maximum days of current league data to use for validation
 
 
 @dataclass
@@ -199,10 +210,12 @@ def _get_logs_dir() -> Path:
 class LoggingConfig:
     """Configuration for logging setup."""
     
-    level: str = "INFO"
+    level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO").upper())
     format: str = "%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s"
     console_logging: bool = True
-    file_logging: bool = True
+    # Disable file logging in Fargate (logs go to CloudWatch via awslogs driver)
+    # Set DISABLE_FILE_LOGGING=true to disable file logging and reduce storage writes
+    file_logging: bool = field(default_factory=lambda: os.getenv("DISABLE_FILE_LOGGING", "false").lower() != "true")
     
     # S3 log upload configuration
     upload_logs_to_s3: bool = True
@@ -282,6 +295,7 @@ class DynamoConfig:
     currency_metadata_table: str = os.getenv("DYNAMO_CURRENCY_METADATA_TABLE", "")
     currency_prices_table: str = os.getenv("DYNAMO_CURRENCY_PRICES_TABLE", "")
     league_metadata_table: Optional[str] = os.getenv("DYNAMO_LEAGUE_METADATA_TABLE", "")
+    daily_prices_table: str = os.getenv("DYNAMO_DAILY_PRICES_TABLE", "poeconomy-production-daily-prices")
     predictions_table: str = os.getenv("DYNAMO_PREDICTIONS_TABLE", "")
     currency_timestamp_index: Optional[str] = os.getenv("DYNAMO_CURRENCY_TIMESTAMP_INDEX", "currency-timestamp-index")
     partition_key: str = os.getenv("DYNAMO_PARTITION_KEY", "currency_league")
@@ -392,7 +406,7 @@ def get_default_config() -> MLConfig:
     
     # Set production-optimized defaults (environment variables are already handled by dataclass fields)
     # Only set non-environment-variable properties
-    config.logging.level = "INFO"
+    # Note: logging.level is set from LOG_LEVEL env var in LoggingConfig, defaulting to "INFO"
     config.logging.suppress_lightgbm = True
     config.logging.suppress_optuna = True
     config.experiment.tags = ["production"]

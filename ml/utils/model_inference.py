@@ -1,8 +1,7 @@
 """
 Inference utilities for DynamoDB-backed currency price predictions.
 
-This module rebuilds the prediction workflow around the new DynamoDB data
-source. It loads trained model artifacts, assembles the latest feature vectors
+This module loads trained model artifacts, assembles the latest feature vectors
 using the shared DataProcessor/FeatureEngineer pipeline, and generates
 predictions for requested currencies.
 """
@@ -18,19 +17,12 @@ import math
 import joblib
 import numpy as np
 import pandas as pd
-from scipy import stats
 
-from ml.config.training_config import MLConfig
 from ml.config.inference_config import InferenceConfig, get_inference_config_from_env
 from ml.utils.data_processing import DataProcessor
 from ml.utils.data_sources import create_data_source, DataSourceConfig, BaseDataSource
 from ml.utils.common_utils import MLLogger
-from ml.utils.feature_filtering import (
-    parse_horizon_to_days,
-    filter_features_by_horizon,
-    get_feature_filtering_stats
-)
-
+from ml.utils.feature_engineering import ensure_required_features
 
 HORIZON_SUFFIXES = {"1d", "3d", "7d", "14d", "30d"}
 
@@ -39,10 +31,11 @@ HORIZON_SUFFIXES = {"1d", "3d", "7d", "14d", "30d"}
 
 @dataclass
 class ModelArtifact:
-    """Storage for a single model artifact (model + optional scaler)."""
+    """Storage for a single model artifact (model + optional scaler + optional imputer)."""
 
     model_dir: Path
     scaler_path: Optional[Path]
+    imputer_path: Optional[Path]  # Imputer fitted on training data (for RandomForest/ExtraTrees)
     metadata_path: Path
     metadata: Dict
 
@@ -118,6 +111,9 @@ class ModelPredictor:
 
         self.data_processor = DataProcessor(self.config.data, self.config.processing, self.logger)  # type: ignore[arg-type]
         self.model_registry = self._discover_models()
+        
+        # Cache most recent league per invocation (doesn't change during Lambda execution)
+        self._cached_most_recent_league: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -158,19 +154,40 @@ class ModelPredictor:
                     if processed_df is not None and not processed_df.empty:
                         X, feature_rows = self._extract_feature_matrix(processed_df, feature_columns)
                         if len(feature_rows) > 0:
-                            # Load scaler
+                            # Load imputer and apply transformation BEFORE scaling
+                            imputer = None
+                            if artifact.imputer_path and artifact.imputer_path.exists():
+                                try:
+                                    imputer = joblib.load(artifact.imputer_path)
+                                    X = imputer.transform(X)
+                                    self.logger.debug(f"Applied saved imputer from training for {currency} ({horizon})")
+                                except Exception as e:
+                                    self.logger.warning(f"Failed to load imputer for {currency} ({horizon}): {e}")
+                                    # If imputer fails to load, we cannot proceed safely
+                                    raise ValueError(f"Failed to load required imputer for {currency} ({horizon}). Model artifacts may be incomplete.")
+                            else:
+                                self.logger.warning(f"No imputer found for {currency} ({horizon}). This model may have been trained before imputation was saved.")
+                                # Fallback: use median imputation (but log warning)
+                                from sklearn.impute import SimpleImputer
+                                fallback_imputer = SimpleImputer(strategy='median')
+                                X = fallback_imputer.fit_transform(X)
+                                self.logger.warning(f"Used fallback imputation for {currency} ({horizon}) - this may cause prediction inconsistencies")
+                            
+                            # Load scaler and apply after imputation
                             scaler = joblib.load(artifact.scaler_path) if artifact.scaler_path and artifact.scaler_path.exists() else None
                             if scaler is not None:
                                 X = scaler.transform(X)
-
+                            
                             # Load model
                             model = joblib.load(artifact.model_dir / "ensemble_model.pkl")
+                            
                             
                             latest_features = X[-1].reshape(1, -1)
                             
                             # Make prediction with uncertainty using ensemble spread
+                            # Use 60% confidence for narrower, more practical prediction ranges
                             prediction_value, lower, upper = self._compute_interval_from_ensemble(
-                                model, latest_features, confidence_level=0.95
+                                model, latest_features, confidence_level=0.60
                             )
                             
                             # Validate prediction value
@@ -215,7 +232,7 @@ class ModelPredictor:
                                 prediction_lower=lower,
                                 prediction_upper=upper,
                                 features_used=len(feature_columns),
-                                model_dir=str(artifact.model_dir),
+                                model_path=str(artifact.model_dir),
                                 metadata=artifact.metadata,
                             )
 
@@ -240,14 +257,27 @@ class ModelPredictor:
 
 
     def _get_current_league(self) -> str:
-        """Get the current active league."""
-        try:
-            # Try to get from data source
-            latest_league = self.data_source.get_most_recent_league()
-            if latest_league:
-                return latest_league
-        except Exception:
-            pass
+        """Get the current active league (cached per invocation)."""
+        # Use cached most recent league (fetched once per Lambda invocation)
+        if self._cached_most_recent_league is None:
+            try:
+                # Use get_current_seasonal_league_from_table for DynamoDBDataSource
+                # or get_most_recent_league for S3DataSource
+                if hasattr(self.data_source, '_league_table') and self.data_source._league_table:
+                    from ml.utils.data_sources import get_current_seasonal_league_from_table
+                    self._cached_most_recent_league = get_current_seasonal_league_from_table(
+                        self.data_source._league_table, self.logger
+                    )
+                elif hasattr(self.data_source, 'get_most_recent_league'):
+                    # S3DataSource still has this method
+                    self._cached_most_recent_league = self.data_source.get_most_recent_league()
+                else:
+                    self.logger.warning("Data source does not support getting current league")
+            except Exception as e:
+                self.logger.warning(f"Failed to get current league: {e}")
+        
+        if self._cached_most_recent_league:
+            return self._cached_most_recent_league
         
         # No fallback - this should not happen in production
         raise RuntimeError("Could not determine current league from data source. This indicates a data source configuration issue.")
@@ -334,9 +364,11 @@ class ModelPredictor:
                 continue
 
             scaler_path = model_dir / "scaler.pkl"
+            imputer_path = model_dir / "imputer.pkl"
             artifact = ModelArtifact(
                 model_dir=model_dir,
                 scaler_path=scaler_path if scaler_path.exists() else None,
+                imputer_path=imputer_path if imputer_path.exists() else None,
                 metadata_path=metadata_path,
                 metadata=metadata,
             )
@@ -378,10 +410,29 @@ class ModelPredictor:
             if self.config.data.included_leagues:
                 leagues = list(self.config.data.included_leagues)
             else:
-                latest_league = self.data_source.get_most_recent_league()
-                if latest_league:
-                    leagues = [latest_league]
-                    self.logger.info(f"Auto-selected most recent league: {latest_league}")
+                # Use cached most recent league (fetched once per Lambda invocation)
+                if self._cached_most_recent_league is None:
+                    try:
+                        # Use get_current_seasonal_league_from_table for DynamoDBDataSource
+                        # or get_most_recent_league for S3DataSource
+                        if hasattr(self.data_source, '_league_table') and self.data_source._league_table:
+                            from ml.utils.data_sources import get_current_seasonal_league_from_table
+                            self._cached_most_recent_league = get_current_seasonal_league_from_table(
+                                self.data_source._league_table, self.logger
+                            )
+                        elif hasattr(self.data_source, 'get_most_recent_league'):
+                            # S3DataSource still has this method
+                            self._cached_most_recent_league = self.data_source.get_most_recent_league()
+                        else:
+                            self.logger.warning("Data source does not support getting current league")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to get current league: {e}")
+                    
+                    if self._cached_most_recent_league:
+                        self.logger.info(f"Auto-selected most recent league (cached for this invocation): {self._cached_most_recent_league}")
+                
+                if self._cached_most_recent_league:
+                    leagues = [self._cached_most_recent_league]
                 else:
                     leagues = None
         else:
@@ -442,14 +493,34 @@ class ModelPredictor:
             else:
                 missing_features.append(feat_name)
         
+        # Create missing conditional features that were used during training
+        # This handles cases where features like price_log are conditionally created
+        # based on data characteristics that may differ between training and inference
         if missing_features:
-            error_msg = (
-                f"Missing {len(missing_features)} stored features in processed data for {currency} ({horizon}). "
-                f"This indicates a mismatch between training and inference feature engineering. "
-                f"Missing features: {missing_features[:10]}{'...' if len(missing_features) > 10 else ''}"
+            processed_data = ensure_required_features(
+                processed_data, 
+                stored_feature_names,  # Pass all required features, function will filter
+                currency,
+                logger=self.logger
             )
-            self.logger.error(error_msg, extra={"missing_features": missing_features})
-            raise ValueError(error_msg)
+            
+            # Re-check after attempting to create missing features
+            still_missing = []
+            for feat_name in missing_features:
+                if feat_name in processed_data.columns:
+                    available_features.append(feat_name)
+                    self.logger.info(f"Created missing conditional feature: {feat_name} for {currency} ({horizon})")
+                else:
+                    still_missing.append(feat_name)
+            
+            if still_missing:
+                error_msg = (
+                    f"Missing {len(still_missing)} stored features in processed data for {currency} ({horizon}). "
+                    f"This indicates a mismatch between training and inference feature engineering. "
+                    f"Missing features: {still_missing[:10]}{'...' if len(still_missing) > 10 else ''}"
+                )
+                self.logger.error(error_msg, extra={"missing_features": still_missing})
+                raise ValueError(error_msg)
         
         if not available_features:
             error_msg = (
@@ -465,6 +536,7 @@ class ModelPredictor:
         
         return processed_data, feature_columns
 
+
     def _extract_feature_matrix(
         self,
         processed_df: pd.DataFrame,
@@ -477,18 +549,15 @@ class ModelPredictor:
         feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
         feature_matrix = feature_frame.to_numpy(dtype=float, na_value=np.nan)
 
-        # More robust handling of NaN values for small datasets
-        # Instead of requiring ALL features to be finite, we'll:
-        # 1. Impute NaN values with column means/medians
-        # 2. Use a more lenient filtering approach
+        # Standardized NaN filtering - use same threshold as training (90%)
+        # This ensures consistency between training and inference
         
         # Count NaN values per row
         nan_counts = np.isnan(feature_matrix).sum(axis=1)
         total_features = feature_matrix.shape[1]
         
-        # For small datasets, be more lenient with NaN tolerance
-        # Allow rows with up to 50% NaN values (for 5 data points, this is reasonable)
-        max_nan_ratio = 0.5
+        # Use same threshold as training: remove rows with >90% NaN features
+        max_nan_ratio = 0.9
         max_nan_count = int(total_features * max_nan_ratio)
         
         # Filter rows with too many NaN values
@@ -504,17 +573,9 @@ class ModelPredictor:
         filtered_matrix = feature_matrix[valid_mask]
         filtered_rows = processed_df[valid_mask].reset_index(drop=True)
         
-        # Impute remaining NaN values with column means
-        for col_idx in range(filtered_matrix.shape[1]):
-            col_data = filtered_matrix[:, col_idx]
-            if np.any(np.isnan(col_data)):
-                # Use median for imputation (more robust than mean)
-                median_val = np.nanmedian(col_data)
-                if np.isnan(median_val):
-                    # If all values are NaN, use 0
-                    median_val = 0.0
-                filtered_matrix[np.isnan(col_data), col_idx] = median_val
-                self.logger.debug(f"Imputed {np.isnan(col_data).sum()} NaN values in column {col_idx} with {median_val}")
+        # Note: Imputation will be handled by the saved imputer from training
+        # Do NOT perform manual imputation here to avoid double imputation
+        # The saved imputer will be applied in predict_currency() method
         
         self.logger.debug(f"Feature matrix extraction: {len(filtered_matrix)} rows, {filtered_matrix.shape[1]} features")
         return filtered_matrix, filtered_rows
@@ -523,7 +584,7 @@ class ModelPredictor:
         self, 
         model: Any, 
         X: np.ndarray, 
-        confidence_level: float = 0.95
+        confidence_level: float = 0.60
     ) -> Tuple[float, float, float]:
         """
         Compute prediction interval using ensemble spread method.

@@ -17,6 +17,7 @@ Event structure examples:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import os
@@ -25,23 +26,22 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 import boto3
 from boto3.dynamodb.conditions import Key
 
-from ml.config.training_config import MLConfig
 from ml.config.inference_config import get_inference_config_from_env, InferenceConfig
 from ml.utils.data_sources import create_data_source, DataSourceConfig, BaseDataSource
-from ml.utils.model_inference import ModelPredictor, PredictionResult
 import joblib
-import io
 import numpy as np
 import pandas as pd
 from typing import Dict, Any
 from ml.utils.common_utils import MLLogger
 from ml.utils.data_processing import DataProcessor
 from ml.utils.model_inference import (
+    ModelPredictor,
+    PredictionResult,
     _split_currency_label, 
     CurrencyModelBundle, 
     HORIZON_SUFFIXES
@@ -93,6 +93,10 @@ class DirectModelPredictor(ModelPredictor):
             raise FileNotFoundError(f"No model directories found in models directory: {self.models_dir}")
         
         self.model_registry = self._discover_models_from_directories()
+        
+        
+        # Cache most recent league per invocation (doesn't change during Lambda execution)
+        self._cached_most_recent_league: Optional[str] = None
     
     def _discover_models_from_directories(self) -> Dict[str, CurrencyModelBundle]:
         """Scan model directories and group artifacts per currency."""
@@ -125,9 +129,11 @@ class DirectModelPredictor(ModelPredictor):
                         self.logger.debug(f"Discovered model: {currency_label} -> {model_file.parent}")
                         
                         # Create direct artifact
+                        imputer_file = metadata_file.parent / "imputer.pkl"
                         artifact = DirectModelArtifact(
                             model_dir=metadata_file.parent,
                             scaler_path=scaler_file if scaler_file.exists() else None,
+                            imputer_path=imputer_file if imputer_file.exists() else None,
                             metadata_path=metadata_file,
                             metadata=metadata,
                         )
@@ -227,6 +233,104 @@ class DirectModelPredictor(ModelPredictor):
             self.logger.warning(f"Failed to load scaler from filesystem: {e}")
             return None
     
+    def _model_requires_imputation(self, artifact: DirectModelArtifact) -> bool:
+        """
+        Determine if a model requires imputation based on its structure.
+        
+        RandomForest and ExtraTrees models require imputation because they cannot
+        handle NaN values. LightGBM handles NaN natively, so it doesn't need imputation.
+        
+        Args:
+            artifact: Model artifact containing model metadata and paths
+            
+        Returns:
+            True if the model requires imputation, False otherwise
+        """
+        # If imputer path exists, the model definitely requires imputation
+        if artifact.imputer_path and artifact.imputer_path.exists():
+            return True
+        
+        # Check metadata for model type information
+        metadata = artifact.metadata
+        if metadata:
+            model_type = metadata.get('model_type', '').lower()
+            # If metadata explicitly says it's an ensemble, we need to inspect the model
+            if model_type == 'ensemble' or 'ensemble' in model_type:
+                # Load model to inspect its structure
+                try:
+                    model = self._load_model_from_direct(artifact)
+                    return self._inspect_model_for_imputation_requirement(model)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to load model for imputation check: {e}. "
+                        "Assuming imputation is required for safety."
+                    )
+                    return True
+            # If it's a single model type that requires imputation
+            elif model_type in ('random_forest', 'randomforest', 'extra_trees', 'extratrees'):
+                return True
+            # If it's LightGBM only, no imputation needed
+            elif model_type == 'lightgbm':
+                return False
+        
+        # If metadata doesn't have clear information, inspect the model directly
+        try:
+            model = self._load_model_from_direct(artifact)
+            return self._inspect_model_for_imputation_requirement(model)
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to inspect model for imputation requirement: {e}. "
+                "Assuming imputation is required for safety."
+            )
+            return True
+    
+    def _inspect_model_for_imputation_requirement(self, model: Any) -> bool:
+        """
+        Inspect a loaded model to determine if it requires imputation.
+        
+        Args:
+            model: Loaded model object (could be EnsembleModel or single model)
+            
+        Returns:
+            True if the model requires imputation, False otherwise
+        """
+        from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
+        
+        # Check if it's an EnsembleModel with a models attribute
+        if hasattr(model, 'models') and model.models:
+            # Check each base model in the ensemble
+            for base_model in model.models:
+                # Check if base_model has a model attribute (BaseModel wrapper)
+                if hasattr(base_model, 'model') and base_model.model is not None:
+                    if isinstance(base_model.model, (RandomForestRegressor, ExtraTreesRegressor)):
+                        return True
+                # Check if base_model is directly a RandomForest or ExtraTrees
+                elif isinstance(base_model, (RandomForestRegressor, ExtraTreesRegressor)):
+                    return True
+                # Check if base_model has get_model_type method
+                elif hasattr(base_model, 'get_model_type'):
+                    model_type = base_model.get_model_type().lower()
+                    if model_type in ('random_forest', 'randomforest', 'extra_trees', 'extratrees'):
+                        return True
+            # If we get here, no RandomForest or ExtraTrees found in ensemble
+            return False
+        
+        # Check if it's directly a RandomForest or ExtraTrees
+        if isinstance(model, (RandomForestRegressor, ExtraTreesRegressor)):
+            return True
+        
+        # Check if it has a get_model_type method (BaseModel wrapper)
+        if hasattr(model, 'get_model_type'):
+            model_type = model.get_model_type().lower()
+            if model_type in ('random_forest', 'randomforest', 'extra_trees', 'extratrees'):
+                return True
+            elif model_type == 'lightgbm':
+                return False
+        
+        # If we can't determine, assume imputation is not required
+        # (safer to assume LightGBM-only behavior than to require imputation unnecessarily)
+        return False
+    
     def predict_currency(
         self,
         currency: str,
@@ -279,8 +383,45 @@ class DirectModelPredictor(ModelPredictor):
                 if processed_df is not None and not processed_df.empty:
                     X, feature_rows = self._extract_feature_matrix(processed_df, feature_columns)
                     if len(feature_rows) > 0:
-                        # Load scaler and model from filesystem
+                        # Load imputer, scaler, and model directly from filesystem
+                        self.logger.debug(f"Loading model for {currency} ({horizon}) from filesystem")
+                        
+                        # Load imputer and apply transformation BEFORE scaling
+                        imputer = None
+                        if artifact.imputer_path and artifact.imputer_path.exists():
+                            try:
+                                imputer = joblib.load(artifact.imputer_path)
+                                X = imputer.transform(X)
+                                self.logger.debug(f"Applied saved imputer from training for {currency} ({horizon})")
+                            except Exception as e:
+                                self.logger.warning(f"Failed to load imputer for {currency} ({horizon}): {e}")
+                                # If imputer fails to load, we cannot proceed safely
+                                raise ValueError(f"Failed to load required imputer for {currency} ({horizon}). Model artifacts may be incomplete.")
+                        else:
+                            # Check if model requires imputation (RandomForest/ExtraTrees)
+                            # LightGBM handles NaN natively, so it doesn't need imputation
+                            model_requires_imputation = self._model_requires_imputation(artifact)
+                            
+                            if model_requires_imputation:
+                                # If model requires imputation but imputer is missing, we cannot proceed safely
+                                # Fitting imputer on inference data would cause data leakage and inconsistency
+                                raise ValueError(
+                                    f"Imputer required but not found for {currency} ({horizon}). "
+                                    "Model artifacts may be incomplete. Cannot proceed with prediction as fitting "
+                                    "imputer on inference data would cause data leakage."
+                                )
+                            else:
+                                # Model doesn't require imputation (e.g., LightGBM-only ensemble)
+                                # Check if there are NaN values that would cause issues
+                                if np.isnan(X).any():
+                                    self.logger.warning(
+                                        f"NaN values found in features for {currency} ({horizon}), "
+                                        "but model should handle them natively. Proceeding with prediction."
+                                    )
+                        
                         scaler = self._load_scaler_from_direct(artifact)
+                        model = self._load_model_from_direct(artifact)
+                        
                         if scaler is not None:
                             # Validate feature count before scaling
                             expected_features = scaler.n_features_in_ if hasattr(scaler, 'n_features_in_') else None
@@ -297,13 +438,12 @@ class DirectModelPredictor(ModelPredictor):
                                     f"trained with {expected_features} features but inference is using {X.shape[1]} features."
                                 )
                             X = scaler.transform(X)
-
-                        model = self._load_model_from_direct(artifact)
                         latest_features = X[-1].reshape(1, -1)
                         
                         # Make prediction with uncertainty using ensemble spread
+                        # Use 60% confidence for narrower, more practical prediction ranges
                         prediction_value, lower, upper = self._compute_interval_from_ensemble(
-                            model, latest_features, confidence_level=0.95
+                            model, latest_features, confidence_level=0.60
                         )
                         
                         # Validate prediction value
@@ -356,6 +496,11 @@ class DirectModelPredictor(ModelPredictor):
                             f"Prediction for {currency} ({horizon}): {current_price:.2f} -> {prediction_value:.2f} "
                             f"({price_change_pct:+.1f}%, confidence: {confidence:.2f})"
                         )
+                        
+                        # Explicit cleanup of DataFrames and models to free memory
+                        del raw_df, processed_df, feature_rows, X, latest_features, model, scaler
+                        if 'imputer' in locals() and imputer is not None:
+                            del imputer
                         return result
 
         except ValueError as exc:
@@ -403,6 +548,7 @@ class DirectModelArtifact:
     """Model artifact stored directly in filesystem."""
     model_dir: Path
     scaler_path: Optional[Path]
+    imputer_path: Optional[Path]  # Imputer fitted on training data (for RandomForest/ExtraTrees)
     metadata_path: Path
     metadata: Dict[str, Any]
 
@@ -471,17 +617,17 @@ def _select_currencies(
     logger.info("No currencies supplied; selecting defaults from metadata")
     stats = data_source.list_currency_stats()
     
-    # Try to get current active seasonal league first
-    current_league = data_source.get_most_recent_league()
+    # Get most recent league once (cached per invocation in predictor, but this function is called separately)
+    # Note: This is called once per Lambda invocation, so caching here is less critical but still good practice
+    current_league = None
+    if hasattr(data_source, '_league_table') and data_source._league_table:
+        from ml.utils.data_sources import get_current_seasonal_league_from_table
+        current_league = get_current_seasonal_league_from_table(data_source._league_table, logger)
     if current_league:
         stats = [stat for stat in stats if stat.league == current_league]
         logger.info("Auto-selected current active seasonal league for currency selection", extra={"league": current_league})
     else:
-        # Fallback to most recent league if no seasonal league found
-        current_league = data_source.get_most_recent_league()
-        if current_league:
-            stats = [stat for stat in stats if stat.league == current_league]
-            logger.info("No active seasonal league found, using most recent league", extra={"league": current_league})
+        logger.info("No active seasonal league found, using all available leagues")
     
     # Get currencies that have both data availability AND trained models
     available_currencies_with_models = set(predictor.list_available_currencies())
@@ -731,6 +877,10 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
         predictions: List[PredictionResult] = []
         failed_predictions = 0
         
+        # Track processed count for memory management
+        processed_count = 0
+        memory_cleanup_interval = int(os.getenv("MEMORY_CLEANUP_INTERVAL", "10"))  # Cleanup every N predictions
+        
         for currency in target_currencies:
             for horizon in options.horizons:
                 logger.info(f"Processing {currency} for horizon {horizon}")
@@ -766,6 +916,15 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
                         prediction.predicted_price > 0):  # Ensure positive predicted price
                         predictions.append(prediction)
                         logger.info(f"Successfully generated prediction for {currency} ({horizon})")
+                        
+                        processed_count += 1
+                        
+                        # Periodic memory cleanup to prevent OOM
+                        if processed_count % memory_cleanup_interval == 0:
+                            logger.info(f"Performing periodic memory cleanup (processed {processed_count} predictions)")
+                            # Force garbage collection to free memory from models and DataFrames
+                            gc.collect()
+                            logger.debug("Memory cleanup completed")
                     else:
                         # Log more detailed information about why the prediction failed
                         failure_reasons = []
@@ -805,6 +964,15 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
                         extra={"currency": currency, "horizon": horizon},
                     )
                     failed_predictions += 1
+                    
+                    # Cleanup on failure too to prevent memory accumulation
+                    processed_count += 1
+                    if processed_count % memory_cleanup_interval == 0:
+                        gc.collect()
+
+        # Final memory cleanup before writing to DynamoDB
+        logger.info("Performing final memory cleanup before writing predictions")
+        gc.collect()
 
         if not predictions:
             logger.warning("No valid predictions generated")

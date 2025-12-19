@@ -31,8 +31,8 @@ export default function DashboardPage() {
   const queryClient = useQueryClient();
   
   // Fetch data
-  const { data: currenciesData, isLoading: currenciesLoading } = useCurrencies();
-  const { data: leaguesData, isLoading: leaguesLoading } = useLeagues();
+  const { data: currenciesData, isLoading: currenciesLoading, isFetching: currenciesFetching } = useCurrencies();
+  const { data: leaguesData, isLoading: leaguesLoading, isFetching: leaguesFetching } = useLeagues();
 
   // Preload all currency icons when data is available
   useEffect(() => {
@@ -52,7 +52,7 @@ export default function DashboardPage() {
   // Fetch latest predictions using the optimized endpoint
   // Load all currencies for complete statistics
   // Only fetch when we have a league to prevent multiple calls
-  const { data: predictionsData, isLoading: predictionsLoading } = useLatestPredictions({
+  const { data: predictionsData, isLoading: predictionsLoading, isFetching: predictionsFetching } = useLatestPredictions({
     league: preferredLeague || undefined,
     horizons: ["1d"], // Only 1d horizon for dashboard
     limit: 500, // Increase limit to get more currencies
@@ -125,7 +125,10 @@ export default function DashboardPage() {
   }, [predictionsData, leaguesData, currenciesData]);
 
   const isLoading = currenciesLoading || leaguesLoading || predictionsLoading;
+  const isFetching = currenciesFetching || leaguesFetching || predictionsFetching;
   const isInitialLoad = currenciesLoading || leaguesLoading;
+  // Show loading state during both initial load and refresh
+  const showLoading = isLoading || isFetching;
 
   // Manual cache clear function - invalidates React Query cache only
   const clearCache = () => {
@@ -145,8 +148,9 @@ export default function DashboardPage() {
           variant="outline"
           size="sm"
           className="flex items-center gap-2"
+          disabled={isFetching}
         >
-          <RefreshCw className="h-4 w-4" />
+          <RefreshCw className={`h-4 w-4 ${isFetching ? "animate-spin" : ""}`} />
           Refresh
         </Button>
       </div>
@@ -159,7 +163,7 @@ export default function DashboardPage() {
             <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            {isInitialLoad ? (
+            {showLoading ? (
               <Skeleton className="h-8 w-16" />
             ) : (
               <div className="text-2xl font-bold">{stats.totalCurrencies}</div>
@@ -176,7 +180,7 @@ export default function DashboardPage() {
             <Target className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            {isLoading ? (
+            {showLoading ? (
               <Skeleton className="h-8 w-16" />
             ) : (
               <div className="text-2xl font-bold">{stats.totalLeagues}</div>
@@ -193,7 +197,7 @@ export default function DashboardPage() {
             <TrendingUp className="h-4 w-4 text-green-500" />
           </CardHeader>
           <CardContent>
-            {isLoading ? (
+            {showLoading ? (
               <Skeleton className="h-8 w-24" />
             ) : stats.topGainers.length > 0 ? (
               <>
@@ -216,7 +220,7 @@ export default function DashboardPage() {
             <TrendingDown className="h-4 w-4 text-red-500" />
           </CardHeader>
           <CardContent>
-            {isLoading ? (
+            {showLoading ? (
               <Skeleton className="h-8 w-24" />
             ) : stats.topLosers.length > 0 ? (
               <>
@@ -251,7 +255,7 @@ export default function DashboardPage() {
           </div>
         </CardHeader>
         <CardContent>
-          {isLoading ? (
+          {showLoading ? (
             <div className="space-y-4">
               {Array.from({ length: 5 }).map((_, i) => (
                 <div key={i} className="flex items-center justify-between">

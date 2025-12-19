@@ -24,6 +24,58 @@ from ml.config.training_config import DynamoConfig
 from ml.utils.common_utils import MLLogger
 
 
+def get_current_seasonal_league_from_table(league_metadata_table: Any, logger: Optional[MLLogger] = None) -> Optional[str]:
+    """
+    Get the current active seasonal league from the league metadata table.
+    
+    Args:
+        league_metadata_table: DynamoDB table resource for league metadata
+        logger: Optional logger instance
+        
+    Returns:
+        Name of the current seasonal league or None if not found
+    """
+    if logger is None:
+        logger = MLLogger("get_current_seasonal_league")
+    
+    try:
+        # Query for active seasonal leagues
+        response = league_metadata_table.scan(
+            FilterExpression=Attr("isActive").eq(True) & Attr("league_type").eq("seasonal")
+        )
+        
+        active_seasonal_leagues = response.get("Items", [])
+        
+        if not active_seasonal_leagues:
+            logger.warning("No active seasonal leagues found")
+            return None
+        
+        # Filter out leagues with "Event" in the name
+        active_seasonal_leagues = [
+            league for league in active_seasonal_leagues
+            if league.get("league_name") and "Event" not in league.get("league_name", "")
+        ]
+        
+        if not active_seasonal_leagues:
+            logger.warning("No active seasonal leagues found after filtering out Event leagues")
+            return None
+        
+        # If multiple active seasonal leagues, prefer the most recent one
+        # Sort by last_updated or startDate
+        active_seasonal_leagues.sort(
+            key=lambda x: x.get("last_updated", ""), 
+            reverse=True
+        )
+        
+        current_league = active_seasonal_leagues[0]["league_name"]
+        logger.info(f"Current seasonal league: {current_league}")
+        return current_league
+        
+    except Exception as e:
+        logger.error(f"Error getting current seasonal league: {e}")
+        return None
+
+
 @dataclass
 class CurrencyStat:
     """Lightweight representation of currency metadata."""
@@ -59,6 +111,7 @@ class DataSourceConfig:
     currency_metadata_table: Optional[str] = None
     currency_prices_table: Optional[str] = None
     league_metadata_table: Optional[str] = None
+    daily_prices_table: Optional[str] = None
     
     # S3 config
     data_lake_bucket: Optional[str] = None
@@ -76,7 +129,8 @@ class DataSourceConfig:
             region_name=dynamo_config.region_name,
             currency_metadata_table=dynamo_config.currency_metadata_table,
             currency_prices_table=dynamo_config.currency_prices_table,
-            league_metadata_table=dynamo_config.league_metadata_table
+            league_metadata_table=dynamo_config.league_metadata_table,
+            daily_prices_table=dynamo_config.daily_prices_table
         )
     
     @classmethod
@@ -168,10 +222,6 @@ class BaseDataSource(ABC):
         """Get list of available leagues."""
         pass
     
-    @abstractmethod
-    def get_most_recent_league(self) -> Optional[str]:
-        """Get the most recent league."""
-        pass
     
     def select_currencies(
         self,
@@ -268,11 +318,25 @@ class DynamoDBDataSource(BaseDataSource):
         session = boto3.session.Session(region_name=config.region_name)
         self._dynamodb = session.resource("dynamodb")
         
-        self._prices_table = self._dynamodb.Table(config.currency_prices_table)
-        self._metadata_table = self._dynamodb.Table(config.currency_metadata_table)
+        # Strip whitespace from table names to prevent lookup failures
+        # Required tables (should always be present)
+        currency_prices_table = config.currency_prices_table.strip() if config.currency_prices_table else ""
+        currency_metadata_table = config.currency_metadata_table.strip() if config.currency_metadata_table else ""
+        
+        # Optional tables (may be None or empty)
+        league_metadata_table = config.league_metadata_table.strip() if config.league_metadata_table else ""
+        daily_prices_table = config.daily_prices_table.strip() if config.daily_prices_table else ""
+        
+        self._prices_table = self._dynamodb.Table(currency_prices_table)
+        self._metadata_table = self._dynamodb.Table(currency_metadata_table)
         self._league_table = (
-            self._dynamodb.Table(config.league_metadata_table)
-            if config.league_metadata_table
+            self._dynamodb.Table(league_metadata_table)
+            if league_metadata_table
+            else None
+        )
+        self._daily_prices_table = (
+            self._dynamodb.Table(daily_prices_table)
+            if daily_prices_table
             else None
         )
         
@@ -309,20 +373,26 @@ class DynamoDBDataSource(BaseDataSource):
             self._league_cache = metadata
             return metadata
 
-        items = self._scan_table(self._league_table)
-        for item in items:
-            league_name = item.get("league") or item.get("name")
-            if not league_name:
-                continue
+        try:
+            items = self._scan_table(self._league_table)
+            for item in items:
+                league_name = item.get("league") or item.get("name")
+                if not league_name:
+                    continue
 
-            start_raw = item.get("startDate") or item.get("start_date")
-            end_raw = item.get("endDate") or item.get("end_date")
+                start_raw = item.get("startDate") or item.get("start_date")
+                end_raw = item.get("endDate") or item.get("end_date")
 
-            metadata[league_name] = {
-                "start": self._coerce_datetime(start_raw),
-                "end": self._coerce_datetime(end_raw),
-                "is_active": bool(item.get("isActive", False)),
-            }
+                metadata[league_name] = {
+                    "start": self._coerce_datetime(start_raw),
+                    "end": self._coerce_datetime(end_raw),
+                    "is_active": bool(item.get("isActive", False)),
+                }
+            
+            if not metadata:
+                self.logger.warning(f"League metadata table {self._league_table.name} exists but returned no items")
+        except Exception as e:
+            self.logger.warning(f"Failed to load league metadata from table {self._league_table.name if self._league_table else 'unknown'}: {e}")
 
         self._league_cache = metadata
         return metadata
@@ -421,82 +491,21 @@ class DynamoDBDataSource(BaseDataSource):
         return list(league_metadata.keys())
     
     def get_most_recent_league(self) -> Optional[str]:
-        """Get the most recent active seasonal league."""
-        league_metadata = self._load_league_metadata()
-        if not league_metadata:
+        """
+        Get the most recent active seasonal league from DynamoDB.
+        
+        This method provides a consistent interface with S3DataSource.get_most_recent_league().
+        It uses the league metadata table to find the current active seasonal league.
+        
+        Returns:
+            Name of the most recent active seasonal league, or None if not found
+        """
+        if not self._league_table:
+            self.logger.warning("League metadata table not configured; cannot get most recent league")
             return None
         
-        # First, try to get the current active seasonal league from league metadata
-        # Look for leagues with league_type = "seasonal" and is_active = True
-        active_seasonal_leagues = []
-        
-        # We need to check the actual league metadata table for league_type
-        if self._league_table:
-            try:
-                items = self._scan_table(self._league_table)
-                for item in items:
-                    league_name = item.get("league") or item.get("name")
-                    league_type = item.get("league_type", "").lower()
-                    is_active = item.get("isActive", False)
-                    
-                    # Filter out leagues with "Event" in the name
-                    if league_name and "Event" in league_name:
-                        continue
-                    
-                    if league_name and league_type == "seasonal" and is_active:
-                        start_raw = item.get("startDate") or item.get("start_date")
-                        start_date = self._coerce_datetime(start_raw)
-                        if start_date:
-                            active_seasonal_leagues.append((league_name, start_date))
-                
-                if active_seasonal_leagues:
-                    # Return the seasonal league with the latest start date
-                    latest_seasonal = max(active_seasonal_leagues, key=lambda x: x[1])
-                    self.logger.info(f"Found current active seasonal league: {latest_seasonal[0]} (started: {latest_seasonal[1]})")
-                    return latest_seasonal[0]
-                    
-            except Exception as e:
-                self.logger.warning(f"Failed to get seasonal league from metadata table: {e}")
-        
-        # Fallback: try to find the most recent league from currency stats
-        stats = self.list_currency_stats()
-        if stats:
-            best_league = None
-            best_timestamp = None
-
-            for stat in stats:
-                # Filter out leagues with "Event" in the name
-                if stat.league and "Event" in stat.league:
-                    continue
-                    
-                timestamp = stat.last_updated or stat.last_availability_check
-                dt = self._coerce_datetime(timestamp) if timestamp else None
-                if dt is None:
-                    continue
-                if best_timestamp is None or dt > best_timestamp:
-                    best_timestamp = dt
-                    best_league = stat.league
-
-            if best_league:
-                self.logger.info(f"Using most recent league from currency stats: {best_league}")
-                return best_league
-
-        # Final fallback: use the league with the latest start date from metadata
-        if league_metadata:
-            # Filter out leagues with "Event" in the name
-            filtered_metadata = {
-                league: metadata for league, metadata in league_metadata.items()
-                if league and "Event" not in league
-            }
-            if filtered_metadata:
-                latest_league = max(
-                    filtered_metadata.items(),
-                    key=lambda item: item[1].get("start") or datetime.min,
-                )[0]
-                self.logger.info(f"Using fallback league with latest start date: {latest_league}")
-                return latest_league
-        
-        return None
+        return get_current_seasonal_league_from_table(self._league_table, self.logger)
+    
     
     def build_price_dataframe(
         self,
@@ -612,6 +621,134 @@ class DynamoDBDataSource(BaseDataSource):
             return None
 
         return pd.DataFrame.from_records(records)
+    
+    def build_validation_dataframe(
+        self,
+        currencies: Sequence[str],
+        current_league: str,
+        pay_currency: str = "Chaos Orb",
+        max_days: int = 60,
+    ) -> Optional[pd.DataFrame]:
+        """
+        Build validation dataframe from current league daily prices in DynamoDB.
+        
+        This fetches data from the daily-prices table for the current active league,
+        which will be used as the validation set during model training.
+        
+        Args:
+            currencies: List of currency names to fetch
+            current_league: Name of current active league
+            pay_currency: Pay currency (default: Chaos Orb) - not used in daily prices table
+            max_days: Maximum number of days of league data to fetch
+            
+        Returns:
+            DataFrame with same structure as build_price_dataframe output,
+            or None if no data found
+        """
+        if not self._daily_prices_table:
+            self.logger.warning("Daily prices table not configured; cannot fetch validation data")
+            return None
+        
+        items = []
+        
+        try:
+            # Calculate date range (last max_days)
+            end_date = datetime.now(timezone.utc).date()
+            start_date = end_date - timedelta(days=max_days)
+            
+            # Query using league-date-index GSI
+            response = self._daily_prices_table.query(
+                IndexName='league-date-index',
+                KeyConditionExpression=Key('league').eq(current_league) & 
+                                     Key('date').between(
+                                         start_date.strftime('%Y-%m-%d'), 
+                                         end_date.strftime('%Y-%m-%d')
+                                     ),
+                ScanIndexForward=True  # Oldest first
+            )
+            
+            items.extend(response.get('Items', []))
+            
+            # Handle pagination
+            while 'LastEvaluatedKey' in response:
+                response = self._daily_prices_table.query(
+                    IndexName='league-date-index',
+                    KeyConditionExpression=Key('league').eq(current_league) & 
+                                         Key('date').between(
+                                             start_date.strftime('%Y-%m-%d'), 
+                                             end_date.strftime('%Y-%m-%d')
+                                         ),
+                    ScanIndexForward=True,
+                    ExclusiveStartKey=response['LastEvaluatedKey']
+                )
+                items.extend(response.get('Items', []))
+            
+            if not items:
+                self.logger.warning(f"No daily price records found for league {current_league}")
+                return None
+            
+            # Load league metadata for league_start, league_day calculation
+            league_metadata = self._load_league_metadata()
+            league_info = league_metadata.get(current_league, {})
+            league_start = league_info.get('start')
+            
+            records: List[Dict[str, Any]] = []
+            
+            for item in items:
+                currency = item.get('currency')
+                if currency not in currencies:
+                    continue
+                
+                # Convert date string to datetime
+                date_str = item.get('date')
+                if not date_str:
+                    continue
+                
+                try:
+                    date_obj = pd.to_datetime(date_str)
+                except (ValueError, TypeError):
+                    self.logger.warning(f"Invalid date format in daily prices: {date_str}")
+                    continue
+                
+                # Use avg_price as the price value
+                price = self._coerce_float(item.get('avg_price'))
+                if price is None or price <= 0:
+                    continue
+                
+                # Calculate league_day if league_start is available
+                if league_start:
+                    try:
+                        league_day = (date_obj - league_start).days
+                    except (TypeError, ValueError):
+                        league_day = 0
+                else:
+                    league_day = 0
+                
+                records.append({
+                    'currency': currency,
+                    'get_currency': currency,
+                    'price': price,
+                    'date': date_obj,
+                    'league_name': current_league,
+                    'league_start': league_start,
+                    'league_end': league_info.get('end'),
+                    'league_active': league_info.get('is_active', True),
+                    'league_day': league_day,
+                })
+            
+            if not records:
+                self.logger.warning(f"No qualifying records for currencies {currencies} in league {current_league}")
+                return None
+            
+            df = pd.DataFrame.from_records(records)
+            df.sort_values(['league_name', 'date'], inplace=True)
+            df.reset_index(drop=True, inplace=True)
+            
+            return df
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching validation data from daily prices table: {e}")
+            return None
 
 
 class S3DataSource(BaseDataSource):
@@ -635,7 +772,7 @@ class S3DataSource(BaseDataSource):
         if self._metadata_cache is not None:
             return self._metadata_cache
             
-        self.logger.info("Loading currency metadata from S3...")
+        self.logger.debug("Loading currency metadata from S3...")
         
         all_data = self._load_all_historical_data()
         
@@ -678,7 +815,7 @@ class S3DataSource(BaseDataSource):
             ))
         
         self._metadata_cache = stats
-        self.logger.info(f"Loaded statistics for {len(stats)} currencies")
+        self.logger.debug(f"Loaded statistics for {len(stats)} currencies")
         return stats
     
     def get_available_leagues(self) -> List[str]:
@@ -689,7 +826,7 @@ class S3DataSource(BaseDataSource):
             return []
         
         available_leagues = all_data['League'].unique().tolist()
-        self.logger.info(f"Discovered {len(available_leagues)} leagues in S3: {available_leagues}")
+        self.logger.debug(f"Discovered {len(available_leagues)} leagues in S3: {available_leagues}")
         return list(available_leagues)
     
     def get_most_recent_league(self) -> Optional[str]:
@@ -719,7 +856,7 @@ class S3DataSource(BaseDataSource):
         min_league_days: int = 0,
     ) -> Optional[pd.DataFrame]:
         """Build price dataframe from S3 historical data."""
-        self.logger.info(f"Building price dataframe for {len(currencies)} currencies")
+        self.logger.debug(f"Building price dataframe for {len(currencies)} currencies")
         
         all_data = self._load_all_historical_data()
         
@@ -730,10 +867,10 @@ class S3DataSource(BaseDataSource):
         # Filter by included leagues
         if included_leagues:
             all_data = all_data[all_data['League'].isin(included_leagues)]
-            self.logger.info(f"Filtered to leagues: {included_leagues}")
+            self.logger.debug(f"Filtered to leagues: {included_leagues}")
         else:
             available_leagues = all_data['League'].unique().tolist()
-            self.logger.info(f"Using all available leagues from S3: {available_leagues}")
+            self.logger.debug(f"Using all available leagues from S3: {available_leagues}")
         
         # Filter by currencies
         all_data = all_data[all_data['Get'].isin(currencies)]
@@ -764,7 +901,7 @@ class S3DataSource(BaseDataSource):
         # Sort by date
         df = df.sort_values(['currency', 'date']).reset_index(drop=True)
         
-        self.logger.info(f"Built price dataframe: {df.shape}")
+        self.logger.debug(f"Built price dataframe: {df.shape}")
         return df
     
     def _load_all_historical_data(self) -> pd.DataFrame:
@@ -774,7 +911,7 @@ class S3DataSource(BaseDataSource):
         if cache_key in self._data_cache:
             return self._data_cache[cache_key]
         
-        self.logger.info("Loading all historical data from S3...")
+        self.logger.debug("Loading all historical data from S3...")
         
         try:
             response = self.s3_client.list_objects_v2(
@@ -792,11 +929,12 @@ class S3DataSource(BaseDataSource):
                 self.logger.warning("No currency CSV files found in historical-data/")
                 return pd.DataFrame()
             
-            self.logger.info(f"Found {len(csv_files)} CSV files to process")
+            self.logger.debug(f"Found {len(csv_files)} CSV files to process")
             
             all_dataframes = []
             
             for csv_key in csv_files:
+                temp_path = None
                 try:
                     with tempfile.NamedTemporaryFile(mode='w+', suffix='.csv', delete=False) as temp_file:
                         temp_path = temp_file.name
@@ -816,13 +954,19 @@ class S3DataSource(BaseDataSource):
                     df['League'] = league_name
                     
                     all_dataframes.append(df)
-                    os.unlink(temp_path)
                     
                     self.logger.debug(f"Loaded {len(df)} records from {csv_key}")
                     
                 except Exception as e:
                     self.logger.warning(f"Failed to load {csv_key}: {e}")
                     continue
+                finally:
+                    # Always clean up temporary file
+                    if temp_path and os.path.exists(temp_path):
+                        try:
+                            os.unlink(temp_path)
+                        except Exception as cleanup_error:
+                            self.logger.warning(f"Failed to clean up temporary file {temp_path}: {cleanup_error}")
             
             if not all_dataframes:
                 self.logger.error("Failed to load any CSV files")
@@ -831,7 +975,7 @@ class S3DataSource(BaseDataSource):
             combined_df = pd.concat(all_dataframes, ignore_index=True)
             self._data_cache[cache_key] = combined_df
             
-            self.logger.info(f"Loaded {len(combined_df)} total records from {len(all_dataframes)} files")
+            self.logger.debug(f"Loaded {len(combined_df)} total records from {len(all_dataframes)} files")
             return combined_df
             
         except Exception as e:
@@ -880,18 +1024,26 @@ class S3DataSource(BaseDataSource):
                 parquet_files.sort(key=lambda x: response['Contents'][next(i for i, obj in enumerate(response['Contents']) if obj['Key'] == x)]['LastModified'], reverse=True)
                 s3_key = parquet_files[0]
             
-            self.logger.info(f"Loading processed data from s3://{data_lake_bucket}/{s3_key}")
+            self.logger.debug(f"Loading processed data from s3://{data_lake_bucket}/{s3_key}")
             
             # Download and load the parquet file
-            with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as temp_file:
-                temp_path = temp_file.name
-            
-            self.s3_client.download_file(data_lake_bucket, s3_key, temp_path)
-            df = pd.read_parquet(temp_path)
-            os.unlink(temp_path)
-            
-            self.logger.info(f"Successfully loaded processed data: {df.shape}")
-            return df
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as temp_file:
+                    temp_path = temp_file.name
+                
+                self.s3_client.download_file(data_lake_bucket, s3_key, temp_path)
+                df = pd.read_parquet(temp_path)
+                
+                self.logger.debug(f"Successfully loaded processed data: {df.shape}")
+                return df
+            finally:
+                # Always clean up temporary file
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.unlink(temp_path)
+                    except Exception as cleanup_error:
+                        self.logger.warning(f"Failed to clean up temporary file {temp_path}: {cleanup_error}")
             
         except Exception as e:
             self.logger.warning(f"Failed to load processed parquet data from S3: {e}")
@@ -943,22 +1095,34 @@ class S3DataSource(BaseDataSource):
                 # Extract experiment ID from filename
                 filename = os.path.basename(s3_key)
                 if filename.startswith('combined_currency_features_') and filename.endswith('.parquet'):
-                    found_experiment_id = filename[28:-8]  # Remove prefix and suffix
+                    # Use string methods instead of hardcoded indices for robustness
+                    # This avoids errors if the prefix length changes
+                    prefix = 'combined_currency_features_'
+                    suffix = '.parquet'
+                    found_experiment_id = filename[len(prefix):-len(suffix)]
                 else:
                     found_experiment_id = "unknown"
 
-            self.logger.info(f"Loading processed data from s3://{data_lake_bucket}/{s3_key}")
+            self.logger.debug(f"Loading processed data from s3://{data_lake_bucket}/{s3_key}")
 
             # Download and load the parquet file
-            with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as temp_file:
-                temp_path = temp_file.name
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as temp_file:
+                    temp_path = temp_file.name
 
-            self.s3_client.download_file(data_lake_bucket, s3_key, temp_path)
-            df = pd.read_parquet(temp_path)
-            os.unlink(temp_path)
+                self.s3_client.download_file(data_lake_bucket, s3_key, temp_path)
+                df = pd.read_parquet(temp_path)
 
-            self.logger.info(f"Successfully loaded processed data: {df.shape}")
-            return df, found_experiment_id
+                self.logger.debug(f"Successfully loaded processed data: {df.shape}")
+                return df, found_experiment_id
+            finally:
+                # Always clean up temporary file
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.unlink(temp_path)
+                    except Exception as cleanup_error:
+                        self.logger.warning(f"Failed to clean up temporary file {temp_path}: {cleanup_error}")
 
         except Exception as e:
             self.logger.warning(f"Failed to load processed parquet data from S3: {e}")
@@ -1003,4 +1167,5 @@ __all__ = [
     "create_data_source",
     "create_dynamo_data_source",
     "create_s3_data_source",
+    "get_current_seasonal_league_from_table",
 ]

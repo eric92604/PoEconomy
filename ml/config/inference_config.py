@@ -91,7 +91,7 @@ class InferenceConfig:
     prediction_cache_ttl_hours: int = int(os.getenv("PREDICTION_CACHE_TTL_HOURS", "2"))
     
     # Prediction interval settings
-    default_confidence_level: float = float(os.getenv("DEFAULT_CONFIDENCE_LEVEL", "0.95"))  # Used when not specified in model metadata
+    default_confidence_level: float = float(os.getenv("DEFAULT_CONFIDENCE_LEVEL", "0.86"))  # 60% confidence for narrower prediction ranges
     
     def __post_init__(self) -> None:
         """Post-initialization setup."""
