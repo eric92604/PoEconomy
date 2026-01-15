@@ -38,75 +38,103 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+  
+  /* POE-themed colors */
+  --color-poe-gold: var(--poe-gold);
+  --color-poe-gold-dim: var(--poe-gold-dim);
+  --color-poe-unique: var(--poe-unique);
+  --color-poe-rare: var(--poe-rare);
+  --color-poe-magic: var(--poe-magic);
+  --color-poe-teal: var(--poe-teal);
 }
 
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  /* Warm cream background for POE feel in light mode */
+  --background: #faf8f5;
+  --foreground: #1a1614;
+  --card: #ffffff;
+  --card-foreground: #1a1614;
+  --popover: #ffffff;
+  --popover-foreground: #1a1614;
+  /* Gold primary for POE theme */
+  --primary: #8b6914;
+  --primary-foreground: #faf8f5;
+  --secondary: #f5f0e8;
+  --secondary-foreground: #1a1614;
+  --muted: #f5f0e8;
+  --muted-foreground: #6b5c4a;
+  --accent: #f5f0e8;
+  --accent-foreground: #1a1614;
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --border: rgba(139, 105, 20, 0.2);
+  --input: rgba(139, 105, 20, 0.15);
+  --ring: #8b6914;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar: #f5f0e8;
+  --sidebar-foreground: #1a1614;
+  --sidebar-primary: #8b6914;
+  --sidebar-primary-foreground: #faf8f5;
+  --sidebar-accent: #f5f0e8;
+  --sidebar-accent-foreground: #1a1614;
+  --sidebar-border: rgba(139, 105, 20, 0.2);
+  --sidebar-ring: #8b6914;
+  
+  /* POE-specific colors (darker for light mode readability) */
+  --poe-gold: #8b6914;
+  --poe-gold-dim: #6b5c4a;
+  --poe-unique: #8b4513;
+  --poe-rare: #9a8000;
+  --poe-magic: #4444cc;
+  --poe-teal: #008b9a;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
+  /* Warmer dark background for POE feel */
+  --background: #0d0b09;
   --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
+  --card: #1a1614;
   --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
+  --popover: #1a1614;
   --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
+  /* Gold primary for POE theme */
+  --primary: #c9a961;
+  --primary-foreground: #0d0b09;
+  --secondary: #2a2420;
   --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
+  --muted: #2a2420;
+  --muted-foreground: #a09080;
+  --accent: #2a2420;
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --border: rgba(201, 169, 97, 0.15);
+  --input: rgba(201, 169, 97, 0.1);
+  --ring: #c9a961;
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
+  --sidebar: #1a1614;
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-primary: #c9a961;
+  --sidebar-primary-foreground: #0d0b09;
+  --sidebar-accent: #2a2420;
   --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --sidebar-border: rgba(201, 169, 97, 0.15);
+  --sidebar-ring: #c9a961;
+  
+  /* POE-specific colors */
+  --poe-gold: #c9a961;
+  --poe-gold-dim: #8b7355;
+  --poe-unique: #af6025;
+  --poe-rare: #ffff77;
+  --poe-magic: #8888ff;
+  --poe-teal: #00bcd4;
 }
 
 @layer base {
@@ -116,4 +144,66 @@
   body {
     @apply bg-background text-foreground;
   }
+}
+
+/* POE-themed utility classes */
+@layer utilities {
+  .text-poe-gold {
+    color: var(--poe-gold);
+  }
+  .text-poe-unique {
+    color: var(--poe-unique);
+  }
+  .text-poe-rare {
+    color: var(--poe-rare);
+  }
+  .text-poe-magic {
+    color: var(--poe-magic);
+  }
+  .text-poe-teal {
+    color: var(--poe-teal);
+  }
+  .border-poe-gold {
+    border-color: var(--poe-gold);
+  }
+  .bg-poe-gold {
+    background-color: var(--poe-gold);
+  }
+  .glow-gold {
+    box-shadow: 0 0 20px rgba(201, 169, 97, 0.3), 0 0 40px rgba(201, 169, 97, 0.1);
+  }
+  .glow-gold-sm {
+    box-shadow: 0 0 10px rgba(201, 169, 97, 0.2);
+  }
+  .border-gradient-gold {
+    border: 1px solid transparent;
+    background: linear-gradient(var(--card), var(--card)) padding-box,
+                linear-gradient(135deg, rgba(201, 169, 97, 0.5), rgba(201, 169, 97, 0.1), rgba(201, 169, 97, 0.3)) border-box;
+  }
+}
+
+/* Hero gradient background */
+.hero-gradient {
+  background: radial-gradient(ellipse at center top, rgba(201, 169, 97, 0.08) 0%, transparent 50%),
+              radial-gradient(ellipse at center bottom, rgba(139, 115, 85, 0.05) 0%, transparent 40%);
+}
+
+/* Animated shimmer effect for Mirror */
+@keyframes mirror-shimmer {
+  0%, 100% { filter: drop-shadow(0 0 8px rgba(201, 169, 97, 0.4)); }
+  50% { filter: drop-shadow(0 0 16px rgba(201, 169, 97, 0.7)); }
+}
+
+.mirror-glow {
+  animation: mirror-shimmer 3s ease-in-out infinite;
+}
+
+/* Subtle texture overlay */
+.texture-overlay::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%' height='100%' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+  pointer-events: none;
+  opacity: 0.5;
 }
