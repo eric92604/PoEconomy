@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import Image from "next/image";
-import { ArrowRight, TrendingUp, Sparkles, Shield, Clock, BarChart3, Zap } from "lucide-react";
+import { ArrowRight, TrendingUp, Shield, BarChart3, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { LiveStatsBar } from "@/components/landing/live-stats-bar";
@@ -16,8 +16,8 @@ export default function Home() {
   return (
     <div className="relative">
       {/* Hero Section */}
-      <section className="relative hero-gradient py-16 sm:py-24">
-        <div className="flex flex-col items-center text-center space-y-8">
+      <section className="relative hero-gradient py-12 sm:py-16">
+        <div className="flex flex-col items-center text-center space-y-6">
           {/* Mirror of Kalandra Hero Visual */}
           <div className="relative">
             <div className="absolute inset-0 bg-gradient-to-b from-[var(--poe-gold)]/20 to-transparent blur-3xl scale-150" />
@@ -75,8 +75,8 @@ export default function Home() {
       <LiveStatsBar />
 
       {/* Features Section */}
-      <section className="py-16 sm:py-20">
-        <div className="text-center mb-12">
+      <section className="py-10 sm:py-12">
+        <div className="text-center mb-8">
           <h2 className="text-2xl font-bold sm:text-3xl mb-3">
             Why Exiles Trust <span className="text-poe-gold">PoEconomy</span>
           </h2>
@@ -170,8 +170,8 @@ export default function Home() {
       </section>
 
       {/* How It Works Section */}
-      <section className="py-16 border-t border-border/40">
-        <div className="text-center mb-12">
+      <section className="py-10 sm:py-12 border-t border-border/40">
+        <div className="text-center mb-8">
           <h2 className="text-2xl font-bold sm:text-3xl mb-3">
             How It Works
           </h2>
@@ -180,8 +180,8 @@ export default function Home() {
           </p>
         </div>
 
-        <div className="grid gap-8 md:grid-cols-3">
-          <div className="text-center space-y-4">
+        <div className="grid gap-6 md:grid-cols-3">
+          <div className="text-center space-y-3">
             <div className="h-12 w-12 rounded-full bg-poe-gold/10 border border-poe-gold/30 flex items-center justify-center mx-auto">
               <span className="text-poe-gold font-bold">1</span>
             </div>
@@ -191,7 +191,7 @@ export default function Home() {
             </p>
           </div>
 
-          <div className="text-center space-y-4">
+          <div className="text-center space-y-3">
             <div className="h-12 w-12 rounded-full bg-poe-gold/10 border border-poe-gold/30 flex items-center justify-center mx-auto">
               <span className="text-poe-gold font-bold">2</span>
             </div>
@@ -201,7 +201,7 @@ export default function Home() {
             </p>
           </div>
 
-          <div className="text-center space-y-4">
+          <div className="text-center space-y-3">
             <div className="h-12 w-12 rounded-full bg-poe-gold/10 border border-poe-gold/30 flex items-center justify-center mx-auto">
               <span className="text-poe-gold font-bold">3</span>
             </div>
@@ -213,41 +213,6 @@ export default function Home() {
         </div>
       </section>
 
-      {/* CTA Section */}
-      <section className="py-16 border-t border-border/40">
-        <div className="text-center space-y-6">
-          <div className="flex justify-center gap-3 items-center">
-            <Image
-              src="/images/divine-orb.png"
-              alt="Divine Orb"
-              width={40}
-              height={40}
-              className="opacity-80"
-            />
-            <Sparkles className="h-5 w-5 text-poe-gold" />
-            <Image
-              src="/images/mirror-of-kalandra.png"
-              alt="Mirror of Kalandra"
-              width={40}
-              height={40}
-              className="opacity-80"
-            />
-          </div>
-          <h2 className="text-2xl font-bold sm:text-3xl">
-            Ready to Trade Smarter?
-          </h2>
-          <p className="text-muted-foreground max-w-lg mx-auto">
-            Join thousands of exiles using PoEconomy to make better trading decisions.
-            Free, no account required.
-          </p>
-          <Button asChild size="lg" className="bg-poe-gold hover:bg-poe-gold/90 text-background font-semibold px-8 glow-gold-sm">
-            <Link href="/investments">
-              Explore Investment Opportunities
-              <ArrowRight className="ml-2 h-4 w-4" />
-            </Link>
-          </Button>
-        </div>
-      </section>
     </div>
   );
 }
