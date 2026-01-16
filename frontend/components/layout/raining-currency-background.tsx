@@ -98,8 +98,9 @@ export function RainingCurrencyBackground() {
     resizeCanvas();
     window.addEventListener("resize", resizeCanvas);
 
-    // Initialize particles
-    const particleCount = 20;
+    // Initialize particles - fewer on mobile for better performance
+    const isMobile = window.innerWidth < 768;
+    const particleCount = isMobile ? 10 : 20;
     if (particlesRef.current.length === 0) {
       for (let i = 0; i < particleCount; i++) {
         particlesRef.current.push(createParticle());
