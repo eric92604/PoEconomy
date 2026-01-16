@@ -18,9 +18,8 @@ import {
 } from "recharts";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import type { ChartDataPoint } from "@/types";
-import { formatPrice, formatChaosPrice, formatChartDate } from "@/lib/utils";
+import { formatChaosPrice, formatChartDate } from "@/lib/utils";
 import { useTheme } from "@/lib/providers";
-import Image from "next/image";
 
 interface PriceChartProps {
   data: ChartDataPoint[];

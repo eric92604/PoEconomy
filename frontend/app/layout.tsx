@@ -129,12 +129,7 @@ export default function RootLayout({
               },
               "keywords": "Path of Exile, POE, currency predictions, trading tools, investment analysis, market intelligence",
               "genre": "Gaming",
-              "gamePlatform": "Path of Exile",
-              "aggregateRating": {
-                "@type": "AggregateRating",
-                "ratingValue": "4.8",
-                "ratingCount": "150"
-              }
+              "gamePlatform": "Path of Exile"
             })
           }}
         />

@@ -22,7 +22,6 @@ import type {
   SortDirection,
 } from "@/types";
 import {
-  formatPrice,
   formatPercentage,
   formatConfidence,
   formatChaosPrice,

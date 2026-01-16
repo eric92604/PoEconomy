@@ -5,10 +5,9 @@
  */
 
 import { useState, useMemo, useEffect } from "react";
-import { useRouter } from "next/navigation";
 import { InvestmentCurrencyTable } from "@/components/currency/investment-currency-table";
 import { CurrencyTableSkeleton } from "@/components/currency/currency-table-skeleton";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
@@ -31,7 +30,6 @@ import { preloadAllCurrencyIcons, preloadVisibleIcons } from "@/lib/utils/icon-p
 import { PriceChart } from "@/components/charts";
 
 export default function InvestmentsPage() {
-  const router = useRouter();
   const queryClient = useQueryClient();
   const [selectedLeague, setSelectedLeague] = useState<string>("");
   const [selectedTab, setSelectedTab] = useState<string>("short");
