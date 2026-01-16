@@ -1,4 +1,9 @@
 import type { NextConfig } from "next";
+import bundleAnalyzer from "@next/bundle-analyzer";
+
+const withBundleAnalyzer = bundleAnalyzer({
+  enabled: process.env.ANALYZE === "true",
+});
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
@@ -32,8 +37,19 @@ const nextConfig: NextConfig = {
   
   // Enable experimental features
   experimental: {
-    // Optimize package imports
-    optimizePackageImports: ["lucide-react", "recharts", "@tanstack/react-query"],
+    // Optimize package imports - tree-shake heavy libraries
+    optimizePackageImports: [
+      "lucide-react",
+      "recharts", 
+      "@tanstack/react-query",
+      "@radix-ui/react-dialog",
+      "@radix-ui/react-dropdown-menu",
+      "@radix-ui/react-popover",
+      "@radix-ui/react-select",
+      "@radix-ui/react-tabs",
+      "@radix-ui/react-tooltip",
+      "@radix-ui/react-slider",
+    ],
   },
 
   // Image optimization (unoptimized for static export)
@@ -61,99 +77,6 @@ const nextConfig: NextConfig = {
     NEXT_PUBLIC_ENABLE_DEVTOOLS: process.env.NEXT_PUBLIC_ENABLE_DEVTOOLS,
   },
 
-  // Redirects for WWW to non-WWW
-  async redirects() {
-    return [
-      {
-        source: '/:path*',
-        has: [
-          {
-            type: 'host',
-            value: 'www.poeconomy.com',
-          },
-        ],
-        destination: 'https://poeconomy.com/:path*',
-        permanent: true,
-      },
-    ];
-  },
-
-  // Headers for security and caching
-  async headers() {
-    return [
-      {
-        source: '/(.*)',
-        headers: [
-          {
-            key: 'X-Frame-Options',
-            value: 'DENY',
-          },
-          {
-            key: 'X-Content-Type-Options',
-            value: 'nosniff',
-          },
-          {
-            key: 'Referrer-Policy',
-            value: 'strict-origin-when-cross-origin',
-          },
-          {
-            key: 'Permissions-Policy',
-            value: 'camera=(), microphone=(), geolocation=()',
-          },
-          // SEO headers
-          {
-            key: 'X-Robots-Tag',
-            value: 'index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1',
-          },
-        ],
-      },
-      {
-        source: '/static/(.*)',
-        headers: [
-          {
-            key: 'Cache-Control',
-            value: 'public, max-age=31536000, immutable',
-          },
-        ],
-      },
-      {
-        source: '/_next/static/(.*)',
-        headers: [
-          {
-            key: 'Cache-Control',
-            value: 'public, max-age=31536000, immutable',
-          },
-        ],
-      },
-      {
-        source: '/_next/image(.*)',
-        headers: [
-          {
-            key: 'Cache-Control',
-            value: 'public, max-age=86400',
-          },
-        ],
-      },
-      {
-        source: '/api/(.*)',
-        headers: [
-          {
-            key: 'Cache-Control',
-            value: 'public, max-age=300, s-maxage=300',
-          },
-        ],
-      },
-      {
-        source: '/((?!api|_next|static|images|favicon.ico).*)',
-        headers: [
-          {
-            key: 'Cache-Control',
-            value: 'public, max-age=300, stale-while-revalidate=600',
-          },
-        ],
-      },
-    ];
-  },
 };
 
-export default nextConfig;
+export default withBundleAnalyzer(nextConfig);
