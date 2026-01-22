@@ -9,24 +9,22 @@ export function Footer() {
   const currentYear = new Date().getFullYear();
 
   return (
-    <footer className="border-t border-border/40 bg-background">
-      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 flex h-16 items-center justify-between">
-        <div className="text-sm text-muted-foreground">
-          © {currentYear} {APP_NAME}. All rights reserved.
-        </div>
-        
-        {/* Disclaimer */}
-        <div className="text-xs text-muted-foreground text-center flex-1 mx-4">
-          PoEconomy is not affiliated with Grinding Gear Games.
-        </div>
-        
-        {/* Contact Information */}
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Mail className="h-4 w-4" />
+    <footer className="border-t border-border/40 bg-card/30">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-4">
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="text-sm text-muted-foreground">
+            © {currentYear} {APP_NAME}. All rights reserved.
+          </div>
+          
+          <div className="text-xs text-muted-foreground text-center">
+            PoEconomy is not affiliated with Grinding Gear Games.
+          </div>
+          
           <a 
             href="mailto:contact@poeconomy.com" 
-            className="hover:text-foreground transition-colors"
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors inline-flex items-center gap-1.5"
           >
+            <Mail className="h-3.5 w-3.5" />
             contact@poeconomy.com
           </a>
         </div>

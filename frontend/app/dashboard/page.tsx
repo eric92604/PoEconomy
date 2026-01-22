@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { useCurrencies, useLeagues, useLatestPredictions } from "@/lib/hooks";
 import { useQueryClient } from "@tanstack/react-query";
-import { formatPrice, formatPercentage, formatConfidence, formatChaosPrice } from "@/lib/utils";
+import { formatPercentage, formatConfidence, formatChaosPrice } from "@/lib/utils";
 import { CurrencyIcon } from "@/components/currency/currency-icon";
 import { ChaosPrice } from "@/components/currency/chaos-price";
 import { preloadAllCurrencyIcons } from "@/lib/utils/icon-preloader";
@@ -126,7 +126,6 @@ export default function DashboardPage() {
 
   const isLoading = currenciesLoading || leaguesLoading || predictionsLoading;
   const isFetching = currenciesFetching || leaguesFetching || predictionsFetching;
-  const isInitialLoad = currenciesLoading || leaguesLoading;
   // Show loading state during both initial load and refresh
   const showLoading = isLoading || isFetching;
 

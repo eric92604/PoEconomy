@@ -5,11 +5,10 @@
  */
 
 import { useState, useMemo, useEffect } from "react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import {
   Select,
@@ -31,12 +30,10 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Search, RefreshCw, TrendingUp, X, Check, ChevronsUpDown } from "lucide-react";
-import { useLeagues, useCurrencies, useHistoricalPrices, useBatchPredictions, useLatestPredictions } from "@/lib/hooks";
+import { RefreshCw, X, Check, ChevronsUpDown } from "lucide-react";
+import { useLeagues, useHistoricalPrices, useBatchPredictions, useLatestPredictions } from "@/lib/hooks";
 import { useQueryClient } from "@tanstack/react-query";
 import { PriceChart } from "@/components/charts";
-import { formatPrice, formatRelativeTime } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import type { ChartDataPoint, CurrencyFilters } from "@/types";
 
@@ -52,9 +49,8 @@ export default function PricesPage() {
     minPrice: undefined,
   });
 
-  // Fetch leagues and currencies
-  const { data: leaguesData, isLoading: leaguesLoading, isFetching: leaguesFetching } = useLeagues();
-  const { data: currenciesData, isLoading: currenciesLoading, isFetching: currenciesFetching } = useCurrencies();
+  // Fetch leagues
+  const { data: leaguesData, isFetching: leaguesFetching } = useLeagues();
 
   // Get available leagues
   const leagues = useMemo(() => {
@@ -72,7 +68,7 @@ export default function PricesPage() {
   }, [leagues, selectedLeague]);
 
   // Fetch all latest predictions for the league to get list of currencies with predictions
-  const { data: latestPredictionsData, isLoading: latestPredictionsLoading, isFetching: latestPredictionsFetching } = useLatestPredictions(
+  const { data: latestPredictionsData, isFetching: latestPredictionsFetching } = useLatestPredictions(
     {
       league: selectedLeague,
       horizons: ["1d"],
@@ -239,12 +235,9 @@ export default function PricesPage() {
     queryClient.invalidateQueries({ queryKey: ["latest-predictions"] });
   };
 
-  const isLoading = leaguesLoading || latestPredictionsLoading;
   const isFetching = leaguesFetching || latestPredictionsFetching;
   const isChartLoading = historicalLoading || predictionsLoading;
   const isChartFetching = historicalFetching || predictionsFetching;
-  // Show loading state during both initial load and refresh
-  const showLoading = isLoading || isFetching;
   const showChartLoading = isChartLoading || isChartFetching;
 
   return (

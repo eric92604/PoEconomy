@@ -5,8 +5,8 @@
  */
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
-import { TrendingUp } from "lucide-react";
 import { ThemeToggle } from "./theme-toggle";
 import { BackgroundEffectToggle } from "./background-effect-toggle";
 import { APP_NAME } from "@/lib/constants/config";
@@ -22,12 +22,18 @@ export function Header() {
   const pathname = usePathname();
 
   return (
-    <header className="sticky top-0 z-50 w-full border-b border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+    <header className="sticky top-0 z-50 w-full border-b border-[var(--poe-gold)]/20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 flex h-14 items-center">
         {/* Logo */}
-        <Link href="/" className="mr-6 flex items-center space-x-2">
-          <TrendingUp className="h-6 w-6" />
-          <span className="font-bold text-xl">{APP_NAME}</span>
+        <Link href="/" className="mr-6 flex items-center space-x-2 group">
+          <Image
+            src="/images/mirror-of-kalandra.png"
+            alt="PoEconomy"
+            width={28}
+            height={28}
+            className="group-hover:drop-shadow-[0_0_8px_rgba(201,169,97,0.5)] transition-all duration-300"
+          />
+          <span className="font-bold text-xl text-poe-gold">{APP_NAME}</span>
         </Link>
 
         {/* Navigation */}
@@ -37,8 +43,10 @@ export function Header() {
               key={item.href}
               href={item.href}
               className={cn(
-                "transition-colors hover:text-foreground/80",
-                pathname === item.href ? "text-foreground" : "text-foreground/60"
+                "transition-colors hover:text-poe-gold",
+                pathname === item.href 
+                  ? "text-poe-gold" 
+                  : "text-foreground/60"
               )}
             >
               {item.name}
