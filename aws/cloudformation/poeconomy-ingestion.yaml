@@ -111,6 +111,9 @@ Resources:
       KeySchema:
         - AttributeName: league_name
           KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
       Tags:
         - Key: App
           Value: PoEconomy

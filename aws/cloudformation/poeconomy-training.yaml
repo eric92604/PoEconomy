@@ -17,7 +17,7 @@ Parameters:
     Description: CPU units for the training task (1024 = 1 vCPU)
   TaskMemory:
     Type: Number
-    Default: 32768
+    Default: 65536
     Description: Memory in MB for the training task
   EphemeralStorageGiB:
     Type: Number
@@ -39,6 +39,14 @@ Parameters:
     Type: Number
     Default: 8
     Description: Number of parallel currency workers for training
+  MaxOptunaWorkers:
+    Type: Number
+    Default: 1
+    Description: Number of Optuna workers per currency for hyperparameter search
+  ModelNJobs:
+    Type: Number
+    Default: 4
+    Description: Number of parallel jobs for RandomForest/ExtraTrees model training
   NHyperparameterTrials:
     Type: Number
     Default: 200
@@ -240,9 +248,9 @@ Resources:
             - Name: MAX_CURRENCY_WORKERS
               Value: !Ref MaxCurrencyWorkers
             - Name: MAX_OPTUNA_WORKERS
-              Value: '2'
+              Value: !Ref MaxOptunaWorkers
             - Name: MODEL_N_JOBS
-              Value: '4'
+              Value: !Ref ModelNJobs
             # Logging
             - Name: LOG_LEVEL
               Value: !Ref LogLevel
