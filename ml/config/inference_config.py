@@ -36,10 +36,19 @@ class InferenceDataConfig:
     # Target variables - use all available horizons
     prediction_horizons: List[int] = field(default_factory=lambda: [1, 3, 7])
     
-    # Feature engineering windows
-    rolling_windows: List[int] = field(default_factory=lambda: [1, 3, 5, 7])
-    momentum_periods: List[int] = field(default_factory=lambda: [1, 3, 5, 7])
-    
+    # Feature engineering windows — must match training DataConfig
+    rolling_windows: List[int] = field(default_factory=lambda: [3, 5, 7])
+    momentum_periods: List[int] = field(default_factory=lambda: [3, 5, 7])
+
+    # Lag features
+    lag_periods: List[int] = field(default_factory=lambda: [1, 2, 3, 5, 7])
+
+    # EMA / MACD parameters
+    ema_spans: List[int] = field(default_factory=lambda: [3, 7, 14])
+    macd_fast_span: int = 5
+    macd_slow_span: int = 14
+    macd_signal_span: int = 3
+
     # Volatility feature engineering
     volatility_windows: List[int] = field(default_factory=lambda: [3, 5, 7])
     include_volatility_features: bool = True
@@ -56,8 +65,12 @@ class InferenceProcessingConfig:
     statistical_features: bool = True
     
     # Data Quality - more lenient for inference
-    outlier_threshold: float = float(os.getenv("OUTLIER_THRESHOLD", "4.0"))  # More lenient
-    missing_value_threshold: float = float(os.getenv("MISSING_VALUE_THRESHOLD", "0.7"))  # More lenient
+    outlier_threshold: float = float(os.getenv("OUTLIER_THRESHOLD", "4.0"))
+    missing_value_threshold: float = float(os.getenv("MISSING_VALUE_THRESHOLD", "0.9"))
+
+    # Fraction of feature values that may be NaN before a row is dropped.
+    # Must match training ProcessingConfig.max_nan_ratio.
+    max_nan_ratio: float = float(os.getenv("MAX_NAN_RATIO", "0.9"))
     
     # Scaling - keep robust scaling
     robust_scaling: bool = True

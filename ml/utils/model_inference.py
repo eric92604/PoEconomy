@@ -547,15 +547,11 @@ class ModelPredictor:
         feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
         feature_matrix = feature_frame.to_numpy(dtype=float, na_value=np.nan)
 
-        # Standardized NaN filtering - use same threshold as training (90%)
-        # This ensures consistency between training and inference
-        
-        # Count NaN values per row
+        # Drop rows that exceed the NaN ratio threshold — must match training.
         nan_counts = np.isnan(feature_matrix).sum(axis=1)
         total_features = feature_matrix.shape[1]
-        
-        # Use same threshold as training: remove rows with >90% NaN features
-        max_nan_ratio = 0.9
+
+        max_nan_ratio: float = getattr(self.config.processing, "max_nan_ratio", 0.9)
         max_nan_count = int(total_features * max_nan_ratio)
         
         # Filter rows with too many NaN values

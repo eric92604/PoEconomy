@@ -31,7 +31,7 @@ from config.training_config import MLConfig
 @dataclass
 class DailyPriceData:
     """Daily price aggregation data structure."""
-    
+
     currency: str
     league: str
     date: str  # YYYY-MM-DD format
@@ -39,6 +39,12 @@ class DailyPriceData:
     low_price: Decimal
     avg_price: Decimal
     price_change_percent: Decimal
+    # Market confidence aggregated from hourly POE Watch readings.
+    # 0.85 = normal confidence; 0.5 = low confidence (thin market / few listings).
+    # avg_confidence tracks overall data quality; min_confidence flags days with any
+    # low-confidence reading, which often precede large price moves.
+    avg_confidence: Decimal = Decimal("0.85")
+    min_confidence: Decimal = Decimal("0.85")
 
 
 class DailyPriceAggregator:
@@ -281,36 +287,45 @@ class DailyPriceAggregator:
         
         # Sort by timestamp to ensure proper order
         hourly_data.sort(key=lambda x: x["timestamp"])
-        
-        # Extract prices and convert to Decimal
-        prices = []
-        timestamps = []
-        
+
+        prices: List[Decimal] = []
+        confidences: List[Decimal] = []
+
         for item in hourly_data:
             price = item.get("price")
             if price is not None:
-                if isinstance(price, (int, float)):
-                    prices.append(Decimal(str(price)))
-                elif isinstance(price, Decimal):
-                    prices.append(price)
-                else:
-                    prices.append(Decimal(str(price)))
-                timestamps.append(item["timestamp"])
-        
+                prices.append(
+                    price if isinstance(price, Decimal) else Decimal(str(price))
+                )
+
+            confidence = item.get("confidence")
+            if confidence is not None:
+                confidences.append(
+                    confidence
+                    if isinstance(confidence, Decimal)
+                    else Decimal(str(confidence))
+                )
+
         if not prices:
             raise ValueError("No valid prices found in hourly data")
-        
-        # Calculate price statistics
+
         high_price = max(prices)
         low_price = min(prices)
         avg_price = sum(prices) / len(prices)
-        
-        # Calculate price change percentage (using first and last prices)
+
         if len(prices) > 1 and prices[0] > 0:
             price_change_percent = ((prices[-1] - prices[0]) / prices[0]) * 100
         else:
             price_change_percent = Decimal("0")
-        
+
+        # Aggregate confidence readings; fall back to neutral 0.85 if absent
+        avg_confidence = (
+            sum(confidences) / len(confidences)
+            if confidences
+            else Decimal("0.85")
+        )
+        min_confidence = min(confidences) if confidences else Decimal("0.85")
+
         return DailyPriceData(
             currency=currency,
             league=league,
@@ -318,7 +333,9 @@ class DailyPriceAggregator:
             high_price=high_price,
             low_price=low_price,
             avg_price=avg_price,
-            price_change_percent=price_change_percent
+            price_change_percent=price_change_percent,
+            avg_confidence=avg_confidence,
+            min_confidence=min_confidence,
         )
     
     def save_daily_price(self, daily_data: DailyPriceData) -> bool:
@@ -340,7 +357,9 @@ class DailyPriceAggregator:
                 "low_price": daily_data.low_price,
                 "avg_price": daily_data.avg_price,
                 "price_change_percent": daily_data.price_change_percent,
-                "created_at": int(time.time())
+                "avg_confidence": daily_data.avg_confidence,
+                "min_confidence": daily_data.min_confidence,
+                "created_at": int(time.time()),
             }
             
             self.daily_prices_table.put_item(Item=item)

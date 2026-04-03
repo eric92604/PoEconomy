@@ -286,11 +286,17 @@ class FeatureEngineeringPipeline:
         progress = ProgressLogger(
             self.logger, len(target_currencies), "Parallel Currency Processing"
         )
+
+        # Serialise config once so every worker gets the same settings as the
+        # orchestrator (custom rolling_windows, max_league_days, etc.).
+        config_dict = self.config.to_dict()
         
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             future_to_currency = {
-                executor.submit(self._process_currency_worker, raw_data, currency): currency
+                executor.submit(
+                    self._process_currency_worker, raw_data, currency, config_dict
+                ): currency
                 for currency in target_currencies
             }
             
@@ -362,25 +368,31 @@ class FeatureEngineeringPipeline:
                 return None
     
     @staticmethod
-    def _process_currency_worker(raw_data: pd.DataFrame, currency: str) -> Optional[pd.DataFrame]:
+    def _process_currency_worker(
+        raw_data: pd.DataFrame,
+        currency: str,
+        config_dict: Dict[str, Any],
+    ) -> Optional[pd.DataFrame]:
         """
-        Worker function for parallel processing.
-        
-        This is a static method to avoid pickling issues with multiprocessing.
-        
+        Worker function for parallel currency processing.
+
+        Accepts a serialised config dict so that every worker uses exactly
+        the same settings as the orchestrating process (e.g. custom
+        rolling_windows, max_league_days, outlier thresholds).  Using a
+        fresh ``MLConfig()`` default in each worker silently ignores any
+        programmatic overrides applied before the parallel run.
+
+        This is a static method to satisfy ``ProcessPoolExecutor`` pickling
+        requirements.
+
         Args:
-            raw_data: Complete dataframe
-            currency: Currency name to process
+            raw_data: Complete multi-currency dataframe.
+            currency: Currency name to filter and process.
+            config_dict: Serialised ``MLConfig.to_dict()`` from the parent process.
         """
-        # Create minimal configuration for worker
-        config = MLConfig()
-        
-        # Create processor
+        config = MLConfig.from_dict(config_dict)
         processor = DataProcessor(config.data, config.processing)
-        
-        # Filter and process data using currency column
         currency_data = raw_data[raw_data['currency'] == currency].copy()
-        
         processed_data, _ = processor.process_currency_data(currency_data, currency)
         return processed_data
     

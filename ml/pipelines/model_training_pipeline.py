@@ -821,10 +821,11 @@ class ModelTrainingPipeline:
                     self.logger.error(f"Cannot convert features to numeric: {e}")
                     return None
             
-            # Basic data quality filtering - more lenient for minimal data
-            # Remove rows with too many NaN values (>90% of features are NaN)
+            # Basic data quality filtering — drop rows where more than max_nan_ratio
+            # of feature values are NaN (aligned with inference path).
+            max_nan_ratio = self.config.processing.max_nan_ratio
             row_nan_ratio = np.isnan(X).sum(axis=1) / X.shape[1]
-            valid_rows = row_nan_ratio <= 0.5
+            valid_rows = row_nan_ratio <= max_nan_ratio
             X = X[valid_rows]
             processed_data = processed_data[valid_rows].reset_index(drop=True)
             
@@ -899,9 +900,9 @@ class ModelTrainingPipeline:
                                     validation_data[col] = np.nan
                             validation_features_raw = validation_data[feature_columns].values
                             
-                            # Apply same NaN filtering threshold (90%) to validation data
+                            # Apply same NaN filtering threshold as training to validation data
                             row_nan_ratio_val = np.isnan(validation_features_raw).sum(axis=1) / validation_features_raw.shape[1]
-                            valid_rows_val = row_nan_ratio_val <= 0.5
+                            valid_rows_val = row_nan_ratio_val <= max_nan_ratio
                             validation_features_raw = validation_features_raw[valid_rows_val]
                             validation_data_filtered = validation_data[valid_rows_val].reset_index(drop=True)
                             
@@ -952,9 +953,9 @@ class ModelTrainingPipeline:
                     # Use all available features for this horizon
                     X_horizon_filtered = processed_data[feature_columns].values
                     
-                    # Apply same NaN filtering threshold (90%) as training
+                    # Apply same NaN filtering threshold as training (per-horizon pass)
                     row_nan_ratio_horizon = np.isnan(X_horizon_filtered).sum(axis=1) / X_horizon_filtered.shape[1]
-                    valid_rows_horizon = row_nan_ratio_horizon <= 0.5
+                    valid_rows_horizon = row_nan_ratio_horizon <= max_nan_ratio
                     X_horizon_filtered = X_horizon_filtered[valid_rows_horizon]
                     processed_data_horizon = processed_data[valid_rows_horizon].reset_index(drop=True)
                     

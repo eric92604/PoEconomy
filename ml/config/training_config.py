@@ -95,19 +95,29 @@ class DataConfig:
     # Target variables
     prediction_horizons: List[int] = field(default_factory=lambda: [1, 3, 7])
     
-    # Feature engineering windows - use consistent horizons: 1, 3, 5, 7
-    rolling_windows: List[int] = field(default_factory=lambda: [1, 3, 5, 7])
-    momentum_periods: List[int] = field(default_factory=lambda: [1, 3, 5, 7])
-    
-    # Volatility feature engineering - use consistent horizons: 3, 5, 7 (removed 1-day as not meaningful)
+    # Rolling window sizes — window=1 is skipped internally (mean/min/max equal raw price)
+    rolling_windows: List[int] = field(default_factory=lambda: [3, 5, 7])
+    # Multi-day momentum periods (period=1 is skipped internally)
+    momentum_periods: List[int] = field(default_factory=lambda: [3, 5, 7])
+
+    # Explicit price lag look-back periods — highest-impact feature class for tree-based time-series
+    lag_periods: List[int] = field(default_factory=lambda: [1, 2, 3, 5, 7])
+
+    # Exponential moving average spans
+    ema_spans: List[int] = field(default_factory=lambda: [3, 7, 14])
+
+    # MACD parameters (scaled for ≤60-day league windows; standard 12/26/9 is too wide)
+    macd_fast_span: int = 5
+    macd_slow_span: int = 14
+    macd_signal_span: int = 3
+
+    # Volatility feature windows
     volatility_windows: List[int] = field(default_factory=lambda: [3, 5, 7])
-    include_volatility_features: bool = True
-    volatility_types: List[str] = field(default_factory=lambda: ['std', 'cv', 'range', 'garch'])
-    
-    
+
     # Feature engineering options
     include_league_features: bool = True
-    outlier_removal_iqr_multiplier: float = 2.0
+    # IQR multiplier for per-league outlier removal (3.0 ≈ 99.7% of a normal distribution)
+    outlier_removal_iqr_multiplier: float = 3.0
     
     # Data validation
     min_variance_threshold: float = 1e-8
@@ -127,7 +137,7 @@ class ProcessingConfig:
     
     # Data Quality
     outlier_threshold: float = 3.0
-    missing_value_threshold: float = 0.5
+    missing_value_threshold: float = 0.9
     max_missing_ratio: float = 0.3
     
     # Scaling
@@ -141,13 +151,9 @@ class ProcessingConfig:
     outlier_removal: bool = True
     use_parallel_processing: bool = False
     
-    # Target Engineering
-    target_columns: List[str] = field(default_factory=lambda: [
-        'price_1d',
-        'price_3d', 
-        'price_7d',
-        'price_14d'
-    ])
+    # Fraction of feature values that may be NaN before a training row is dropped.
+    # Align with model_inference.py which uses 0.9 for the inference path.
+    max_nan_ratio: float = 0.9
 
 
 @dataclass

@@ -999,13 +999,16 @@ class ModelTrainer:
                     f"{len(X_weight_opt)} weight-opt samples"
                 )
         
-        # Scale features if needed
+        # Scale features if needed — scaler is fit on train only to prevent leakage.
+        # All downstream splits (val and weight-opt) must use the same transform.
         scaler = None
         if self.processing_config.robust_scaling:
             scaler = RobustScaler()
             X_train_split = scaler.fit_transform(X_train_split)
             if X_val is not None:
                 X_val = scaler.transform(X_val)
+            if X_weight_opt is not None and len(X_weight_opt) > 0:
+                X_weight_opt = scaler.transform(X_weight_opt)
         
         # Train model (validation data is always available now)
         training_history = None
