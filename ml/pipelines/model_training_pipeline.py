@@ -979,19 +979,6 @@ class ModelTrainingPipeline:
                     
                     self.logger.debug(f"  After filtering: {len(X_horizon):,} samples available for training")
                     
-                    # If we have very few samples, try a more lenient approach
-                    if len(X_horizon) < 20:
-                        # Try using forward-fill for NaN values to preserve more data
-                        y_horizon_ffill = processed_data_horizon[target_col].fillna(method='ffill').values
-                        target_valid_mask_ffill = ~pd.isna(y_horizon_ffill)
-                        X_horizon_ffill = X_horizon_filtered[target_valid_mask_ffill]
-                        y_horizon_ffill = y_horizon_ffill[target_valid_mask_ffill]
-                        
-                        if len(X_horizon_ffill) > len(X_horizon):
-                            self.logger.debug(f"  Using forward-fill strategy: {len(X_horizon_ffill):,} samples (vs {len(X_horizon):,} without)")
-                            X_horizon = X_horizon_ffill
-                            y_horizon = y_horizon_ffill
-                    
                     if len(X_horizon) < 10:  # Absolute minimum threshold
                         self.logger.warning(f"Insufficient data for {currency_name} {horizon} horizon: {len(X_horizon)} samples (need at least 10)")
                         continue
