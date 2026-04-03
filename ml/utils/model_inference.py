@@ -166,12 +166,10 @@ class ModelPredictor:
                                     # If imputer fails to load, we cannot proceed safely
                                     raise ValueError(f"Failed to load required imputer for {currency} ({horizon}). Model artifacts may be incomplete.")
                             else:
-                                self.logger.warning(f"No imputer found for {currency} ({horizon}). This model may have been trained before imputation was saved.")
-                                # Fallback: use median imputation (but log warning)
-                                from sklearn.impute import SimpleImputer
-                                fallback_imputer = SimpleImputer(strategy='median')
-                                X = fallback_imputer.fit_transform(X)
-                                self.logger.warning(f"Used fallback imputation for {currency} ({horizon}) - this may cause prediction inconsistencies")
+                                self.logger.warning(
+                                    f"No imputer artifact found for {currency} ({horizon}). "
+                                    "Proceeding without imputation — model may have been trained on clean data."
+                                )
                             
                             # Load scaler and apply after imputation
                             scaler = joblib.load(artifact.scaler_path) if artifact.scaler_path and artifact.scaler_path.exists() else None
