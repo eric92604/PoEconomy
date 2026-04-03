@@ -1028,7 +1028,8 @@ class ModelTrainer:
         y_pred = model.predict(X_val)
         metrics = ModelMetrics.from_predictions(y_val, y_pred, target_names)
         
-        # Get number of validation samples and features
+        # Get number of training/validation samples and features
+        n_train = len(y_train_split)
         n_test = len(y_val)
         n_features = X_val.shape[1]
         
@@ -1072,7 +1073,7 @@ class ModelTrainer:
             model_type=model_type,
             currency=currency,
             training_history=training_history,
-            training_samples=n_test,
+            training_samples=n_train,
             n_features=n_features,
             confidence_level=0.95,
             feature_names=feature_names,  # Store exact feature names used during training
