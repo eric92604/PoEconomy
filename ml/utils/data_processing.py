@@ -5,14 +5,11 @@ Comprehensive data processing utilities for ML pipeline.
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any, Union
-from dataclasses import dataclass
 from pathlib import Path
-from sklearn.preprocessing import RobustScaler, StandardScaler
 
 from ml.config.training_config import DataConfig, ProcessingConfig, MLConfig
 from ml.utils.common_utils import MLLogger
 from ml.utils.data_sources import create_data_source, DataSourceConfig, BaseDataSource
-from ml.utils.feature_engineering import FeatureEngineeringResult
 
 
 
@@ -53,8 +50,6 @@ class DataProcessor:
         Returns:
             Cleaned dataframe
         """
-        original_shape = df.shape
-        
         # Replace infinity values with NaN
         df = df.replace([np.inf, -np.inf], np.nan)
         
