@@ -41,12 +41,11 @@ export default function DashboardPage() {
     }
   }, [currenciesData, currenciesLoading]);
 
-  // Get preferred league for initial data - prefer "Keepers" if available
+  // Use the first active league returned by the API (sorted seasonally by the backend)
   const preferredLeague = useMemo(() => {
     if (!leaguesData) return null;
     const leagues = Object.keys(leaguesData.leagues);
-    // Prefer "Keepers" if available, otherwise use first league
-    return leagues.includes("Keepers") ? "Keepers" : leagues[0];
+    return leagues[0] ?? null;
   }, [leaguesData]);
 
   // Fetch latest predictions using the optimized endpoint
