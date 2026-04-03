@@ -3,9 +3,9 @@ Centralized configuration management for ML training pipeline.
 
 Environment Variables:
     # Threading and Parallelization
-    MAX_CURRENCY_WORKERS: Number of parallel currency workers (default: 4)
-    MAX_OPTUNA_WORKERS: Number of Optuna workers per currency (default: 2)
-    MODEL_N_JOBS: Number of model training jobs per currency (default: 2)
+    MAX_CURRENCY_WORKERS: Number of parallel currency workers (default: 8)
+    MAX_OPTUNA_WORKERS: Number of Optuna workers per currency (default: 1)
+    MODEL_N_JOBS: Number of model training jobs per currency (default: 4)
     
     # Hyperparameter Optimization
     N_HYPERPARAMETER_TRIALS: Number of hyperparameter optimization trials (default: 200)
@@ -52,9 +52,9 @@ class ModelConfig:
     optimize_ensemble_weights: bool = True  # Enable Optuna-based weight optimization
     ensemble_weight_optimization_trials: int = 50  # Number of Optuna trials for weight optimization
     
-    max_currency_workers: int = field(default_factory=lambda: int(os.getenv('MAX_CURRENCY_WORKERS', '4')))
-    max_optuna_workers: int = field(default_factory=lambda: int(os.getenv('MAX_OPTUNA_WORKERS', '2')))
-    model_n_jobs: int = field(default_factory=lambda: int(os.getenv('MODEL_N_JOBS', '2')))
+    max_currency_workers: int = field(default_factory=lambda: int(os.getenv('MAX_CURRENCY_WORKERS', '8')))
+    max_optuna_workers: int = field(default_factory=lambda: int(os.getenv('MAX_OPTUNA_WORKERS', '1')))
+    model_n_jobs: int = field(default_factory=lambda: int(os.getenv('MODEL_N_JOBS', '4')))
     
     # Training Parameters
     test_size: float = 0.2

@@ -896,6 +896,17 @@ class ModelTrainingPipeline:
                         
                         if validation_data is not None and not validation_data.empty:
                             # Extract validation features and targets
+                            # Some features (e.g. price_log) are conditionally generated based on
+                            # price range; validation data may have a narrower range and skip them.
+                            # Align to only columns present in both datasets, padding missing ones with NaN.
+                            missing_cols = [c for c in feature_columns if c not in validation_data.columns]
+                            if missing_cols:
+                                self.logger.warning(
+                                    f"Validation data for {currency_name} is missing {len(missing_cols)} feature(s) "
+                                    f"present in training data: {missing_cols}. Filling with NaN."
+                                )
+                                for col in missing_cols:
+                                    validation_data[col] = np.nan
                             validation_features_raw = validation_data[feature_columns].values
                             
                             # Apply same NaN filtering threshold (90%) to validation data
@@ -935,7 +946,7 @@ class ModelTrainingPipeline:
                         validation_targets = None
             except Exception as e:
                 warning_msg = f"Error fetching validation data for {currency_name}: {e}. Training will continue without validation data."
-                self.logger.warning(warning_msg, exception=e)
+                self.logger.warning(warning_msg)
                 self.processing_stats['validation_failures'] += 1
                 validation_features = None
                 validation_targets = None
