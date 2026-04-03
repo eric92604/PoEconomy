@@ -155,9 +155,9 @@ class FeatureEngineer:
             df['league_day'] = (df['date'] - df['league_start']).dt.days
             
             # League phase features
-            max_league_day = df.groupby('league_name')['league_day'].max()
-            df['league_max_day'] = df['league_name'].map(max_league_day)
-            df['league_progress'] = df['league_day'] / (df['league_max_day'] + 1)
+            assumed_league_max_days = getattr(self.config, 'max_league_days', 60)
+            df['league_max_day'] = assumed_league_max_days
+            df['league_progress'] = df['league_day'] / (assumed_league_max_days + 1)
             
             # League age (how old is the league relative to others)
             latest_start = league_starts.max()
