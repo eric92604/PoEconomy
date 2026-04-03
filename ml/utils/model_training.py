@@ -960,27 +960,44 @@ class ModelTrainer:
                     "Using train/test split from training data instead."
                 )
             
-            # Use 80/20 split for train/validation (maintaining temporal order for time series)
-            split_idx = int(len(X) * 0.8)
-            if split_idx < 10:
-                # If we have very few samples, use at least 10 for training
-                split_idx = max(10, len(X) - 5) if len(X) > 15 else len(X) - 1
-            
-            X_train_split = X[:split_idx]
-            y_train_split = y[:split_idx]
-            X_val = X[split_idx:]
-            y_val = y[split_idx:]
+            # Use 60/20/20 split: train / early-stop val / weight-opt val
+            # Temporal order is preserved so later slices are always more recent
+            train_end = int(len(X) * 0.6)
+            val_end = int(len(X) * 0.8)
+            if train_end < 10:
+                # Fall back to 80/20 with no weight-opt split for very small datasets
+                train_end = max(10, len(X) - 5) if len(X) > 15 else len(X) - 1
+                val_end = len(X)
+
+            X_train_split = X[:train_end]
+            y_train_split = y[:train_end]
+            X_val = X[train_end:val_end]
+            y_val = y[train_end:val_end]
+            X_weight_opt = X[val_end:]
+            y_weight_opt = y[val_end:]
             validation_data_source = 'train_test_split'
-            
+
             if self.logger:
-                self.logger.debug(f"Using train/test split: {len(X_train_split)} training, {len(X_val)} validation samples")
+                self.logger.debug(
+                    f"Using 60/20/20 temporal split: {len(X_train_split)} train, "
+                    f"{len(X_val)} val, {len(X_weight_opt)} weight-opt samples"
+                )
         else:
             # Use provided validation data from DynamoDB
             X_train_split = X  # All historical data for training
             y_train_split = y
+            # Split DynamoDB val data 50/50 into early-stop val and weight-opt val
+            val_mid = len(X_val) // 2
+            X_weight_opt = X_val[val_mid:]
+            y_weight_opt = y_val[val_mid:]
+            X_val = X_val[:val_mid]
+            y_val = y_val[:val_mid]
             validation_data_source = 'dynamodb_daily_prices'
             if self.logger:
-                self.logger.debug(f"Using DynamoDB validation data: {len(X_val)} samples")
+                self.logger.debug(
+                    f"Using DynamoDB validation data: {len(X_val)} early-stop val, "
+                    f"{len(X_weight_opt)} weight-opt samples"
+                )
         
         # Scale features if needed
         scaler = None
@@ -993,7 +1010,7 @@ class ModelTrainer:
         # Train model (validation data is always available now)
         training_history = None
         if model_type == "ensemble":
-            model: Any = self._train_ensemble_model(X_train_split, y_train_split, X_val, y_val, currency)
+            model: Any = self._train_ensemble_model(X_train_split, y_train_split, X_val, y_val, currency, X_weight_opt, y_weight_opt)
             # Get training history from ensemble
             if hasattr(model, 'models'):
                 training_history = {}
@@ -1067,7 +1084,9 @@ class ModelTrainer:
         y_train: np.ndarray,
         X_val: np.ndarray,
         y_val: np.ndarray,
-        currency: str
+        currency: str,
+        X_weight_opt: Optional[np.ndarray] = None,
+        y_weight_opt: Optional[np.ndarray] = None,
     ) -> EnsembleModel:
         """Train ensemble model using per-currency hyperparameter optimization."""
         models = []
@@ -1170,16 +1189,22 @@ class ModelTrainer:
                 model.model = model._create_model()
             model.fit(X_train, y_train, X_val, y_val)
         
-        # Optimize ensemble weights if enabled
+        # Optimize ensemble weights if enabled, using the held-out weight-opt split
         optimized_weights = None
         if self.config.optimize_ensemble_weights and len(models) >= 2:
+            X_wo = X_weight_opt if X_weight_opt is not None and len(X_weight_opt) > 0 else X_val
+            y_wo = y_weight_opt if y_weight_opt is not None and len(y_weight_opt) > 0 else y_val
             if self.logger:
-                self.logger.debug(f"Optimizing ensemble weights for {currency}")
-            
+                self.logger.debug(
+                    f"Optimizing ensemble weights for {currency} on "
+                    f"{'weight-opt' if X_weight_opt is not None and len(X_weight_opt) > 0 else 'val (fallback)'} set "
+                    f"({len(X_wo)} samples)"
+                )
+
             try:
                 weight_optimizer = EnsembleWeightOptimizer(self.config, self.logger)
                 optimized_weights = weight_optimizer.optimize_weights(
-                    models, X_val, y_val, currency, 
+                    models, X_wo, y_wo, currency,
                     n_trials=self.config.ensemble_weight_optimization_trials
                 )
                 if self.logger:
