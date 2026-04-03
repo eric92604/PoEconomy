@@ -458,7 +458,9 @@ class ModelPredictor:
         horizon: Optional[str] = None,
         model_metadata: Optional[Dict] = None,
     ) -> Tuple[Optional[pd.DataFrame], List[str]]:
-        processed_data, metadata = self.data_processor.process_currency_data(df, currency)
+        processed_data, metadata = self.data_processor.process_currency_data(
+            df, currency, is_inference=True
+        )
         if processed_data is None or processed_data.empty:
             self.logger.warning(f"No processed data for {currency}", extra=metadata)
             return None, []

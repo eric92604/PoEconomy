@@ -94,7 +94,7 @@ class FeatureEngineer:
     # ------------------------------------------------------------------
 
     def engineer_features(
-        self, df: pd.DataFrame, currency: str
+        self, df: pd.DataFrame, currency: str, is_inference: bool = False
     ) -> FeatureEngineeringResult:
         """
         Run the complete feature engineering pipeline.
@@ -102,6 +102,13 @@ class FeatureEngineer:
         Args:
             df: Raw currency price dataframe (will be sorted internally).
             currency: Currency pair identifier used for logging.
+            is_inference: When True, skip target creation and outlier removal.
+                Target columns require future prices that are unavailable at
+                prediction time, and the dropna they trigger would remove the
+                most-recent observation — exactly the row the model predicts
+                from.  Outlier removal is also skipped because it is already
+                disabled via InferenceProcessingConfig.outlier_removal=False,
+                and the current league may have too few rows for a stable IQR.
 
         Returns:
             FeatureEngineeringResult with the enriched dataframe.
@@ -128,12 +135,13 @@ class FeatureEngineer:
             df_out = self._engineer_rolling_features(df_out)
             transformations_applied.append("rolling_features")
 
-            df_out = self._create_targets(df_out)
-            transformations_applied.append("target_creation")
+            if not is_inference:
+                df_out = self._create_targets(df_out)
+                transformations_applied.append("target_creation")
 
-            if self.processing_config.outlier_removal:
-                df_out = self._remove_outliers(df_out)
-                transformations_applied.append("outlier_removal")
+                if self.processing_config.outlier_removal:
+                    df_out = self._remove_outliers(df_out)
+                    transformations_applied.append("outlier_removal")
 
             final_shape = df_out.shape
             statistics: Dict[str, Any] = {

@@ -98,15 +98,19 @@ class DataProcessor:
     def process_currency_data(
         self,
         df: pd.DataFrame,
-        currency: str
+        currency: str,
+        is_inference: bool = False,
     ) -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
         """
         Complete data processing pipeline for a currency.
-        
+
         Args:
             df: Input dataframe
             currency: Currency identifier
-            
+            is_inference: Passed through to FeatureEngineer.engineer_features.
+                When True, target creation and outlier removal are skipped so
+                that the most-recent observation is preserved for prediction.
+
         Returns:
             Tuple of (processed_dataframe, processing_metadata)
         """
@@ -128,7 +132,9 @@ class DataProcessor:
             cleaned_df = self._clean_price_data(df)
             
             # 3. Engineer features
-            feature_result = self.feature_engineer.engineer_features(cleaned_df, currency)
+            feature_result = self.feature_engineer.engineer_features(
+                cleaned_df, currency, is_inference=is_inference
+            )
             metadata['feature_engineering_result'] = feature_result.__dict__
             
             if feature_result.data is None or feature_result.data.empty:
