@@ -839,16 +839,6 @@ class ModelTrainingPipeline:
                 }
             )
             
-            # Create and fit imputer on full dataset (will be reused for all horizons)
-            # This ensures consistent imputation values across all horizons
-            fitted_imputer = None
-            if np.isnan(X).any():
-                fitted_imputer = SimpleImputer(strategy='median')
-                fitted_imputer.fit(X)  # Fit on full dataset
-                X = fitted_imputer.transform(X)  # Transform full dataset
-                self.logger.debug(f"Applied median imputation for remaining NaN values")
-            else:
-                self.logger.debug(f"No NaN values found, skipping imputation")
 
             if len(X) < 5:  # Reduced minimum from 50 to 5
                 self.logger.warning(f"Insufficient data for {currency_name}: {len(X)} samples")
@@ -915,11 +905,7 @@ class ModelTrainingPipeline:
                             validation_features_raw = validation_features_raw[valid_rows_val]
                             validation_data_filtered = validation_data[valid_rows_val].reset_index(drop=True)
                             
-                            # Apply same imputer (fitted on training data)
-                            if fitted_imputer is not None:
-                                validation_features = fitted_imputer.transform(validation_features_raw)
-                            else:
-                                validation_features = validation_features_raw
+                            validation_features = validation_features_raw
                             
                             # Extract validation targets (will be extracted per horizon)
                             validation_targets = validation_data_filtered
@@ -971,10 +957,6 @@ class ModelTrainingPipeline:
                     valid_rows_horizon = row_nan_ratio_horizon <= 0.9
                     X_horizon_filtered = X_horizon_filtered[valid_rows_horizon]
                     processed_data_horizon = processed_data[valid_rows_horizon].reset_index(drop=True)
-                    
-                    # Apply the fitted imputer to this horizon's data
-                    if fitted_imputer is not None:
-                        X_horizon_filtered = fitted_imputer.transform(X_horizon_filtered)
                     
                     # Get target for this horizon (using filtered processed_data)
                     y_horizon = processed_data_horizon[target_col].values
@@ -1052,9 +1034,6 @@ class ModelTrainingPipeline:
                     )
                     
                     if training_result is not None:
-                        # Attach the fitted imputer to the training result
-                        # This ensures it gets saved with model artifacts
-                        training_result.imputer = fitted_imputer
                         horizon_results[horizon] = training_result
                         horizon_models[horizon] = training_result.model
                         self.logger.debug(f"Successfully trained {horizon} model for {currency_name}")
@@ -1162,9 +1141,6 @@ class ModelTrainingPipeline:
                 if training_result is None:
                     self.logger.error(f"Model training failed for {currency_name}")
                     return None
-                
-                # Attach the fitted imputer to the training result
-                training_result.imputer = fitted_imputer
                 
                 # Save model artifacts
                 try:
