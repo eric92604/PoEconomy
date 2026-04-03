@@ -21,7 +21,7 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 
-from ml.config.training_config import MLConfig, get_default_config
+from ml.config.training_config import MLConfig, get_config_by_mode
 
 
 def create_base_parser(description: str, epilog: Optional[str] = None) -> argparse.ArgumentParser:
@@ -130,73 +130,43 @@ def add_currency_arguments(parser: argparse.ArgumentParser) -> argparse.Argument
 def add_feature_engineering_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """
     Add feature engineering specific arguments to a parser.
-    
+
     Args:
         parser: ArgumentParser to add arguments to
-        
+
     Returns:
         Updated ArgumentParser
     """
     parser.add_argument(
-        '--skip-feature-engineering',
-        action='store_true',
-        help='Skip feature engineering step'
-    )
-    
-    parser.add_argument(
-        '--parallel',
-        action='store_true',
-        help='Use parallel processing'
-    )
-    
-    parser.add_argument(
         '--save-individual',
         action='store_true',
-        help='Save individual currency datasets'
+        help='Save individual currency datasets alongside the combined dataset'
     )
-    
-    parser.add_argument(
-        '--train-all-currencies',
-        action='store_true',
-        help='Train models for all currencies with sufficient data'
-    )
-    
+
     parser.add_argument(
         '--max-league-days',
         type=int,
         help='Maximum days into each league to consider'
     )
-    
+
     return parser
 
 
 def load_config_from_args(args: Any) -> MLConfig:
     """
     Load configuration based on command line arguments.
-    
+
     Args:
         args: Parsed command line arguments with mode, config, etc.
-        
+
     Returns:
         Loaded MLConfig instance
     """
-    # Load from file if specified
     if hasattr(args, 'config') and args.config:
         return MLConfig.from_file(args.config)
-    
-    # Load based on mode
-    if hasattr(args, 'mode'):
-        if args.mode == 'production':
-            config = get_default_config()
-        elif args.mode == 'development':
-            config = get_default_config()
-        else:  # test
-            config = get_default_config()
-    else:
-        # Default to production if no mode specified
-        config = get_default_config()
-    
-    return config
+
+    mode = getattr(args, 'mode', 'production')
+    return get_config_by_mode(mode)
 
 
 def apply_args_to_config(config: MLConfig, args: Any) -> MLConfig:
@@ -238,15 +208,6 @@ def apply_args_to_config(config: MLConfig, args: Any) -> MLConfig:
         config.model.max_currency_workers = args.max_workers
     
     # Apply feature engineering specific arguments
-    if hasattr(args, 'train_all_currencies') and args.train_all_currencies:
-        config.data.train_all_currencies = True
-        # When training all currencies, set min value to 0.1 by default
-        if not hasattr(args, 'min_avg_value') or args.min_avg_value is None:
-            config.data.min_avg_value_threshold = 0.1
-    
-    if hasattr(args, 'parallel') and args.parallel:
-        config.processing.use_parallel_processing = True
-    
     if hasattr(args, 'save_individual') and args.save_individual:
         config.experiment.save_individual_datasets = True
     

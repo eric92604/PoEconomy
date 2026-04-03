@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 sys.path.append('/var/task/ml')
 
 from ml.pipelines.feature_engineering_pipeline import FeatureEngineeringPipeline
-from ml.config.training_config import get_default_config, get_all_currencies_config
+from ml.config.training_config import get_config_by_mode
 
 # Set up standardized logging
 from ml.utils.common_utils import setup_standard_logging
@@ -85,12 +85,9 @@ def main():
         logger.info("Starting PoEconomy feature engineering...")
         check_timeout()
         
-        # Determine configuration mode
+        # Determine configuration mode from environment (production/development/test)
         mode = os.getenv('MODE', 'production')
-        if mode == 'production':
-            config = get_default_config()
-        else:
-            config = get_all_currencies_config()
+        config = get_config_by_mode(mode)
         
         # Override config with environment variables
         if os.getenv('EXPERIMENT_ID'):

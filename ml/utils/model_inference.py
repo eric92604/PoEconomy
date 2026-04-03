@@ -18,7 +18,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from ml.config.inference_config import InferenceConfig, get_inference_config_from_env
+from ml.config.inference_config import InferenceConfig, get_inference_config
 from ml.utils.data_processing import DataProcessor
 from ml.utils.data_sources import create_data_source, DataSourceConfig, BaseDataSource
 from ml.utils.common_utils import MLLogger
@@ -98,7 +98,7 @@ class ModelPredictor:
         data_source: Optional[BaseDataSource] = None,
     ) -> None:
         self.models_dir = Path(models_dir)
-        self.config = config or get_inference_config_from_env()
+        self.config = config or get_inference_config()
         self.logger = logger or MLLogger("ModelPredictor")
         if data_source is None:
             data_source_config = DataSourceConfig.from_dynamo_config(self.config.dynamo)
@@ -182,10 +182,9 @@ class ModelPredictor:
                             
                             latest_features = X[-1].reshape(1, -1)
                             
-                            # Make prediction with uncertainty using ensemble spread
-                            # Use 60% confidence for narrower, more practical prediction ranges
                             prediction_value, lower, upper = self._compute_interval_from_ensemble(
-                                model, latest_features, confidence_level=0.60
+                                model, latest_features,
+                                confidence_level=self.config.default_confidence_level,
                             )
                             
                             # Validate prediction value
@@ -552,7 +551,7 @@ class ModelPredictor:
         nan_counts = np.isnan(feature_matrix).sum(axis=1)
         total_features = feature_matrix.shape[1]
 
-        max_nan_ratio: float = getattr(self.config.processing, "max_nan_ratio", 0.9)
+        max_nan_ratio: float = self.config.processing.max_nan_ratio
         max_nan_count = int(total_features * max_nan_ratio)
         
         # Filter rows with too many NaN values

@@ -24,22 +24,19 @@ def parse_arguments():
 Examples:
   # Production training with full optimization
   python train_models.py --mode production
-  
-  # Development training with faster settings
+
+  # Development training with reduced scale for faster iteration
   python train_models.py --mode development
-  
-  # Quick testing with minimal settings
+
+  # Quick smoke test with minimal settings
   python train_models.py --mode test
-  
-  # Train ALL currencies with sufficient data (regardless of value)
-  python train_models.py --train-all-currencies
-  
-  # Train ALL currencies with custom thresholds
-  python train_models.py --train-all-currencies --min-avg-value 0.1 --min-records 50
-  
+
+  # Lower value threshold to include more currencies
+  python train_models.py --min-avg-value 0.1
+
   # Custom data file
   python train_models.py --data-path /path/to/data.parquet
-  
+
   # Custom configuration
   python train_models.py --config /path/to/config.json
         """
@@ -47,14 +44,7 @@ Examples:
     
     # Add currency-specific arguments
     parser = add_currency_arguments(parser)
-    
-    # Training-specific arguments
-    parser.add_argument(
-        '--train-all-currencies',
-        action='store_true',
-        help='Train models for ALL currencies with sufficient data (not just high-value ones)'
-    )
-    
+
     return parser.parse_args()
 
 

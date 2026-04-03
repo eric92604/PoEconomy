@@ -24,24 +24,24 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Production feature engineering
+  # Production feature engineering (full scale)
   python run_feature_engineering.py --mode production
-  
-  # Development feature engineering with faster settings
+
+  # Development feature engineering (reduced scale for faster iteration)
   python run_feature_engineering.py --mode development
-  
-  # Quick testing with minimal settings
+
+  # Quick smoke test with minimal settings
   python run_feature_engineering.py --mode test
-  
-  # Train ALL currencies with sufficient data (regardless of value)
-  python run_feature_engineering.py --train-all-currencies
-  
-  # Train ALL currencies with custom thresholds
-  python run_feature_engineering.py --train-all-currencies --min-avg-value 0.1 --min-records 50
-  
+
+  # Lower value threshold to include more currencies
+  python run_feature_engineering.py --min-avg-value 0.1
+
+  # Save per-currency datasets alongside the combined file
+  python run_feature_engineering.py --save-individual
+
   # Custom data file
   python run_feature_engineering.py --data-path /path/to/data.parquet
-  
+
   # Custom configuration
   python run_feature_engineering.py --config /path/to/config.json
         """
@@ -50,40 +50,28 @@ Examples:
     # Use shared base parser for common arguments
     base_parser = create_base_parser("Feature Engineering Pipeline")
     for action in base_parser._actions:
-        if action.dest not in ['help']:  # Skip help action
+        if action.dest not in ['help']:
             parser._add_action(action)
-    
-    parser.add_argument(
-        '--train-all-currencies',
-        action='store_true',
-        help='Train models for ALL currencies with sufficient data (not just high-value ones)'
-    )
-    
+
     # Add currency-specific arguments
     currency_parser = add_currency_arguments(argparse.ArgumentParser())
     for action in currency_parser._actions:
-        if action.dest not in ['help']:  # Skip help action
+        if action.dest not in ['help']:
             parser._add_action(action)
-    
+
     # Feature engineering specific arguments
-    parser.add_argument(
-        '--parallel',
-        action='store_true',
-        help='Use parallel processing'
-    )
-    
     parser.add_argument(
         '--save-individual',
         action='store_true',
-        help='Save individual currency datasets'
+        help='Save individual currency datasets alongside the combined dataset'
     )
-    
+
     parser.add_argument(
         '--max-league-days',
         type=int,
         help='Maximum days into each league to consider'
     )
-    
+
     return parser.parse_args()
 
 
@@ -105,10 +93,8 @@ def main():
         # Log configuration
         print(f"Starting feature engineering in {args.mode} mode...")
         print(f"Experiment ID: {config.experiment.experiment_id}")
-        print(f"Train all currencies: {config.data.train_all_currencies}")
         print(f"Min avg value threshold: {config.data.min_avg_value_threshold}")
         print(f"Min records threshold: {config.data.min_records_threshold}")
-        print(f"Parallel processing: {getattr(config.processing, 'use_parallel_processing', False)}")
         
         # Run feature engineering
         results = engineer.run_feature_engineering_experiment()

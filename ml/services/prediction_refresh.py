@@ -31,7 +31,7 @@ from typing import Iterable, List, Optional, Sequence
 import boto3
 from boto3.dynamodb.conditions import Key
 
-from ml.config.inference_config import get_inference_config_from_env, InferenceConfig
+from ml.config.inference_config import get_inference_config, InferenceConfig
 from ml.utils.data_sources import create_data_source, DataSourceConfig, BaseDataSource
 import joblib
 import numpy as np
@@ -65,7 +65,7 @@ class DirectModelPredictor(ModelPredictor):
         data_source: Optional[BaseDataSource] = None,
     ) -> None:
         self.models_dir = Path(models_dir)
-        self.config = config or get_inference_config_from_env()
+        self.config = config or get_inference_config()
         self.logger = logger or MLLogger("DirectModelPredictor")
         if data_source is None:
             data_source_config = DataSourceConfig.from_dynamo_config(self.config.dynamo)
@@ -440,10 +440,9 @@ class DirectModelPredictor(ModelPredictor):
                             X = scaler.transform(X)
                         latest_features = X[-1].reshape(1, -1)
                         
-                        # Make prediction with uncertainty using ensemble spread
-                        # Use 60% confidence for narrower, more practical prediction ranges
                         prediction_value, lower, upper = self._compute_interval_from_ensemble(
-                            model, latest_features, confidence_level=0.60
+                            model, latest_features,
+                            confidence_level=self.config.default_confidence_level,
                         )
                         
                         # Validate prediction value
@@ -591,14 +590,14 @@ def _get_current_price(currency: str, league: str, data_source: BaseDataSource, 
         return None
 
 
-def _load_options(event: Optional[dict]) -> RefreshOptions:
+def _load_options(event: Optional[dict], config: InferenceConfig) -> RefreshOptions:
     event = event or {}
     currencies = event.get("currencies")
     horizons = event.get("horizons", DEFAULT_HORIZONS)
-    ttl_hours = int(event.get("ttl_hours", os.getenv("PREDICTION_CACHE_TTL_HOURS", 2)))
+    ttl_hours = int(event.get("ttl_hours", config.prediction_cache_ttl_hours))
     return RefreshOptions(
         currencies=currencies,
-        pay_currency="Chaos Orb",  # Always use Chaos Orb as pay currency
+        pay_currency="Chaos Orb",
         horizons=horizons,
         ttl_hours=ttl_hours,
     )
@@ -780,9 +779,10 @@ def _write_predictions(
 def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
     """Shared implementation for Lambda handler and CLI."""
     logger = MLLogger("PredictionRefresh", level=os.getenv("LOG_LEVEL", "INFO"))
-    
+
     try:
-        options = _load_options(event)
+        config = get_inference_config()
+        options = _load_options(event, config)
         logger.info(
             "Starting prediction refresh",
             extra={
@@ -791,9 +791,6 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
                 "ttl_hours": options.ttl_hours,
             },
         )
-
-        # Use inference-specific configuration
-        config = get_inference_config_from_env()
         models_dir = Path(os.getenv("MODELS_DIR", "ml/models/currency"))
         
         # Ensure models directory exists and contains bundled models
