@@ -13,9 +13,7 @@ import warnings
 import argparse
 from datetime import datetime
 import pandas as pd
-import numpy as np
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import multiprocessing as mp
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -24,11 +22,10 @@ sys.path.append(str(Path(__file__).parent.parent))
 warnings.filterwarnings('ignore')
 
 # Import utilities
-from ml.config.training_config import MLConfig, DataConfig, ProcessingConfig, get_default_config, get_all_currencies_config, get_high_value_config
-from ml.utils.common_utils import setup_ml_logging, MLLogger, ProgressLogger
+from ml.config.training_config import MLConfig, get_default_config
+from ml.utils.common_utils import setup_ml_logging, ProgressLogger
 from ml.utils.data_processing import DataProcessor
-from ml.utils.feature_engineering import FeatureEngineer
-from ml.utils.data_processing import generate_target_currency_list, generate_all_currencies_list
+from ml.utils.data_processing import generate_all_currencies_list
 from ml.utils.data_sources import create_data_source, DataSourceConfig
 
 

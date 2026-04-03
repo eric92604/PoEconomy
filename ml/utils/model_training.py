@@ -3,7 +3,6 @@ Model training utilities optimized for multi-core systems.
 """
 
 import numpy as np
-import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any, Union
 from dataclasses import dataclass, asdict
 from pathlib import Path

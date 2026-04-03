@@ -14,14 +14,14 @@ import traceback
 import time
 from contextlib import contextmanager
 from typing import Generator
-from typing import List, Optional, Any, Dict
+from typing import Optional, Any, Dict
 from pathlib import Path
 from datetime import datetime
 
 import pandas as pd
 import numpy as np
 
-from ml.config.training_config import MLConfig, get_default_config, get_all_currencies_config, get_high_value_config
+from ml.config.training_config import MLConfig, get_default_config
 
 
 def create_base_parser(description: str, epilog: Optional[str] = None) -> argparse.ArgumentParser:

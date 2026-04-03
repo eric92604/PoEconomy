@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from ml.pipelines.feature_engineering_pipeline import FeatureEngineeringPipeline
-from ml.utils.common_utils import create_base_parser, add_currency_arguments, add_feature_engineering_arguments, load_config_from_args, apply_args_to_config
+from ml.utils.common_utils import create_base_parser, add_currency_arguments, load_config_from_args, apply_args_to_config
 
 
 def parse_arguments():

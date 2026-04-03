@@ -300,7 +300,6 @@ class ModelPredictor:
         """Get the most recent price for a currency using primary key query."""
         try:
             # Query the prices table using primary key for efficiency
-            from boto3.dynamodb.conditions import Key
             # For now, return a default price since we don't have direct table access
             # This could be enhanced to use the data source's query methods
             # No fallback - this should not happen in production

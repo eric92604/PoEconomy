@@ -15,19 +15,17 @@ from typing import Dict, List, Optional, Any, Union
 import warnings
 from datetime import datetime
 import pandas as pd
-import json
 import numpy as np
 
 sys.path.append(str(Path(__file__).parent.parent))
 
 warnings.filterwarnings('ignore')
 
-from ml.config.training_config import MLConfig, get_default_config
-from ml.utils.common_utils import setup_ml_logging, MLLogger, ProgressLogger
+from ml.config.training_config import MLConfig
+from ml.utils.common_utils import setup_ml_logging, ProgressLogger
 from ml.utils.model_training import ModelTrainer, save_model_artifacts
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import multiprocessing as mp
 
 
 class ModelTrainingPipeline:

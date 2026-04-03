@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence
 
 import boto3
 from boto3.dynamodb.conditions import Key

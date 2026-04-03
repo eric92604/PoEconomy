@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-from ml.config.training_config import MLConfig, DynamoConfig, LoggingConfig
+from ml.config.training_config import DynamoConfig, LoggingConfig
 
 
 @dataclass
