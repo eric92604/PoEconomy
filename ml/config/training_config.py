@@ -11,6 +11,8 @@ Environment Variables:
     N_HYPERPARAMETER_TRIALS: Number of hyperparameter optimization trials (default: 200)
     N_MODEL_TRIALS: Number of model training iterations (default: 1000)
     CV_FOLDS: Number of cross-validation folds (default: 5)
+    EARLY_STOPPING_ROUNDS: LightGBM patience rounds before early stopping (default: 50)
+    ENSEMBLE_WEIGHT_OPT_TRIALS: Number of Optuna trials for ensemble weight optimization (default: 50)
 
     # Model Performance
     MAX_DEPTH: Maximum tree depth (default: 8)
@@ -20,6 +22,7 @@ Environment Variables:
     MIN_RECORDS_THRESHOLD: Minimum records required for training (default: 50)
     MAX_CURRENCIES_TO_TRAIN: Maximum number of currencies to train (default: 0 = no limit)
     MIN_AVG_VALUE_THRESHOLD: Minimum average value threshold in Chaos Orbs (default: 0.25)
+    VALIDATION_MAX_DAYS: Maximum days of recent price data fetched as validation set (default: 60)
 
     # AWS Configuration
     AWS_REGION: AWS region (default: us-west-2)
@@ -29,6 +32,9 @@ Environment Variables:
     DYNAMO_LEAGUE_METADATA_TABLE: DynamoDB league metadata table name
     DYNAMO_DAILY_PRICES_TABLE: DynamoDB daily prices table name
     DYNAMO_PREDICTIONS_TABLE: DynamoDB predictions table name
+
+    # Feature Filtering
+    MAX_NAN_RATIO: Maximum fraction of NaN values per row before dropping (default: 0.9)
 
     # Logging
     LOG_LEVEL: Logging level (DEBUG, INFO, WARNING, ERROR) (default: INFO)
@@ -52,7 +58,9 @@ class ModelConfig:
 
     # Ensemble Weight Optimization
     optimize_ensemble_weights: bool = True
-    ensemble_weight_optimization_trials: int = 50
+    ensemble_weight_optimization_trials: int = field(
+        default_factory=lambda: int(os.getenv('ENSEMBLE_WEIGHT_OPT_TRIALS', '50'))
+    )
 
     max_currency_workers: int = field(default_factory=lambda: int(os.getenv('MAX_CURRENCY_WORKERS', '8')))
     max_optuna_workers: int = field(default_factory=lambda: int(os.getenv('MAX_OPTUNA_WORKERS', '1')))
@@ -61,7 +69,7 @@ class ModelConfig:
     # Training Parameters
     random_state: int = 42
     cv_folds: int = field(default_factory=lambda: int(os.getenv('CV_FOLDS', '5')))
-    early_stopping_rounds: int = 50
+    early_stopping_rounds: int = field(default_factory=lambda: int(os.getenv('EARLY_STOPPING_ROUNDS', '50')))
 
     # Hyperparameter Optimization
     n_hyperparameter_trials: int = field(default_factory=lambda: int(os.getenv('N_HYPERPARAMETER_TRIALS', '200')))
@@ -122,7 +130,7 @@ class DataConfig:
     outlier_removal_iqr_multiplier: float = 3.0
 
     # Validation data configuration
-    validation_max_days: int = 60
+    validation_max_days: int = field(default_factory=lambda: int(os.getenv('VALIDATION_MAX_DAYS', '60')))
 
 
 @dataclass
@@ -141,7 +149,7 @@ class ProcessingConfig:
 
     # Fraction of feature values that may be NaN before a training row is dropped.
     # Must match the inference path which uses the same threshold.
-    max_nan_ratio: float = 0.9
+    max_nan_ratio: float = field(default_factory=lambda: float(os.getenv('MAX_NAN_RATIO', '0.9')))
 
 
 @dataclass
