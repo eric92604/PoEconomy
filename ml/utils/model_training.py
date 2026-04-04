@@ -361,7 +361,8 @@ class LightGBMModel(BaseModel):
             'random_state': self.config.random_state,
             'n_jobs': self.config.model_n_jobs,
             'force_row_wise': True,  # Better for multi-threading
-            'verbose': -1
+            'verbose': -1,
+            'importance_type': 'gain',
         })
         
         return lgb.LGBMRegressor(**params)  # type: ignore[arg-type]
