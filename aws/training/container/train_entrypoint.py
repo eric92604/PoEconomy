@@ -86,12 +86,10 @@ def main():
         logger.info("Starting PoEconomy model training...")
         check_timeout()
         
-        training_mode = os.getenv('TRAINING_MODE', 'production')  # CloudFormation default: production
         min_records = os.getenv('MIN_RECORDS_THRESHOLD', '50')  # CloudFormation default: 50
         max_currencies = os.getenv('MAX_CURRENCIES_TO_TRAIN', '0')  # CloudFormation default: 0
         
         logger.info(f"Training configuration:")
-        logger.debug(f"  Mode: {training_mode}")
         logger.debug(f"  Min Records: {min_records}")
         logger.debug(f"  Max Currencies: {max_currencies} (0 = no limit)")
         logger.debug(f"  Data Lake Bucket: {os.getenv('DATA_LAKE_BUCKET')}")
@@ -103,7 +101,6 @@ def main():
         
         sys.argv = [
             'train_models.py',
-            '--mode', training_mode,
             '--min-records', min_records
         ]
         

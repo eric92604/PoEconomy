@@ -26,7 +26,6 @@ echo "Deploying training infrastructure..."
 # Build parameter list - only include parameters if explicitly set
 # Required parameters (no defaults in CloudFormation) are always included
 PARAMS=(
-  "EnvironmentName=$ENVIRONMENT"
   "TrainingImageUri=$TRAINING_IMAGE_URI"
   "BaseStackName=$BASE_STACK_NAME"
   "IngestionStackName=$INGESTION_STACK_NAME"

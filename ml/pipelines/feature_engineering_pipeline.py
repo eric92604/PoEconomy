@@ -110,9 +110,33 @@ class FeatureEngineeringPipeline:
                 only_available_currencies=False,
                 availability_check_days=0,
             )
-            self.logger.info(
-                f"Feature engineering for ALL currencies mode: {len(target_currency_data)} currencies selected"
-            )
+
+            # Filter by explicit currency list when --currencies was passed (mirrors training pipeline).
+            if self.config.pipeline.currencies_to_train:
+                requested = {c.lower() for c in self.config.pipeline.currencies_to_train}
+                filtered = [
+                    pair for pair in target_currency_data
+                    if pair['get_currency'].lower() in requested
+                ]
+                missing = sorted(
+                    requested - {pair['get_currency'].lower() for pair in filtered}
+                )
+                self.logger.info(
+                    "Filtering currencies for feature engineering based on --currencies argument",
+                    extra={
+                        "requested": sorted(self.config.pipeline.currencies_to_train),
+                        "matched": [pair['get_currency'] for pair in filtered],
+                        "missing": missing,
+                    }
+                )
+                target_currency_data = filtered
+                self.logger.info(
+                    f"Feature engineering for {len(target_currency_data)} requested currencies"
+                )
+            else:
+                self.logger.info(
+                    f"Feature engineering for ALL currencies mode: {len(target_currency_data)} currencies selected"
+                )
 
             # Apply explicit limit when requested (useful for smoke tests / quick iterations)
             if (

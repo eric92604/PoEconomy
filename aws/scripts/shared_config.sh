@@ -1164,8 +1164,8 @@ EOF
 
   # Get CloudWatch Log Groups
   echo "Getting CloudWatch Log Groups..."
-  FEATURE_ENGINEERING_LOG_GROUP="/aws/ecs/poeconomy/${ENVIRONMENT}/feature-engineering"
-  TRAINING_LOG_GROUP="/aws/ecs/poeconomy/${ENVIRONMENT}/training"
+  FEATURE_ENGINEERING_LOG_GROUP="/aws/ecs/${FEATURE_ENGINEERING_STACK_NAME}"
+  TRAINING_LOG_GROUP="/aws/ecs/${TRAINING_STACK_NAME}"
   API_LAMBDA_LOG_GROUP="/aws/lambda/poeconomy-${ENVIRONMENT}-api"
   INGESTION_LAMBDA_LOG_GROUP="/aws/lambda/poeconomy-${ENVIRONMENT}-ingestion"
   LEAGUE_METADATA_LAMBDA_LOG_GROUP="/aws/lambda/poeconomy-${ENVIRONMENT}-league-metadata"

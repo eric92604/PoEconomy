@@ -238,7 +238,9 @@ class DynamoConfig:
     currency_metadata_table: str = os.getenv("DYNAMO_CURRENCY_METADATA_TABLE", "")
     currency_prices_table: str = os.getenv("DYNAMO_CURRENCY_PRICES_TABLE", "")
     league_metadata_table: Optional[str] = os.getenv("DYNAMO_LEAGUE_METADATA_TABLE", "")
-    daily_prices_table: str = os.getenv("DYNAMO_DAILY_PRICES_TABLE", "poeconomy-production-daily-prices")
+    # Required for DynamoDB-backed validation data during training; set via DYNAMO_DAILY_PRICES_TABLE.
+    # Empty string means no daily-prices table (data_sources.py treats it as optional).
+    daily_prices_table: str = os.getenv("DYNAMO_DAILY_PRICES_TABLE", "")
     predictions_table: str = os.getenv("DYNAMO_PREDICTIONS_TABLE", "")
 
 
