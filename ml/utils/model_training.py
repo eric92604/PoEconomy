@@ -16,6 +16,7 @@ from datetime import datetime
 import lightgbm as lgb
 from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.ensemble import (
     RandomForestRegressor,
     ExtraTreesRegressor
