@@ -378,18 +378,16 @@ class RandomForestModel(BaseModel):
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> RandomForestRegressor:
         """Create Random Forest model."""
         if trial is not None:
-            # Hyperparameter optimization
             params = {
-                'n_estimators': trial.suggest_int('rf_n_estimators', 100, 1000),
+                'n_estimators': trial.suggest_int('rf_n_estimators', 100, 500),
                 'max_depth': trial.suggest_int('rf_max_depth', 5, 20),
                 'min_samples_split': trial.suggest_int('rf_min_samples_split', 2, 20),
                 'min_samples_leaf': trial.suggest_int('rf_min_samples_leaf', 1, 10),
                 'max_features': trial.suggest_categorical('rf_max_features', ['sqrt', 'log2', None]),
             }
         else:
-            # Default parameters
             params = {
-                'n_estimators': 1000,
+                'n_estimators': self.config.n_model_trials,
                 'max_depth': 10,
                 'min_samples_split': 5,
                 'min_samples_leaf': 2,
@@ -415,18 +413,16 @@ class ExtraTreesModel(BaseModel):
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> ExtraTreesRegressor:
         """Create Extra Trees model."""
         if trial is not None:
-            # Hyperparameter optimization
             params = {
-                'n_estimators': trial.suggest_int('et_n_estimators', 100, 1000),
+                'n_estimators': trial.suggest_int('et_n_estimators', 100, 500),
                 'max_depth': trial.suggest_int('et_max_depth', 5, 20),
                 'min_samples_split': trial.suggest_int('et_min_samples_split', 2, 20),
                 'min_samples_leaf': trial.suggest_int('et_min_samples_leaf', 1, 10),
                 'max_features': trial.suggest_categorical('et_max_features', ['sqrt', 'log2', None]),
             }
         else:
-            # Default parameters - Extra Trees often work well with more trees
             params = {
-                'n_estimators': 1000,
+                'n_estimators': self.config.n_model_trials,
                 'max_depth': 10,
                 'min_samples_split': 5,
                 'min_samples_leaf': 2,
@@ -729,7 +725,6 @@ class HyperparameterOptimizer:
                 
                 return float(np.mean(scores))
         
-        # Create study with proper storage for parallelization
         # Make study name unique per currency and model type to avoid conflicts
         study_name = f"{model_class.__name__}_{currency}_{self.config.random_state}"
         
