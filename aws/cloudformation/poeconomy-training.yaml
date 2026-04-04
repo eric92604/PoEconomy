@@ -18,10 +18,6 @@ Parameters:
     Type: Number
     Default: 50
     Description: Minimum number of records required for training
-  TaskTimeoutMinutes:
-    Type: Number
-    Default: 1440
-    Description: Task timeout in minutes
   MaxCurrenciesToTrain:
     Type: Number
     Default: 0
@@ -50,6 +46,18 @@ Parameters:
     Type: Number
     Default: 5
     Description: Number of cross-validation folds
+  EarlyStoppingRounds:
+    Type: Number
+    Default: 50
+    Description: LightGBM patience rounds before early stopping triggers
+  EnsembleWeightOptTrials:
+    Type: Number
+    Default: 50
+    Description: Number of Optuna trials used to optimize ensemble model weights per currency
+  ValidationMaxDays:
+    Type: Number
+    Default: 60
+    Description: Maximum days of recent DynamoDB price data fetched as the validation set
   MinAvgValueThreshold:
     Type: String
     Default: '0.25'
@@ -223,8 +231,6 @@ Resources:
           Environment:
             - Name: MIN_RECORDS_THRESHOLD
               Value: !Ref MinRecordsThreshold
-            - Name: TASK_TIMEOUT_MINUTES
-              Value: !Ref TaskTimeoutMinutes
             - Name: MAX_CURRENCIES_TO_TRAIN
               Value: !Ref MaxCurrenciesToTrain
             - Name: DATA_LAKE_BUCKET
@@ -250,9 +256,15 @@ Resources:
               Value: !Ref NModelTrials
             - Name: CV_FOLDS
               Value: !Ref CVFolds
+            - Name: EARLY_STOPPING_ROUNDS
+              Value: !Ref EarlyStoppingRounds
+            - Name: ENSEMBLE_WEIGHT_OPT_TRIALS
+              Value: !Ref EnsembleWeightOptTrials
             # Data Selection
             - Name: MIN_AVG_VALUE_THRESHOLD
               Value: !Ref MinAvgValueThreshold
+            - Name: VALIDATION_MAX_DAYS
+              Value: !Ref ValidationMaxDays
             # DynamoDB Tables
             - Name: DYNAMO_LEAGUE_METADATA_TABLE
               Value:
