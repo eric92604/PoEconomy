@@ -41,12 +41,11 @@ def _build_inference_processing_config() -> ProcessingConfig:
 
     Key differences from training:
     - Outlier removal is disabled — inference must predict on any input value.
-    - max_nan_ratio respects the MAX_NAN_RATIO env var for runtime flexibility.
+    - max_nan_ratio is handled by ProcessingConfig itself via MAX_NAN_RATIO env var,
+      keeping the value consistent with the training path.
     """
     config = ProcessingConfig()
     config.outlier_removal = False
-    if os.getenv("MAX_NAN_RATIO"):
-        config.max_nan_ratio = float(os.getenv("MAX_NAN_RATIO"))  # type: ignore[arg-type]
     return config
 
 
