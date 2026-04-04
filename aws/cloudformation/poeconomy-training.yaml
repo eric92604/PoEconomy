@@ -28,24 +28,24 @@ Parameters:
     Description: Maximum number of currencies to train (0 = no limit)
   MaxCurrencyWorkers:
     Type: Number
-    Default: 8
+    Default: 16
     Description: Number of parallel currency workers for training
   MaxOptunaWorkers:
     Type: Number
-    Default: 1
+    Default: 2
     Description: Number of Optuna workers per currency for hyperparameter search
   ModelNJobs:
     Type: Number
-    Default: 4
+    Default: 2
     Description: Number of parallel jobs for RandomForest/ExtraTrees model training
   NHyperparameterTrials:
     Type: Number
-    Default: 200
+    Default: 100
     Description: Number of hyperparameter optimization trials
   NModelTrials:
     Type: Number
-    Default: 1000
-    Description: Number of model training iterations (boosting rounds)
+    Default: 500
+    Description: Number of model training iterations (boosting rounds for LightGBM ceiling; n_estimators fallback for RF/ET when HPO is disabled or fails)
   CVFolds:
     Type: Number
     Default: 5
