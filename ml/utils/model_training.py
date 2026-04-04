@@ -23,7 +23,6 @@ from sklearn.ensemble import (
 )
 import optuna
 from optuna.samplers import TPESampler
-from optuna.pruners import MedianPruner
 
 from ml.config.training_config import ModelConfig, ProcessingConfig
 from ml.utils.common_utils import MLLogger
@@ -731,7 +730,6 @@ class HyperparameterOptimizer:
         study = optuna.create_study(
             direction='minimize',
             sampler=TPESampler(seed=self.config.random_state),
-            pruner=MedianPruner(),
             study_name=study_name,
             load_if_exists=True
         )
@@ -831,7 +829,6 @@ class EnsembleWeightOptimizer:
         study = optuna.create_study(
             direction='minimize',
             sampler=TPESampler(seed=self.config.random_state),
-            pruner=MedianPruner(),
             study_name=study_name,
             load_if_exists=True
         )
