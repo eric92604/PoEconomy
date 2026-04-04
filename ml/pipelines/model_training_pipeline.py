@@ -1205,31 +1205,13 @@ class ModelTrainingPipeline:
                 return None
             
             self.logger.debug(f"Processed validation data: {len(validation_processed)} records after feature engineering")
-            
-            # Filter to only samples with complete target variables
-            # This automatically excludes recent dates that don't have future prices yet
-            target_cols = [f'target_price_{h}d' for h in self.config.data.prediction_horizons]
-            complete_mask = validation_processed[target_cols].notna().all(axis=1)
-            validation_complete = validation_processed[complete_mask]
-            
-            if len(validation_complete) == 0:
-                self.logger.warning(f"No validation samples with complete targets for {currency}")
+
+            if len(validation_processed) < 10:
+                self.logger.warning(f"Insufficient validation data: {len(validation_processed)} samples (minimum: 10)")
                 return None
-            
-            # Additional safety: Exclude most recent max_horizon days
-            # (they won't have future targets, but double-check anyway)
-            if 'date' in validation_complete.columns:
-                max_date = validation_complete['date'].max()
-                cutoff_date = max_date - pd.Timedelta(days=max_horizon)
-                validation_complete = validation_complete[validation_complete['date'] <= cutoff_date]
-            
-            if len(validation_complete) < 10:
-                self.logger.warning(f"Insufficient validation data with complete targets: {len(validation_complete)} samples (minimum: 10)")
-                return None
-            
-            self.logger.info(f"Validation data ready: {len(validation_complete)} samples with complete target variables for {currency}")
-            self.logger.debug(f"Features are backward-looking (no future data needed for features)")
-            return validation_complete
+
+            self.logger.info(f"Validation data ready: {len(validation_processed)} samples for {currency}")
+            return validation_processed
             
         except Exception as e:
             self.logger.error(f"Error fetching validation data for {currency}: {e}", exception=e)
