@@ -5,21 +5,20 @@ This module contains the pipeline orchestration for model training,
 separating the orchestration logic from the core model training functionality.
 """
 
-import sys
+import logging
 import os
 import shutil
 import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union
-import warnings
 from datetime import datetime
 import pandas as pd
 import numpy as np
 
-sys.path.append(str(Path(__file__).parent.parent))
-
-warnings.filterwarnings('ignore')
+# Extra days fetched beyond validation_max_days + max_horizon to ensure
+# future target values are available at the tail of the validation window.
+_VALIDATION_FETCH_BUFFER_DAYS = 7
 
 from ml.config.training_config import MLConfig
 from ml.utils.common_utils import setup_ml_logging, ProgressLogger
@@ -438,10 +437,14 @@ class ModelTrainingPipeline:
             return result
             
         except MemoryError as e:
-            sys.stderr.write(f"Memory error in worker for currency {currency_name}: {str(e)}\n")
+            logging.getLogger(__name__).error(
+                f"Memory error in worker for currency {currency_name}: {e}"
+            )
             return None
         except Exception as e:
-            sys.stderr.write(f"Worker failed for currency {currency_name}: {str(e)}\n")
+            logging.getLogger(__name__).error(
+                f"Worker failed for currency {currency_name}: {e}"
+            )
             return None
     
     def _get_processed_data_path(self) -> Optional[str]:
@@ -469,7 +472,9 @@ class ModelTrainingPipeline:
         try:
             return pd.read_parquet(data_path)
         except Exception as e:
-            sys.stderr.write(f"Failed to load processed data from {data_path}: {str(e)}\n")
+            logging.getLogger(__name__).error(
+                f"Failed to load processed data from {data_path}: {e}"
+            )
             return None
     
     def _save_temp_dataframe(self, df: pd.DataFrame) -> str:
@@ -1175,10 +1180,9 @@ class ModelTrainingPipeline:
             # Fetch extended range to ensure future targets are available
             # Features are backward-looking, so we only need future data for targets
             max_horizon = max(self.config.data.prediction_horizons) if self.config.data.prediction_horizons else 7
-            buffer_days = 7  # Extra buffer for safety
-            days_to_fetch = self.config.data.validation_max_days + max_horizon + buffer_days
+            days_to_fetch = self.config.data.validation_max_days + max_horizon + _VALIDATION_FETCH_BUFFER_DAYS
             
-            self.logger.debug(f"Fetching validation data: {days_to_fetch} days (validation={self.config.data.validation_max_days}, horizon={max_horizon}, buffer={buffer_days})")
+            self.logger.debug(f"Fetching validation data: {days_to_fetch} days (validation={self.config.data.validation_max_days}, horizon={max_horizon}, buffer={_VALIDATION_FETCH_BUFFER_DAYS})")
             
             # Fetch raw daily prices from DynamoDB
             validation_df = self.dynamo_data_source.build_validation_dataframe(

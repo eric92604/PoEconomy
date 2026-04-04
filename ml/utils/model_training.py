@@ -332,7 +332,7 @@ class LightGBMModel(BaseModel):
         if trial is not None:
             # Hyperparameter optimization
             params = {
-                'n_estimators': trial.suggest_int('lgb_n_estimators', 100, 1000),
+                'n_estimators': trial.suggest_int('lgb_n_estimators', 100, self.config.n_model_trials),
                 'max_depth': trial.suggest_int('lgb_max_depth', 3, 15),
                 'learning_rate': trial.suggest_float('lgb_learning_rate', 0.01, 0.3),
                 'num_leaves': trial.suggest_int('lgb_num_leaves', 10, 300),
@@ -388,7 +388,7 @@ class RandomForestModel(BaseModel):
         else:
             params = {
                 'n_estimators': self.config.n_model_trials,
-                'max_depth': 10,
+                'max_depth': self.config.max_depth,
                 'min_samples_split': 5,
                 'min_samples_leaf': 2,
                 'max_features': 'sqrt',
@@ -423,7 +423,7 @@ class ExtraTreesModel(BaseModel):
         else:
             params = {
                 'n_estimators': self.config.n_model_trials,
-                'max_depth': 10,
+                'max_depth': self.config.max_depth,
                 'min_samples_split': 5,
                 'min_samples_leaf': 2,
                 'max_features': 'sqrt',
