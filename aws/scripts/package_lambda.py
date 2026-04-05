@@ -173,7 +173,16 @@ def package_lambda(
         shutil.copy2(config_path, package_dir / "config.py")
         shutil.copy2(init_path, package_dir / "__init__.py")
         shutil.copy2(requirements_path, package_dir / "requirements.txt")
-        
+
+        # Copy shared Lambda utils (logging_config, etc.) as a top-level package
+        utils_source = project_root / "aws" / "lambdas" / "utils"
+        utils_dest = package_dir / "utils"
+        if utils_source.exists():
+            print(f"Copying Lambda utils from {utils_source} to {utils_dest}")
+            shutil.copytree(utils_source, utils_dest)
+        else:
+            print(f"Warning: Lambda utils directory not found: {utils_source}")
+
         # Copy ML modules
         if not copy_ml_modules(project_root, package_dir):
             print("Warning: Failed to copy ML modules, Lambda may have import errors")
