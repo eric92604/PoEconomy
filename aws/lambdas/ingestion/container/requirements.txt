@@ -1,15 +1,12 @@
-# PoEconomy Ingestion Lambda requirements (compatible with GCC 7.3.1)
-# Minimal ML dependencies for ingestion operations
+# PoEconomy Ingestion Lambda — pins match prediction & training containers
+# Base image: public.ecr.aws/lambda/python:3.11 (install with --only-binary in Dockerfile)
 
-# Core ML Libraries (exact versions for compatibility)
-numpy>=1.21.0,<2.0.0
-pandas>=1.5.0,<2.0.0
-scipy>=1.10.0
+numpy==1.24.3
+pandas==1.5.3
+scipy==1.10.1
 
-# Data Processing
-python-dateutil>=2.8.0
-pytz>=2023.3
+python-dateutil==2.8.2
+pytz==2023.3
 
-# AWS/HTTP
-boto3>=1.28.0
-requests>=2.31.0
+boto3==1.28.57
+requests==2.31.0

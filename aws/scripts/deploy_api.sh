@@ -36,6 +36,7 @@ if ! aws s3 cp "s3://$DATA_LAKE_BUCKET_NAME/lambda/lambda.zip" "s3://$DATA_LAKE_
 fi
 
 # Deploy API infrastructure with zip package
+# All parameters for poeconomy-api.yaml
 echo "Deploying API infrastructure with zip package..."
 if ! deploy_cloudformation_stack "$API_STACK_NAME" "$API_TEMPLATE" \
   "EnvironmentName=$ENVIRONMENT" \

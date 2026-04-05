@@ -393,3 +393,15 @@ Outputs:
     Value: !Ref TrainingSecurityGroup
     Export:
       Name: !Sub '${AWS::StackName}-TrainingSecurityGroupId'
+
+  TrainingPublicSubnetAId:
+    Description: Public subnet A in the training VPC (same VPC as TrainingSecurityGroupId)
+    Value: !Ref TrainingPublicSubnetA
+    Export:
+      Name: !Sub '${AWS::StackName}-TrainingPublicSubnetAId'
+
+  TrainingPublicSubnetBId:
+    Description: Public subnet B in the training VPC (same VPC as TrainingSecurityGroupId)
+    Value: !Ref TrainingPublicSubnetB
+    Export:
+      Name: !Sub '${AWS::StackName}-TrainingPublicSubnetBId'

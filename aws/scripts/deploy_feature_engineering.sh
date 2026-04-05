@@ -6,6 +6,7 @@
 # Load shared configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/shared_config.sh"
+source "$SCRIPT_DIR/lib/ecr.sh"
 
 print_deployment_info
 
@@ -24,21 +25,18 @@ build_and_push_feature_engineering_image
 echo "Checking training data..."
 upload_training_data_if_needed
 
-# Deploy feature engineering infrastructure
+# Deploy feature engineering infrastructure (defaults from poeconomy-feature-engineering.yaml via merge)
 echo "Deploying feature engineering infrastructure..."
 
-# Build parameter list - only include optional parameters if explicitly set
-PARAMS=(
-  "FeatureEngineeringImageUri=$FEATURE_ENGINEERING_IMAGE_URI"
+OVERRIDES=(
   "DataLakeBucketName=$DATA_LAKE_BUCKET_NAME"
   "BaseStackName=$BASE_STACK_NAME"
+  "FeatureEngineeringImageUri=$FEATURE_ENGINEERING_IMAGE_URI"
 )
+[[ -n "${TASK_TIMEOUT_MINUTES:-}" ]] && OVERRIDES+=("TaskTimeoutMinutes=$TASK_TIMEOUT_MINUTES")
+[[ -n "${LOG_LEVEL:-}" ]] && OVERRIDES+=("LogLevel=$LOG_LEVEL")
 
-# Only add optional parameters if environment variables are explicitly set
-# This allows CloudFormation template defaults to be used when not specified
-[[ -n "${TASK_TIMEOUT_MINUTES:-}" ]] && PARAMS+=("TaskTimeoutMinutes=$TASK_TIMEOUT_MINUTES")
-
-deploy_cloudformation_stack "$FEATURE_ENGINEERING_STACK_NAME" "$FEATURE_ENGINEERING_TEMPLATE" "${PARAMS[@]}"
+deploy_cloudformation_stack "$FEATURE_ENGINEERING_STACK_NAME" "$FEATURE_ENGINEERING_TEMPLATE" "${OVERRIDES[@]}"
 
 # Update .env file with current stack outputs
 update_env_file

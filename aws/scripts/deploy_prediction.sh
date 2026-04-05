@@ -6,6 +6,8 @@
 # Load shared configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/shared_config.sh"
+source "$SCRIPT_DIR/lib/models.sh"
+source "$SCRIPT_DIR/lib/ecr.sh"
 
 print_deployment_info
 
@@ -34,6 +36,7 @@ echo "Building and pushing container images..."
 build_and_push_lambda_image
 
 # Deploy prediction infrastructure
+# All parameters for poeconomy-prediction.yaml
 echo "Deploying prediction infrastructure..."
 if ! deploy_cloudformation_stack "$PREDICTION_STACK_NAME" "$PREDICTION_TEMPLATE" \
   "EnvironmentName=$ENVIRONMENT" \

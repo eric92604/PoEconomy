@@ -4,7 +4,7 @@ Description: PoEconomy API Lambda function and API Gateway
 Parameters:
   EnvironmentName:
     Type: String
-    Default: production
+    Default: dev
     AllowedPattern: '[a-zA-Z0-9-]+'
     Description: Environment identifier (e.g. dev, staging, production)
   ApiGatewayStageName:
