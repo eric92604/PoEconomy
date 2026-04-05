@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
-from typing import List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
 
 import requests
 
@@ -74,6 +74,8 @@ def build_league_metadata_items(
         # Determine league type
         league_type = _determine_league_type(league_name)
         
+        ttl = int((datetime.now(timezone.utc) + timedelta(days=3)).timestamp())
+
         item = {
             "league_name": league_name,
             "league": league_name,  # Keep both for backward compatibility
@@ -86,6 +88,7 @@ def build_league_metadata_items(
             "url": league.get("url"),
             "last_updated": iso_now,
             "force_update": force_update,
+            "ttl": ttl,
         }
         
         # Add metadata about whether this is a new league

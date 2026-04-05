@@ -17,10 +17,10 @@ from http import HTTPStatus
 from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 
-from ml.utils.common_utils import setup_standard_logging
-from ..config import AppEnvironment, load_environment
+from utils.logging_config import setup_standard_logging
+from config import AppEnvironment, load_environment
 
 # Set up standardized logging
 LOGGER = setup_standard_logging(
@@ -33,13 +33,14 @@ LOGGER = setup_standard_logging(
 _APP_ENV: Optional[AppEnvironment] = None
 _DYNAMO_RESOURCE = None
 _METADATA_TABLE = None
+_LEAGUE_METADATA_TABLE = None
 _PREDICTIONS_TABLE = None
 _PRICING_TABLE = None
 
 
 def lambda_handler(event: dict, _context) -> dict:
     """Handle API Gateway proxy events."""
-    global _APP_ENV, _DYNAMO_RESOURCE, _METADATA_TABLE, _PREDICTIONS_TABLE, _PRICING_TABLE
+    global _APP_ENV, _DYNAMO_RESOURCE, _METADATA_TABLE, _LEAGUE_METADATA_TABLE, _PREDICTIONS_TABLE, _PRICING_TABLE
 
     if _APP_ENV is None:
         _APP_ENV = load_environment()
@@ -47,6 +48,8 @@ def lambda_handler(event: dict, _context) -> dict:
     if _DYNAMO_RESOURCE is None:
         _DYNAMO_RESOURCE = boto3.resource("dynamodb", region_name=_APP_ENV.region_name)
         _METADATA_TABLE = _DYNAMO_RESOURCE.Table(_APP_ENV.currency_metadata_table)
+        if _APP_ENV.league_metadata_table:
+            _LEAGUE_METADATA_TABLE = _DYNAMO_RESOURCE.Table(_APP_ENV.league_metadata_table)
         if _APP_ENV.predictions_table:
             _PREDICTIONS_TABLE = _DYNAMO_RESOURCE.Table(_APP_ENV.predictions_table)
         else:
@@ -185,28 +188,41 @@ def _list_currencies() -> Dict[str, Any]:
 
 
 def _list_leagues() -> Dict[str, Any]:
-    """List all available leagues from metadata table."""
-    assert _METADATA_TABLE is not None
-    response = _METADATA_TABLE.scan(ProjectionExpression="league, last_updated")
+    """List active leagues from the league metadata table.
+
+    Scans ``LeagueMetadataTable`` for items where ``isActive`` is ``True`` and
+    returns them sorted so seasonal leagues appear before permanent ones.
+    """
+    _LEAGUE_TYPE_ORDER = {"seasonal": 0, "ssf": 1, "hardcore": 2, "ruthless": 3, "permanent": 4}
+
+    assert _LEAGUE_METADATA_TABLE is not None, "DYNAMO_LEAGUE_METADATA_TABLE is not configured"
     leagues: Dict[str, Any] = {}
+    scan_kwargs: Dict[str, Any] = {
+        "FilterExpression": Attr("isActive").eq(True),
+        "ProjectionExpression": "league_name, league_type",
+    }
+    response = _LEAGUE_METADATA_TABLE.scan(**scan_kwargs)
     for item in response.get("Items", []):
-        league = item.get("league")
-        if not league:
-            continue
-        leagues.setdefault(league, {"currency_count": 0})
-        leagues[league]["currency_count"] += 1
+        name = item.get("league_name")
+        if name:
+            leagues[name] = {"league_type": item.get("league_type", "seasonal")}
     while "LastEvaluatedKey" in response:
-        response = _METADATA_TABLE.scan(
-            ProjectionExpression="league, last_updated",
+        response = _LEAGUE_METADATA_TABLE.scan(
+            **scan_kwargs,
             ExclusiveStartKey=response["LastEvaluatedKey"],
         )
         for item in response.get("Items", []):
-            league = item.get("league")
-            if not league:
-                continue
-            leagues.setdefault(league, {"currency_count": 0})
-            leagues[league]["currency_count"] += 1
-    return {"leagues": leagues}
+            name = item.get("league_name")
+            if name:
+                leagues[name] = {"league_type": item.get("league_type", "seasonal")}
+
+    sorted_leagues = dict(
+        sorted(
+            leagues.items(),
+            key=lambda kv: _LEAGUE_TYPE_ORDER.get(kv[1].get("league_type", "seasonal"), 99),
+        )
+    )
+    return {"leagues": sorted_leagues}
 
 
 def _handle_single_prediction(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], HTTPStatus]:
