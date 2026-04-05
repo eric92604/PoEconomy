@@ -1,0 +1,421 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: PoEconomy training on ECS EC2 (alongside Fargate) - reuses Fargate training VPC/subnets; EC2 capacity provider + task definition
+
+# Default host c6a.8xlarge (AMD EPYC, 32 vCPU, 64 GiB): compute-optimized, x86_64 — fits common 32 vCPU Spot quotas.
+# Tune MAX_CURRENCY_WORKERS / MODEL_N_JOBS if profiling shows contention.
+
+Parameters:
+  TrainingFargateStackName:
+    Type: String
+    Description: Name of the existing Fargate training stack (imports VPC, subnets, and security group exports)
+  TaskCpu:
+    Type: Number
+    Default: 32768
+    Description: CPU units reserved for the training task (1024 = 1 vCPU); match EC2 instance (c6a.8xlarge = 32768)
+  TaskMemory:
+    Type: Number
+    Default: 65536
+    Description: Memory in MB reserved for the training task; match EC2 instance (c6a.8xlarge = 65536 MB = 64 GiB)
+  InstanceType:
+    Type: String
+    Default: c6a.8xlarge
+    Description: EC2 instance type for container instances (must fit TaskCpu/TaskMemory; default c6a.8xlarge = 32 vCPU, 64 GiB)
+  AsgMinSize:
+    Type: Number
+    Default: 0
+    Description: Minimum ASG size (0 allows scale-to-zero when idle; ECS managed scaling scales for pending tasks)
+  AsgMaxSize:
+    Type: Number
+    Default: 2
+    Description: Maximum number of EC2 instances in the training capacity pool
+  AsgDesiredCapacity:
+    Type: Number
+    Default: 0
+    Description: Initial desired capacity (often 0; tasks trigger scale-out via managed scaling)
+  RootVolumeGiB:
+    Type: Number
+    Default: 150
+    Description: Root EBS volume size (GiB) for Docker image and workspace (larger default for high-CPU training temp)
+  EcsOptimizedAmiParameter:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2/kernel-5.10/recommended/image_id
+    Description: SSM path for latest recommended Amazon Linux 2 kernel 5.10 ECS-optimized AMI ID
+  MinRecordsThreshold:
+    Type: Number
+    Default: 50
+  MaxCurrenciesToTrain:
+    Type: Number
+    Default: 0
+  MaxCurrencyWorkers:
+    Type: Number
+    Default: 16
+    Description: Parallel currency workers; default 16 for c6a.8xlarge (raise if CPU is underutilized)
+  MaxOptunaWorkers:
+    Type: Number
+    Default: 1
+  ModelNJobs:
+    Type: Number
+    Default: 2
+  NHyperparameterTrials:
+    Type: Number
+    Default: 100
+  NModelTrials:
+    Type: Number
+    Default: 500
+  CVFolds:
+    Type: Number
+    Default: 5
+  EarlyStoppingRounds:
+    Type: Number
+    Default: 50
+  EnsembleWeightOptTrials:
+    Type: Number
+    Default: 50
+  ValidationMaxDays:
+    Type: Number
+    Default: 60
+  MinAvgValueThreshold:
+    Type: String
+    Default: '0.25'
+  IngestionStackName:
+    Type: String
+    Description: Name of the ingestion stack (DynamoDB table imports)
+  DataLakeBucketName:
+    Type: String
+    Description: Data lake bucket name
+  TrainingImageUri:
+    Type: String
+    Description: Full ECR image URI for training (including tag)
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+  UseSpotInstances:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Request Spot capacity for container instances
+
+Conditions:
+  UseSpotCapacity: !Equals [!Ref UseSpotInstances, 'true']
+
+Resources:
+  TrainingEc2LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ecs/${AWS::StackName}'
+      RetentionInDays: 14
+      Tags:
+        - Key: App
+          Value: PoEconomy
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  TrainingEc2Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}'
+      ClusterSettings:
+        - Name: containerInsights
+          Value: disabled
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-cluster'
+        - Key: App
+          Value: PoEconomy
+
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-ecs-instance-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ecs-instance-role'
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${AWS::StackName}-ecs-instance-profile'
+      Roles:
+        - !Ref EcsInstanceRole
+
+  TrainingEc2ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-execution-role'
+
+  TrainingEc2TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DataLakeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DataLakeBucketName}'
+                  - !Sub 'arn:aws:s3:::${DataLakeBucketName}/*'
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: '*'
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeagueMetadataTable}'
+                    - LeagueMetadataTable:
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-LeagueMetadataTable'
+                  - !Sub
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DailyPricesTable}'
+                    - DailyPricesTable:
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-DailyPricesTable'
+                  - !Sub
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DailyPricesTable}/index/league-date-index'
+                    - DailyPricesTable:
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-DailyPricesTable'
+                  - !Sub
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DailyPricesTable}/index/currency-date-index'
+                    - DailyPricesTable:
+                        Fn::ImportValue:
+                          Fn::Sub: '${IngestionStackName}-DailyPricesTable'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-task-role'
+
+  TrainingEc2TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - EC2
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt TrainingEc2ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TrainingEc2TaskRole.Arn
+      ContainerDefinitions:
+        - Name: training
+          Image: !Ref TrainingImageUri
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref TrainingEc2LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: MIN_RECORDS_THRESHOLD
+              Value: !Ref MinRecordsThreshold
+            - Name: MAX_CURRENCIES_TO_TRAIN
+              Value: !Ref MaxCurrenciesToTrain
+            - Name: DATA_LAKE_BUCKET
+              Value: !Ref DataLakeBucketName
+            - Name: MODELS_BUCKET
+              Value: !Ref DataLakeBucketName
+            - Name: MAX_CURRENCY_WORKERS
+              Value: !Ref MaxCurrencyWorkers
+            - Name: MAX_OPTUNA_WORKERS
+              Value: !Ref MaxOptunaWorkers
+            - Name: MODEL_N_JOBS
+              Value: !Ref ModelNJobs
+            - Name: LOG_LEVEL
+              Value: !Ref LogLevel
+            - Name: DISABLE_FILE_LOGGING
+              Value: 'true'
+            - Name: N_HYPERPARAMETER_TRIALS
+              Value: !Ref NHyperparameterTrials
+            - Name: N_MODEL_TRIALS
+              Value: !Ref NModelTrials
+            - Name: CV_FOLDS
+              Value: !Ref CVFolds
+            - Name: EARLY_STOPPING_ROUNDS
+              Value: !Ref EarlyStoppingRounds
+            - Name: ENSEMBLE_WEIGHT_OPT_TRIALS
+              Value: !Ref EnsembleWeightOptTrials
+            - Name: MIN_AVG_VALUE_THRESHOLD
+              Value: !Ref MinAvgValueThreshold
+            - Name: VALIDATION_MAX_DAYS
+              Value: !Ref ValidationMaxDays
+            - Name: DYNAMO_LEAGUE_METADATA_TABLE
+              Value:
+                Fn::ImportValue:
+                  Fn::Sub: '${IngestionStackName}-LeagueMetadataTable'
+            - Name: DYNAMO_DAILY_PRICES_TABLE
+              Value:
+                Fn::ImportValue:
+                  Fn::Sub: '${IngestionStackName}-DailyPricesTable'
+          StopTimeout: 60
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  TrainingContainerInstancesLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${AWS::StackName}-lt'
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Name: !Ref EcsInstanceProfile
+        ImageId: !Ref EcsOptimizedAmiParameter
+        InstanceType: !Ref InstanceType
+        InstanceMarketOptions:
+          Fn::If:
+            - UseSpotCapacity
+            - MarketType: spot
+            - Ref: AWS::NoValue
+        SecurityGroupIds:
+          - Fn::ImportValue:
+              Fn::Sub: '${TrainingFargateStackName}-TrainingSecurityGroupId'
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !Ref RootVolumeGiB
+              VolumeType: gp3
+              DeleteOnTermination: true
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            echo ECS_CLUSTER=${AWS::StackName} >> /etc/ecs/ecs.config
+            echo ECS_ENABLE_TASK_IAM_ROLE=true >> /etc/ecs/ecs.config
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${AWS::StackName}-instance'
+              - Key: App
+                Value: PoEconomy
+
+  TrainingContainerInstancesAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub '${AWS::StackName}-asg'
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub '${TrainingFargateStackName}-TrainingPublicSubnetAId'
+        - Fn::ImportValue: !Sub '${TrainingFargateStackName}-TrainingPublicSubnetBId'
+      MinSize: !Ref AsgMinSize
+      MaxSize: !Ref AsgMaxSize
+      DesiredCapacity: !Ref AsgDesiredCapacity
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 300
+      CapacityRebalance:
+        Fn::If:
+          - UseSpotCapacity
+          - true
+          - false
+      LaunchTemplate:
+        LaunchTemplateId: !Ref TrainingContainerInstancesLaunchTemplate
+        # Use the newest launch template revision created by this stack update ($Latest is not valid in CFN).
+        Version: !GetAtt TrainingContainerInstancesLaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-asg'
+          PropagateAtLaunch: true
+        - Key: AmazonECSManaged
+          Value: 'true'
+          PropagateAtLaunch: true
+
+  TrainingEc2CapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    DependsOn: TrainingContainerInstancesAsg
+    Properties:
+      Name: !Sub '${AWS::StackName}-ec2'
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref TrainingContainerInstancesAsg
+        ManagedScaling:
+          Status: ENABLED
+          TargetCapacity: 100
+          MinimumScalingStepSize: 1
+          MaximumScalingStepSize: 10000
+          InstanceWarmupPeriod: 120
+        ManagedTerminationProtection: DISABLED
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
+  TrainingEc2ClusterCapacityProviderAssociations:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    DependsOn:
+      - TrainingEc2CapacityProvider
+      - TrainingEc2Cluster
+    Properties:
+      Cluster: !Ref TrainingEc2Cluster
+      CapacityProviders:
+        - !Ref TrainingEc2CapacityProvider
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: !Ref TrainingEc2CapacityProvider
+          Weight: 1
+
+Outputs:
+  TrainingEc2ClusterName:
+    Description: ECS cluster name for EC2-backed training tasks
+    Value: !Ref TrainingEc2Cluster
+    Export:
+      Name: !Sub '${AWS::StackName}-TrainingEc2ClusterName'
+
+  TrainingEc2TaskDefinitionArn:
+    Description: ECS task definition ARN for EC2 training tasks
+    Value: !Ref TrainingEc2TaskDefinition
+    Export:
+      Name: !Sub '${AWS::StackName}-TrainingEc2TaskDefinitionArn'
+
+  TrainingEc2LogGroupName:
+    Description: CloudWatch log group for EC2 training tasks
+    Value: !Ref TrainingEc2LogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-TrainingEc2LogGroupName'
