@@ -2,10 +2,6 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: PoEconomy feature engineering infrastructure (Fargate Spot) - uploads to base data lake
 
 Parameters:
-  EnvironmentName:
-    Type: String
-    Default: production
-    Description: Environment identifier
   TaskTimeoutMinutes:
     Type: Number
     Default: 60
@@ -34,7 +30,7 @@ Resources:
       EnableDnsSupport: true
       Tags:
         - Key: Name
-          Value: !Sub 'poeconomy-${EnvironmentName}-feature-engineering-vpc'
+          Value: !Sub '${AWS::StackName}-vpc'
         - Key: App
           Value: PoEconomy
 
@@ -47,7 +43,7 @@ Resources:
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: !Sub 'poeconomy-${EnvironmentName}-feature-engineering-public-subnet-a'
+          Value: !Sub '${AWS::StackName}-public-subnet-a'
         - Key: App
           Value: PoEconomy
 
@@ -60,7 +56,7 @@ Resources:
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: !Sub 'poeconomy-${EnvironmentName}-feature-engineering-public-subnet-b'
+          Value: !Sub '${AWS::StackName}-public-subnet-b'
         - Key: App
           Value: PoEconomy
 
@@ -69,7 +65,7 @@ Resources:
     Properties:
       Tags:
         - Key: Name
-          Value: !Sub 'poeconomy-${EnvironmentName}-feature-engineering-igw'
+          Value: !Sub '${AWS::StackName}-igw'
         - Key: App
           Value: PoEconomy
 
@@ -85,7 +81,7 @@ Resources:
       VpcId: !Ref FeatureEngineeringVpc
       Tags:
         - Key: Name
-          Value: !Sub 'poeconomy-${EnvironmentName}-feature-engineering-public-rt'
+          Value: !Sub '${AWS::StackName}-public-rt'
         - Key: App
           Value: PoEconomy
 
@@ -124,7 +120,7 @@ Resources:
   FeatureEngineeringLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub '/aws/ecs/poeconomy/${EnvironmentName}/feature-engineering'
+      LogGroupName: !Sub '/aws/ecs/${AWS::StackName}'
       RetentionInDays: 14
       Tags:
         - Key: App
@@ -135,7 +131,7 @@ Resources:
   FeatureEngineeringCluster:
     Type: AWS::ECS::Cluster
     Properties:
-      ClusterName: !Sub 'poeconomy-${EnvironmentName}-feature-engineering'
+      ClusterName: !Sub '${AWS::StackName}'
       CapacityProviders:
         - FARGATE
         - FARGATE_SPOT
@@ -149,7 +145,7 @@ Resources:
   FeatureEngineeringTaskRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub 'poeconomy-${EnvironmentName}-feature-engineering-task-role'
+      RoleName: !Sub '${AWS::StackName}-task-role'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -169,7 +165,7 @@ Resources:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/ecs/poeconomy/${EnvironmentName}/feature-engineering:*'
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/ecs/${AWS::StackName}:*'
         - PolicyName: DataLakeAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -194,7 +190,7 @@ Resources:
   FeatureEngineeringTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: !Sub 'poeconomy-${EnvironmentName}-feature-engineering'
+      Family: !Sub '${AWS::StackName}'
       NetworkMode: awsvpc
       RequiresCompatibilities:
         - FARGATE
@@ -215,10 +211,6 @@ Resources:
           Environment:
             - Name: AWS_DEFAULT_REGION
               Value: !Ref AWS::Region
-            - Name: ENVIRONMENT
-              Value: !Ref EnvironmentName
-            - Name: MODE
-              Value: !Ref EnvironmentName
             - Name: DATA_LAKE_BUCKET
               Value: !Ref DataLakeBucketName
             - Name: TASK_TIMEOUT_MINUTES

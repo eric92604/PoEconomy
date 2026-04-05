@@ -10,12 +10,9 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 import warnings
-import argparse
 from datetime import datetime
 import pandas as pd
-import numpy as np
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import multiprocessing as mp
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -24,11 +21,10 @@ sys.path.append(str(Path(__file__).parent.parent))
 warnings.filterwarnings('ignore')
 
 # Import utilities
-from ml.config.training_config import MLConfig, DataConfig, ProcessingConfig, get_default_config, get_all_currencies_config, get_high_value_config
-from ml.utils.common_utils import setup_ml_logging, MLLogger, ProgressLogger
+from ml.config.training_config import MLConfig
+from ml.utils.common_utils import setup_ml_logging, ProgressLogger
 from ml.utils.data_processing import DataProcessor
-from ml.utils.feature_engineering import FeatureEngineer
-from ml.utils.data_processing import generate_target_currency_list, generate_all_currencies_list
+from ml.utils.data_processing import generate_all_currencies_list
 from ml.utils.data_sources import create_data_source, DataSourceConfig
 
 
@@ -114,9 +110,33 @@ class FeatureEngineeringPipeline:
                 only_available_currencies=False,
                 availability_check_days=0,
             )
-            self.logger.info(
-                f"Feature engineering for ALL currencies mode: {len(target_currency_data)} currencies selected"
-            )
+
+            # Filter by explicit currency list when --currencies was passed (mirrors training pipeline).
+            if self.config.pipeline.currencies_to_train:
+                requested = {c.lower() for c in self.config.pipeline.currencies_to_train}
+                filtered = [
+                    pair for pair in target_currency_data
+                    if pair['get_currency'].lower() in requested
+                ]
+                missing = sorted(
+                    requested - {pair['get_currency'].lower() for pair in filtered}
+                )
+                self.logger.info(
+                    "Filtering currencies for feature engineering based on --currencies argument",
+                    extra={
+                        "requested": sorted(self.config.pipeline.currencies_to_train),
+                        "matched": [pair['get_currency'] for pair in filtered],
+                        "missing": missing,
+                    }
+                )
+                target_currency_data = filtered
+                self.logger.info(
+                    f"Feature engineering for {len(target_currency_data)} requested currencies"
+                )
+            else:
+                self.logger.info(
+                    f"Feature engineering for ALL currencies mode: {len(target_currency_data)} currencies selected"
+                )
 
             # Apply explicit limit when requested (useful for smoke tests / quick iterations)
             if (
@@ -146,11 +166,8 @@ class FeatureEngineeringPipeline:
             
             self.logger.info(f"Processing {len(target_currencies)} currencies")
             
-            # Process currencies
-            if hasattr(self.config.processing, 'use_parallel_processing') and self.config.processing.use_parallel_processing:
-                self._process_currencies_parallel(raw_data, target_currencies)
-            else:
-                self._process_currencies_sequential(raw_data, target_currencies)
+            # Process currencies in parallel (always enabled)
+            self._process_currencies(raw_data, target_currencies)
             
             # Create combined dataset
             combined_dataset = None
@@ -235,69 +252,39 @@ class FeatureEngineeringPipeline:
                 self.logger.error("Failed to load raw data from DynamoDB", exception=e)
                 return None
     
-    def _process_currencies_sequential(self, raw_data: pd.DataFrame, target_currencies: List[str]) -> None:
+    def _process_currencies(self, raw_data: pd.DataFrame, target_currencies: List[str]) -> None:
         """
-        Process currencies sequentially.
-        
+        Process currencies using a parallel worker pool.
+
+        Worker count is controlled by config.model.max_currency_workers.
+        Set max_currency_workers=1 for effectively sequential execution.
+
         Args:
             raw_data: Raw dataframe
             target_currencies: List of currencies to process
         """
-        progress = ProgressLogger(
-            self.logger, len(target_currencies), "Sequential Currency Processing"
-        )
-        
-        for currency in target_currencies:
-            try:
-                result = self._process_currency(raw_data, currency)
-                if result is not None:
-                    self.processed_datasets.append(result)
-                    self.processing_stats['successful_processing'] += 1
-                    self.processing_stats['total_records_processed'] += len(result)
-                    self.processing_stats['total_features_created'] += len(result.columns)
-                
-            except Exception as e:
-                self.logger.error(f"Failed to process {currency}", exception=e)
-                self.failed_currencies.append({
-                    'currency': currency,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat()
-                })
-                self.processing_stats['failed_processing'] += 1
-            
-            finally:
-                progress.update()
-        
-        progress.complete()
-    
-    def _process_currencies_parallel(self, raw_data: pd.DataFrame, target_currencies: List[str]) -> None:
-        """
-        Process currencies in parallel.
-        
-        Args:
-            raw_data: Raw dataframe
-            target_currencies: List of currencies to process
-        """
-        # Determine number of workers
         max_workers = min(len(target_currencies), self.config.model.max_currency_workers)
-        
-        self.logger.info(f"Processing currencies with {max_workers} parallel workers")
-        
+        self.logger.info(f"Processing {len(target_currencies)} currencies with {max_workers} workers")
+
         progress = ProgressLogger(
-            self.logger, len(target_currencies), "Parallel Currency Processing"
+            self.logger, len(target_currencies), "Currency Processing"
         )
-        
+
+        # Serialise config once so every worker uses identical settings
+        # (custom rolling_windows, max_league_days, outlier thresholds, etc.).
+        config_dict = self.config.to_dict()
+
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
             future_to_currency = {
-                executor.submit(self._process_currency_worker, raw_data, currency): currency
+                executor.submit(
+                    self._process_currency_worker, raw_data, currency, config_dict
+                ): currency
                 for currency in target_currencies
             }
-            
-            # Collect results
+
             for future in as_completed(future_to_currency):
                 currency = future_to_currency[future]
-                
+
                 try:
                     result = future.result()
                     if result is not None:
@@ -305,7 +292,10 @@ class FeatureEngineeringPipeline:
                         self.processing_stats['successful_processing'] += 1
                         self.processing_stats['total_records_processed'] += len(result)
                         self.processing_stats['total_features_created'] += len(result.columns)
-                    
+
+                        if self.config.experiment.save_individual_datasets:
+                            self._save_individual_dataset(result, currency)
+
                 except Exception as e:
                     self.logger.error(f"Failed to process {currency}", exception=e)
                     self.failed_currencies.append({
@@ -314,10 +304,10 @@ class FeatureEngineeringPipeline:
                         'timestamp': datetime.now().isoformat()
                     })
                     self.processing_stats['failed_processing'] += 1
-                
+
                 finally:
                     progress.update()
-        
+
         progress.complete()
     
     def _process_currency(self, df: pd.DataFrame, currency: str) -> Optional[pd.DataFrame]:
@@ -362,25 +352,31 @@ class FeatureEngineeringPipeline:
                 return None
     
     @staticmethod
-    def _process_currency_worker(raw_data: pd.DataFrame, currency: str) -> Optional[pd.DataFrame]:
+    def _process_currency_worker(
+        raw_data: pd.DataFrame,
+        currency: str,
+        config_dict: Dict[str, Any],
+    ) -> Optional[pd.DataFrame]:
         """
-        Worker function for parallel processing.
-        
-        This is a static method to avoid pickling issues with multiprocessing.
-        
+        Worker function for parallel currency processing.
+
+        Accepts a serialised config dict so that every worker uses exactly
+        the same settings as the orchestrating process (e.g. custom
+        rolling_windows, max_league_days, outlier thresholds).  Using a
+        fresh ``MLConfig()`` default in each worker silently ignores any
+        programmatic overrides applied before the parallel run.
+
+        This is a static method to satisfy ``ProcessPoolExecutor`` pickling
+        requirements.
+
         Args:
-            raw_data: Complete dataframe
-            currency: Currency name to process
+            raw_data: Complete multi-currency dataframe.
+            currency: Currency name to filter and process.
+            config_dict: Serialised ``MLConfig.to_dict()`` from the parent process.
         """
-        # Create minimal configuration for worker
-        config = MLConfig()
-        
-        # Create processor
+        config = MLConfig.from_dict(config_dict)
         processor = DataProcessor(config.data, config.processing)
-        
-        # Filter and process data using currency column
         currency_data = raw_data[raw_data['currency'] == currency].copy()
-        
         processed_data, _ = processor.process_currency_data(currency_data, currency)
         return processed_data
     
@@ -564,177 +560,3 @@ class FeatureEngineeringPipeline:
         return results
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Feature Engineering Pipeline",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Production feature engineering
-  python feature_engineering.py --mode production
-  
-  # Development feature engineering with faster settings
-  python feature_engineering.py --mode development
-  
-  # Testing with minimal settings
-  python feature_engineering.py --mode test
-  
-  # Train ALL currencies with sufficient data
-  python feature_engineering.py --train-all-currencies
-  
-  # Train ALL currencies with custom thresholds
-  python feature_engineering.py --train-all-currencies --min-avg-value 2.0 --min-records 75
-  
-  # With parallel processing
-  python feature_engineering.py --parallel
-  
-  # Save individual datasets
-  python feature_engineering.py --save-individual
-  
-  # Custom experiment ID
-  python feature_engineering.py --experiment-id my_experiment
-  
-  # Custom configuration
-  python feature_engineering.py --config /path/to/config.json
-        """
-    )
-    
-    parser.add_argument(
-        '--mode',
-        choices=['production', 'development', 'test'],
-        default='production',
-        help='Training mode (default: production)'
-    )
-    
-    parser.add_argument(
-        '--config',
-        type=str,
-        help='Path to configuration file'
-    )
-    
-    parser.add_argument(
-        '--experiment-id',
-        type=str,
-        help='Custom experiment ID'
-    )
-    
-    parser.add_argument(
-        '--description',
-        type=str,
-        default='',
-        help='Experiment description'
-    )
-    
-    parser.add_argument(
-        '--tags',
-        nargs='*',
-        default=[],
-        help='Experiment tags'
-    )
-    
-    parser.add_argument(
-        '--parallel',
-        action='store_true',
-        help='Use parallel processing'
-    )
-    
-    parser.add_argument(
-        '--save-individual',
-        action='store_true',
-        help='Save individual currency datasets'
-    )
-    
-    parser.add_argument(
-        '--max-league-days',
-        type=int,
-        help='Maximum days into each league to consider'
-    )
-    
-    parser.add_argument(
-        '--train-all-currencies',
-        action='store_true',
-        help='Train models for all currencies with sufficient data (not just high-value ones)'
-    )
-    
-    parser.add_argument(
-        '--min-avg-value',
-        type=float,
-        help='Minimum average value (in Chaos Orbs) for currency inclusion when using --train-all-currencies'
-    )
-    
-    parser.add_argument(
-        '--min-records',
-        type=int,
-        help='Minimum number of historical records required when using --train-all-currencies'
-    )
-    
-    return parser.parse_args()
-
-
-def main() -> None:
-    """Main function to run feature engineering."""
-    args = parse_arguments()
-    
-    try:
-        # Get configuration based on mode
-        if args.config:
-            config = MLConfig.from_file(args.config)
-        elif args.mode == 'production':
-            config = get_default_config()
-        elif args.mode == 'development':
-            config = get_default_config()
-        else:  # test
-            config = get_default_config()
-        
-        # Override configuration with command line arguments
-        if args.experiment_id:
-            config.experiment.experiment_id = args.experiment_id
-        if args.description:
-            config.experiment.description = args.description
-        if args.tags:
-            config.experiment.tags.extend(args.tags)
-        if args.parallel:
-            # Add parallel processing flag to config
-            config.processing.use_parallel_processing = True
-        if args.save_individual:
-            config.experiment.save_individual_datasets = True
-        if args.max_league_days:
-            config.data.max_league_days = args.max_league_days
-        if args.train_all_currencies:
-            config.data.train_all_currencies = True
-        if args.min_avg_value:
-            config.data.min_avg_value_threshold = args.min_avg_value
-        if args.min_records:
-            config.data.min_records_threshold = args.min_records
-        
-        # Add mode and feature engineering tags
-        config.experiment.tags.append(args.mode)
-        config.experiment.tags.append('feature_engineering')
-        
-        # Initialize feature engineer
-        engineer = FeatureEngineeringPipeline(config)
-        
-        print(f"Starting feature engineering in {args.mode} mode...")
-        print(f"Experiment ID: {config.experiment.experiment_id}")
-        print(f"Parallel Processing: {getattr(config.processing, 'use_parallel_processing', False)}")
-        
-        # Run feature engineering
-        results = engineer.run_feature_engineering_experiment()
-        
-        if results['processing_stats']['successful_processing'] > 0:
-            print(f"\nSuccessfully processed {results['processing_stats']['successful_processing']} currencies!")
-        else:
-            print(f"\nNo currencies were processed successfully")
-            sys.exit(1)
-            
-    except KeyboardInterrupt:
-        print("\nFeature engineering interrupted by user")
-        sys.exit(1)
-    except Exception as e:
-        print(f"\nFeature engineering failed: {str(e)}")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main() 

@@ -18,7 +18,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from ml.config.inference_config import InferenceConfig, get_inference_config_from_env
+from ml.config.inference_config import InferenceConfig, get_inference_config
 from ml.utils.data_processing import DataProcessor
 from ml.utils.data_sources import create_data_source, DataSourceConfig, BaseDataSource
 from ml.utils.common_utils import MLLogger
@@ -98,7 +98,7 @@ class ModelPredictor:
         data_source: Optional[BaseDataSource] = None,
     ) -> None:
         self.models_dir = Path(models_dir)
-        self.config = config or get_inference_config_from_env()
+        self.config = config or get_inference_config()
         self.logger = logger or MLLogger("ModelPredictor")
         if data_source is None:
             data_source_config = DataSourceConfig.from_dynamo_config(self.config.dynamo)
@@ -166,12 +166,10 @@ class ModelPredictor:
                                     # If imputer fails to load, we cannot proceed safely
                                     raise ValueError(f"Failed to load required imputer for {currency} ({horizon}). Model artifacts may be incomplete.")
                             else:
-                                self.logger.warning(f"No imputer found for {currency} ({horizon}). This model may have been trained before imputation was saved.")
-                                # Fallback: use median imputation (but log warning)
-                                from sklearn.impute import SimpleImputer
-                                fallback_imputer = SimpleImputer(strategy='median')
-                                X = fallback_imputer.fit_transform(X)
-                                self.logger.warning(f"Used fallback imputation for {currency} ({horizon}) - this may cause prediction inconsistencies")
+                                self.logger.warning(
+                                    f"No imputer artifact found for {currency} ({horizon}). "
+                                    "Proceeding without imputation — model may have been trained on clean data."
+                                )
                             
                             # Load scaler and apply after imputation
                             scaler = joblib.load(artifact.scaler_path) if artifact.scaler_path and artifact.scaler_path.exists() else None
@@ -184,10 +182,9 @@ class ModelPredictor:
                             
                             latest_features = X[-1].reshape(1, -1)
                             
-                            # Make prediction with uncertainty using ensemble spread
-                            # Use 60% confidence for narrower, more practical prediction ranges
                             prediction_value, lower, upper = self._compute_interval_from_ensemble(
-                                model, latest_features, confidence_level=0.60
+                                model, latest_features,
+                                confidence_level=self.config.default_confidence_level,
                             )
                             
                             # Validate prediction value
@@ -302,7 +299,6 @@ class ModelPredictor:
         """Get the most recent price for a currency using primary key query."""
         try:
             # Query the prices table using primary key for efficiency
-            from boto3.dynamodb.conditions import Key
             # For now, return a default price since we don't have direct table access
             # This could be enhanced to use the data source's query methods
             # No fallback - this should not happen in production
@@ -461,7 +457,9 @@ class ModelPredictor:
         horizon: Optional[str] = None,
         model_metadata: Optional[Dict] = None,
     ) -> Tuple[Optional[pd.DataFrame], List[str]]:
-        processed_data, metadata = self.data_processor.process_currency_data(df, currency)
+        processed_data, metadata = self.data_processor.process_currency_data(
+            df, currency, is_inference=True
+        )
         if processed_data is None or processed_data.empty:
             self.logger.warning(f"No processed data for {currency}", extra=metadata)
             return None, []
@@ -549,15 +547,11 @@ class ModelPredictor:
         feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan)
         feature_matrix = feature_frame.to_numpy(dtype=float, na_value=np.nan)
 
-        # Standardized NaN filtering - use same threshold as training (90%)
-        # This ensures consistency between training and inference
-        
-        # Count NaN values per row
+        # Drop rows that exceed the NaN ratio threshold — must match training.
         nan_counts = np.isnan(feature_matrix).sum(axis=1)
         total_features = feature_matrix.shape[1]
-        
-        # Use same threshold as training: remove rows with >90% NaN features
-        max_nan_ratio = 0.9
+
+        max_nan_ratio: float = self.config.processing.max_nan_ratio
         max_nan_count = int(total_features * max_nan_ratio)
         
         # Filter rows with too many NaN values

@@ -29,7 +29,6 @@ echo "Deploying feature engineering infrastructure..."
 
 # Build parameter list - only include optional parameters if explicitly set
 PARAMS=(
-  "EnvironmentName=$ENVIRONMENT"
   "FeatureEngineeringImageUri=$FEATURE_ENGINEERING_IMAGE_URI"
   "DataLakeBucketName=$DATA_LAKE_BUCKET_NAME"
   "BaseStackName=$BASE_STACK_NAME"

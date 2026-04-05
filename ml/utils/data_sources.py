@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import boto3
 import pandas as pd
@@ -604,6 +604,11 @@ class DynamoDBDataSource(BaseDataSource):
                     continue
 
             price = self._coerce_float(item.get("price"))
+            # Market confidence from POE Watch (0.5 = low confidence, 0.85 = normal).
+            # Falls back to 0.85 for older records that pre-date this field.
+            # Column names are aligned with the daily-prices aggregation path so that
+            # training and validation/inference feature sets are identical.
+            confidence = self._coerce_float(item.get("confidence")) or 0.85
             records.append({
                 "currency": currency,
                 "get_currency": currency,
@@ -614,6 +619,8 @@ class DynamoDBDataSource(BaseDataSource):
                 "league_end": league_end,
                 "league_active": league_is_active,
                 "league_day": league_day,
+                "avg_confidence": confidence,
+                "min_confidence": confidence,
             })
 
         if not records:
@@ -714,7 +721,7 @@ class DynamoDBDataSource(BaseDataSource):
                 price = self._coerce_float(item.get('avg_price'))
                 if price is None or price <= 0:
                     continue
-                
+
                 # Calculate league_day if league_start is available
                 if league_start:
                     try:
@@ -723,7 +730,13 @@ class DynamoDBDataSource(BaseDataSource):
                         league_day = 0
                 else:
                     league_day = 0
-                
+
+                # Market confidence (0.5 = low confidence, 0.85 = normal).
+                # Falls back to 0.85 (normal) for records written before this
+                # field was added to the daily-prices table.
+                avg_confidence = self._coerce_float(item.get('avg_confidence')) or 0.85
+                min_confidence = self._coerce_float(item.get('min_confidence')) or 0.85
+
                 records.append({
                     'currency': currency,
                     'get_currency': currency,
@@ -734,6 +747,8 @@ class DynamoDBDataSource(BaseDataSource):
                     'league_end': league_info.get('end'),
                     'league_active': league_info.get('is_active', True),
                     'league_day': league_day,
+                    'avg_confidence': avg_confidence,
+                    'min_confidence': min_confidence,
                 })
             
             if not records:

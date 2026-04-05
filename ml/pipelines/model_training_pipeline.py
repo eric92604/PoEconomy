@@ -5,31 +5,26 @@ This module contains the pipeline orchestration for model training,
 separating the orchestration logic from the core model training functionality.
 """
 
-import sys
+import logging
 import os
+import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Union
-import warnings
-import argparse
 from datetime import datetime
 import pandas as pd
-import json
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import numpy as np
-from sklearn.impute import SimpleImputer
 
-sys.path.append(str(Path(__file__).parent.parent))
+# Extra days fetched beyond validation_max_days + max_horizon to ensure
+# future target values are available at the tail of the validation window.
+_VALIDATION_FETCH_BUFFER_DAYS = 7
 
-warnings.filterwarnings('ignore')
-
-from ml.config.training_config import MLConfig, get_default_config
-from ml.utils.common_utils import setup_ml_logging, MLLogger, ProgressLogger
-from ml.utils.model_training import ModelTrainer, save_model_artifacts, TrainingResult
-from ml.utils.data_processing import generate_target_currency_list
+from ml.config.training_config import MLConfig
+from ml.utils.common_utils import setup_ml_logging, ProgressLogger
+from ml.utils.model_training import ModelTrainer, save_model_artifacts
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import multiprocessing as mp
 
 
 class ModelTrainingPipeline:
@@ -109,7 +104,7 @@ class ModelTrainingPipeline:
         # Note: Models directory will be created after experiment_id is potentially updated from processed data
         
         # Initialize tracking
-        self.results: List[Any] = []
+        self.results: List[Dict[str, Any]] = []
         self.failed_currencies: List[Dict[str, str]] = []
         self.processing_stats = {
             'total_currencies': 0,
@@ -283,42 +278,44 @@ class ModelTrainingPipeline:
                 self.logger.error(f"Failed to upload logs to S3: {upload_error}")
             raise
     
-    def _train_currencies_parallel(self, target_currencies: List[Dict[str, Any]], 
-                                 progress: ProgressLogger, max_workers: int) -> None:
+    def _on_currency_complete(self, currency_name: str, result: Optional[Dict[str, Any]]) -> None:
         """
-        Train currencies in parallel using ProcessPoolExecutor.
-        
+        Handle the outcome of a completed currency training run.
+
+        Centralises result collection, stat tracking, logging, and model upload so
+        the logic is identical for both sequential and parallel training paths.
+        """
+        if result:
+            self.results.append(result)
+            self.processing_stats['successful_training'] += 1
+            self._log_currency_completion_stats(currency_name, result)
+            try:
+                self._upload_currency_models(currency_name, result)
+            except Exception as upload_error:
+                self.logger.warning(f"Failed to upload models for {currency_name}: {upload_error}")
+        else:
+            self.processing_stats['failed_training'] += 1
+            self.logger.warning(f"Training failed for {currency_name}")
+
+    def _train_currencies_parallel(self, target_currencies: List[Dict[str, Any]],
+                                   progress: ProgressLogger, max_workers: int) -> None:
+        """
+        Train currencies sequentially (max_workers=1) or in parallel (max_workers>1).
+
         Args:
             target_currencies: List of currency dictionaries
             progress: Progress logger instance
             max_workers: Maximum number of parallel workers
         """
         if max_workers == 1:
-            # Single worker processing
             for currency in target_currencies:
+                currency_name = currency.get('get_currency', 'Unknown')
                 try:
-                    currency_name = currency.get('get_currency', 'Unknown')
-                    self.logger.info(f"🔄 Starting training for {currency_name}...")
-                    
+                    self.logger.info(f"Starting training for {currency_name}...")
                     result = self._train_currency_model(currency)
-                    if result:
-                        self.results.append(result)
-                        self.processing_stats['successful_training'] += 1
-                        self.logger.info(f"✅ {currency_name} training completed successfully")
-                        
-                        # Upload models for this currency immediately after training
-                        try:
-                            self._upload_currency_models(currency_name, result)
-                        except Exception as upload_error:
-                            # Log error but don't fail the training
-                            self.logger.warning(f"Failed to upload models for {currency_name}: {upload_error}")
-                    else:
-                        self.processing_stats['failed_training'] += 1
-                        self.logger.warning(f"❌ {currency_name} training failed")
-                        
+                    self._on_currency_complete(currency_name, result)
                 except Exception as e:
-                    currency_name = currency.get('get_currency', 'Unknown')
-                    self.logger.error(f"💥 {currency_name} training crashed", exception=e)
+                    self.logger.error(f"{currency_name} training crashed", exception=e)
                     self.failed_currencies.append({
                         'currency': currency,
                         'error': str(e),
@@ -328,107 +325,76 @@ class ModelTrainingPipeline:
                 finally:
                     progress.update()
             return
-        
+
         # Parallel processing
         processed_data_path = self._get_processed_data_path()
         shared_data = {
             'config_dict': self.config.to_dict(),
-            'experiment_id': self.config.experiment.experiment_id,
             'processed_data_path': processed_data_path
         }
-        
+
         executor = None
         try:
             executor = ProcessPoolExecutor(max_workers=max_workers)
-            # Submit training tasks
             future_to_currency = {
-                executor.submit(
-                    self._train_currency_worker,
-                    currency,
-                    shared_data
-                ): currency for currency in target_currencies
+                executor.submit(self._train_currency_worker, currency, shared_data): currency
+                for currency in target_currencies
             }
-            
+
             self.logger.info(f"Submitted {len(future_to_currency)} training tasks to process pool")
-            
-            # Collect results
+
             completed_count = 0
             total_tasks = len(future_to_currency)
-            
+
             for future in as_completed(future_to_currency):
                 currency = future_to_currency[future]
                 currency_name = currency.get('get_currency', 'Unknown')
                 completed_count += 1
-                
+
                 try:
                     result = future.result()
-                    if result:
-                        self.results.append(result)
-                        self.processing_stats['successful_training'] += 1
-                        
-                        # Log detailed completion statistics for parallel training
-                        self._log_currency_completion_stats(currency_name, result)
-                        
-                        # Upload models for this currency immediately after training
-                        try:
-                            self._upload_currency_models(currency_name, result)
-                        except Exception as upload_error:
-                            # Log error but don't fail the training
-                            self.logger.warning(f"Failed to upload models for {currency_name}: {upload_error}")
-                    else:
-                        self.processing_stats['failed_training'] += 1
-                        self.logger.warning(f"❌ {currency_name}: Training returned None")
-                
+                    self._on_currency_complete(currency_name, result)
                 except Exception as e:
                     error_msg = str(e)
                     if "process pool was terminated" in error_msg:
-                        self.logger.error(f"💥 {currency_name}: Process pool terminated - likely due to resource exhaustion")
+                        self.logger.error(f"{currency_name}: Process pool terminated - likely due to resource exhaustion")
                     else:
-                        self.logger.error(f"💥 {currency_name}: Training crashed - {error_msg}")
-                    
+                        self.logger.error(f"{currency_name}: Training crashed - {error_msg}")
                     self.failed_currencies.append({
                         'currency': currency,
                         'error': error_msg,
                         'timestamp': datetime.now().isoformat()
                     })
                     self.processing_stats['failed_training'] += 1
-                
                 finally:
                     progress.update()
                     if completed_count % 10 == 0 or completed_count == total_tasks:
                         self.logger.debug(f"Completed {completed_count}/{total_tasks} currencies")
-            
-            # All futures have completed - verify this
+
             remaining_futures = [f for f in future_to_currency.keys() if not f.done()]
             if remaining_futures:
-                self.logger.warning(f"Warning: {len(remaining_futures)} futures still pending after as_completed loop")
+                self.logger.warning(f"{len(remaining_futures)} futures still pending after as_completed loop")
             else:
                 self.logger.info(f"All {completed_count} training tasks completed successfully")
-                        
+
         except Exception as e:
-            self.logger.error(f"💥 Process pool executor failed: {str(e)}")
-            # Cancel remaining futures
+            self.logger.error(f"Process pool executor failed: {str(e)}")
             if executor and 'future_to_currency' in locals():
                 for future in future_to_currency:
                     if not future.done():
                         future.cancel()
         finally:
-            # Explicitly shutdown executor - use wait=False to prevent hanging on stuck processes
-            # All futures should already be done at this point
             if executor:
                 try:
                     self.logger.debug("Shutting down ProcessPoolExecutor...")
-                    # Shutdown without waiting - all futures should already be done
                     executor.shutdown(wait=False)
                     self.logger.debug("ProcessPoolExecutor shutdown completed")
                 except Exception as shutdown_error:
                     self.logger.warning(f"Error during executor shutdown: {shutdown_error}")
-            
-            # Clean up temporary file
+
             if processed_data_path and os.path.exists(processed_data_path):
                 try:
                     os.remove(processed_data_path)
-                    # Also remove the parent directory if it's empty
                     temp_dir = os.path.dirname(processed_data_path)
                     if os.path.exists(temp_dir) and not os.listdir(temp_dir):
                         os.rmdir(temp_dir)
@@ -436,7 +402,7 @@ class ModelTrainingPipeline:
                     self.logger.warning(f"Failed to clean up temporary file {processed_data_path}: {e}")
     
     @staticmethod
-    def _train_currency_worker(currency: Dict[str, Any], shared_data: Dict[str, Any]) -> Optional[TrainingResult]:
+    def _train_currency_worker(currency: Dict[str, Any], shared_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Worker function for parallel currency training with robust error handling.
         
@@ -448,8 +414,6 @@ class ModelTrainingPipeline:
             Training result dictionary or None if failed
         """
         try:
-            # Set process name for debugging
-            import os
             currency_name = currency.get('get_currency', 'Unknown')
             os.setpgrp()  # Create new process group to prevent signal propagation
             
@@ -473,17 +437,14 @@ class ModelTrainingPipeline:
             return result
             
         except MemoryError as e:
-            # Handle memory exhaustion gracefully
-            import sys
-            sys.stderr.write(f"Memory error in worker for currency {currency_name}: {str(e)}\n")
+            logging.getLogger(__name__).error(
+                f"Memory error in worker for currency {currency_name}: {e}"
+            )
             return None
-            
         except Exception as e:
-            # Use the main pipeline logger for error reporting
-            # Note: This will be handled by the main process logger
-            # Log error to stderr for worker process debugging
-            import sys
-            sys.stderr.write(f"Worker failed for currency {currency_name}: {str(e)}\n")
+            logging.getLogger(__name__).error(
+                f"Worker failed for currency {currency_name}: {e}"
+            )
             return None
     
     def _get_processed_data_path(self) -> Optional[str]:
@@ -511,10 +472,9 @@ class ModelTrainingPipeline:
         try:
             return pd.read_parquet(data_path)
         except Exception as e:
-            # Use stderr for worker process error reporting
-            # Note: This will be handled by the main process logger
-            import sys
-            sys.stderr.write(f"Failed to load processed data from {data_path}: {str(e)}\n")
+            logging.getLogger(__name__).error(
+                f"Failed to load processed data from {data_path}: {e}"
+            )
             return None
     
     def _save_temp_dataframe(self, df: pd.DataFrame) -> str:
@@ -527,31 +487,12 @@ class ModelTrainingPipeline:
         Returns:
             Path to temporary file
         """
-        import tempfile
-        import os
-        
         temp_dir = tempfile.mkdtemp()
         temp_path = os.path.join(temp_dir, f"training_data_{self.config.experiment.experiment_id}.parquet")
         df.to_parquet(temp_path, index=False)
         
         self.logger.debug(f"Saved temporary dataframe to {temp_path}")
         return temp_path
-    
-    def _cleanup_temp_dataframe(self, temp_path: str) -> None:
-        """
-        Clean up temporary dataframe file.
-        
-        Args:
-            temp_path: Path to temporary file
-        """
-        try:
-            import os
-            import shutil
-            temp_dir = os.path.dirname(temp_path)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            self.logger.debug(f"Cleaned up temporary dataframe at {temp_path}")
-        except Exception as e:
-            self.logger.warning(f"Failed to clean up temporary file {temp_path}: {e}")
     
     def _extract_currencies_from_processed_data(self, processed_data: pd.DataFrame) -> List[Dict[str, Any]]:
         """
@@ -689,500 +630,404 @@ class ModelTrainingPipeline:
             self.logger.error("3. Feature engineering pipeline has run successfully")
             return None
     
-    def _train_currency_model(self, currency: Dict[str, Any]) -> Optional[TrainingResult]:
+    def _filter_currency_data(
+        self, currency_name: str
+    ) -> Optional[Dict[str, Any]]:
         """
-        Train model for a single currency using processed data from data source.
-        
-        Args:
-            currency: Currency dictionary with get_currency
-            
-        Returns:
-            Training result dictionary or None if failed
+        Slice processed data for a single currency and build processing metadata.
+
+        Returns a dict with keys 'data' and 'metadata', or None if data is
+        absent or insufficient.
+        """
+        processed_data = self._processed_data
+        if processed_data is None:
+            self.logger.error("No processed data available")
+            self.processing_stats['insufficient_data'] += 1
+            return None
+
+        currency_data = processed_data[processed_data['currency'] == currency_name].copy()
+        if currency_data.empty:
+            self.logger.warning(f"No processed data found for {currency_name}")
+            self.processing_stats['insufficient_data'] += 1
+            return None
+
+        self.logger.debug(f"Currency data for {currency_name}: {len(currency_data):,} records")
+
+        if 'timestamp' in currency_data.columns:
+            date_range = currency_data['timestamp'].agg(['min', 'max'])
+            self.logger.debug(f"  Date range: {date_range['min']} to {date_range['max']}")
+
+        if 'league_name' in currency_data.columns:
+            league_dist = currency_data['league_name'].value_counts()
+            self.logger.debug(f"League distribution for {currency_name}:")
+            for league, count in league_dist.items():
+                self.logger.debug(f"  {league}: {count:,} records")
+            if self.config.data.included_leagues:
+                for league in list(self.config.data.included_leagues):
+                    subset = currency_data[
+                        currency_data['league_name'].str.contains(league, case=False, na=False)
+                    ]
+                    if subset.empty:
+                        self.logger.warning(f"No {league} data found for {currency_name}")
+                    else:
+                        self.logger.debug(f"{league} data available: {len(subset):,} records")
+
+        metadata = {
+            'currency': currency_name,
+            'processing_timestamp': pd.Timestamp.now().isoformat(),
+            'validation_result': 'passed',
+            'feature_engineering_result': 'data_already_processed',
+            'success': True,
+            'leagues_included': list(currency_data['league_name'].unique())
+            if 'league_name' in currency_data.columns else [],
+        }
+        return {'data': currency_data, 'metadata': metadata}
+
+    def _build_feature_matrix(
+        self,
+        data: pd.DataFrame,
+        feature_cols: List[str],
+        currency_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Build numpy feature matrix from *data*, cast to float, and drop rows
+        whose NaN ratio exceeds the configured threshold.
+
+        Returns a dict with keys 'X' (ndarray) and 'data' (filtered DataFrame),
+        or None on failure.
+        """
+        X = data[feature_cols].values
+        self.logger.debug(f"Initial feature matrix shape: {X.shape}")
+
+        if X.dtype.kind not in 'biufc':
+            try:
+                X = X.astype(float)
+                self.logger.debug(f"Converted features to float.")
+            except (ValueError, TypeError) as e:
+                self.logger.error(f"Cannot convert features to float for {currency_name}: {e}")
+                return None
+
+        max_nan_ratio = self.config.processing.max_nan_ratio
+        row_nan_ratio = np.isnan(X).sum(axis=1) / X.shape[1]
+        valid_rows = row_nan_ratio <= max_nan_ratio
+        X = X[valid_rows]
+        data = data[valid_rows].reset_index(drop=True)
+
+        self.logger.debug(
+            f"NaN row filter: {valid_rows.sum():,}/{len(valid_rows):,} rows kept "
+            f"(threshold={max_nan_ratio})"
+        )
+
+        if len(X) < 5:
+            self.logger.warning(
+                f"Insufficient samples for {currency_name} after NaN filtering: {len(X)}"
+            )
+            self.processing_stats['insufficient_data'] += 1
+            return None
+
+        return {'X': X, 'data': data}
+
+    def _fetch_validation_set(
+        self,
+        currency_name: str,
+        feature_cols: List[str],
+    ) -> Dict[str, Any]:
+        """
+        Fetch and process current-league validation data from DynamoDB.
+
+        Returns a dict with keys 'features' (ndarray or None) and
+        'targets' (DataFrame or None).
+        """
+        empty: Dict[str, Any] = {'features': None, 'targets': None}
+
+        if not self.dynamo_data_source:
+            self.logger.warning(
+                f"DynamoDB not configured for {currency_name}; skipping validation data."
+            )
+            self.processing_stats['validation_failures'] += 1
+            return empty
+
+        try:
+            current_league = None
+            if (
+                hasattr(self.dynamo_data_source, '_league_table')
+                and self.dynamo_data_source._league_table
+            ):
+                from ml.utils.data_sources import get_current_seasonal_league_from_table
+                current_league = get_current_seasonal_league_from_table(
+                    self.dynamo_data_source._league_table, self.logger
+                )
+            else:
+                self.logger.warning(
+                    f"League metadata table not available for {currency_name}; "
+                    "skipping validation data."
+                )
+                self.processing_stats['validation_failures'] += 1
+                return empty
+
+            if not current_league:
+                self.logger.warning(
+                    f"No active league found for {currency_name}; skipping validation data."
+                )
+                self.processing_stats['validation_failures'] += 1
+                return empty
+
+            self.logger.info(f"Fetching validation data for {currency_name} from league: {current_league}")
+            validation_df = self._fetch_validation_data(currency_name, current_league)
+
+            if validation_df is None or validation_df.empty:
+                self.logger.warning(
+                    f"No validation data returned for {currency_name} from {current_league}."
+                )
+                self.processing_stats['validation_failures'] += 1
+                return empty
+
+            # Align columns — pad any training features missing from validation with NaN.
+            missing_cols = [c for c in feature_cols if c not in validation_df.columns]
+            if missing_cols:
+                self.logger.warning(
+                    f"Validation data missing {len(missing_cols)} feature(s) for "
+                    f"{currency_name}; padding with NaN: {missing_cols}"
+                )
+                for col in missing_cols:
+                    validation_df[col] = np.nan
+
+            val_X = validation_df[feature_cols].values
+            max_nan_ratio = self.config.processing.max_nan_ratio
+            valid_mask = np.isnan(val_X).sum(axis=1) / val_X.shape[1] <= max_nan_ratio
+            val_X = val_X[valid_mask]
+            validation_df = validation_df[valid_mask].reset_index(drop=True)
+
+            self.logger.info(
+                f"Validation set ready for {currency_name}: {len(val_X)} samples"
+            )
+            return {'features': val_X, 'targets': validation_df}
+
+        except Exception as e:
+            self.logger.warning(
+                f"Error fetching validation data for {currency_name}: {e}. "
+                "Continuing without validation data."
+            )
+            self.processing_stats['validation_failures'] += 1
+            return empty
+
+    def _extract_horizon_val(
+        self,
+        target_col: str,
+        horizon: str,
+        val_features: Optional[np.ndarray],
+        val_targets: Optional[pd.DataFrame],
+        currency_name: str,
+    ) -> Dict[str, Any]:
+        """
+        Extract (X_val, y_val) for a single horizon from the validation set.
+
+        Returns a dict with keys 'X_val' and 'y_val' (both None if unavailable).
+        """
+        if val_features is None or val_targets is None:
+            self.logger.warning(
+                f"Validation data not available for {currency_name} {horizon}; "
+                "using train/test split."
+            )
+            return {'X_val': None, 'y_val': None}
+
+        try:
+            if target_col not in val_targets.columns:
+                self.logger.warning(
+                    f"Target column {target_col} missing in validation data for "
+                    f"{currency_name} {horizon}; using train/test split."
+                )
+                return {'X_val': None, 'y_val': None}
+
+            y_val_raw = val_targets[target_col].values
+            valid_mask = ~pd.isna(y_val_raw)
+            X_val = val_features[valid_mask]
+            y_val = y_val_raw[valid_mask]
+
+            if len(X_val) == 0:
+                self.logger.warning(
+                    f"No valid validation samples for {currency_name} {horizon}; "
+                    "using train/test split."
+                )
+                return {'X_val': None, 'y_val': None}
+
+            self.logger.debug(f"Validation samples for {currency_name} {horizon}: {len(X_val)}")
+            return {'X_val': X_val, 'y_val': y_val}
+
+        except Exception as e:
+            self.logger.warning(
+                f"Error extracting validation data for {currency_name} {horizon}: {e}; "
+                "using train/test split."
+            )
+            return {'X_val': None, 'y_val': None}
+
+    def _train_all_horizons(
+        self,
+        currency_name: str,
+        data: pd.DataFrame,
+        feature_cols: List[str],
+        target_cols: List[str],
+        val_features: Optional[np.ndarray],
+        val_targets: Optional[pd.DataFrame],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Train one model per prediction horizon and save each to its own directory.
+
+        Returns a result dict on success, None if every horizon fails.
+        """
+        max_nan_ratio = self.config.processing.max_nan_ratio
+        horizon_results = {}
+
+        for target_col in target_cols:
+            horizon = target_col.replace('target_price_', '')
+            self.logger.debug(f"Training {horizon} model for {currency_name}")
+
+            # Per-horizon NaN row filter on features
+            X_h = data[feature_cols].values
+            row_nan = np.isnan(X_h).sum(axis=1) / X_h.shape[1]
+            keep = row_nan <= max_nan_ratio
+            X_h = X_h[keep]
+            data_h = data[keep].reset_index(drop=True)
+
+            y_h = data_h[target_col].values
+            total = len(y_h)
+            nan_count = pd.isna(y_h).sum()
+            self.logger.debug(
+                f"  {currency_name} {horizon}: {total - nan_count:,}/{total:,} valid target rows"
+            )
+
+            target_mask = ~pd.isna(y_h)
+            X_h = X_h[target_mask]
+            y_h = y_h[target_mask]
+
+            if len(X_h) < 10:
+                self.logger.warning(
+                    f"Skipping {currency_name} {horizon}: only {len(X_h)} samples "
+                    "(minimum 10 required)"
+                )
+                continue
+
+            val = self._extract_horizon_val(
+                target_col, horizon, val_features, val_targets, currency_name
+            )
+
+            training_result = self.model_trainer.train_single_model(
+                X_h, y_h, f"{currency_name}_{horizon}",
+                target_names=[target_col],
+                feature_names=feature_cols,
+                X_val=val['X_val'],
+                y_val=val['y_val'],
+            )
+
+            if training_result is not None:
+                horizon_results[horizon] = training_result
+                self.logger.debug(f"Trained {horizon} model for {currency_name}")
+            else:
+                self.logger.warning(f"Failed to train {horizon} model for {currency_name}")
+
+        if not horizon_results:
+            self.logger.error(f"All horizon models failed for {currency_name}")
+            return None
+
+        model_info = self._save_horizon_models(currency_name, horizon_results)
+        if model_info is None:
+            return None
+
+        primary_horizon = '1d' if '1d' in horizon_results else next(iter(horizon_results))
+        return {
+            'training_samples': {
+                h: int((~pd.isna(data[f'target_price_{h}'])).sum())
+                for h in horizon_results
+            },
+            'training_metrics': {h: r.metrics for h, r in horizon_results.items()},
+            'model_info': model_info,
+            'feature_count': len(feature_cols),
+            'horizons_trained': list(horizon_results.keys()),
+            'primary_horizon': primary_horizon,
+        }
+
+    def _save_horizon_models(
+        self, currency_name: str, horizon_results: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Persist each horizon's TrainingResult to its own subdirectory.
+
+        Returns a model_info dict keyed by '{horizon}_model', or None on error.
+        """
+        model_info: Dict[str, Any] = {}
+        for horizon, result in horizon_results.items():
+            try:
+                model_dir = self.config.paths.models_dir / f"{currency_name}_{horizon}"
+                info = save_model_artifacts(result, model_dir, f"{currency_name}_{horizon}")
+                model_info[f"{horizon}_model"] = info
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to save {horizon} model for {currency_name}: {e}"
+                )
+                return None
+        return model_info
+
+    def _train_currency_model(self, currency: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Orchestrate training for a single currency.
+
+        Delegates data filtering, feature matrix construction, validation fetch,
+        and per-horizon training to focused helper methods.
         """
         currency_name = currency['get_currency']
         with self.logger.log_operation(f"Training model for {currency_name}"):
-            # Use stored processed data
-            processed_data = self._processed_data
-            
-            if processed_data is None:
-                self.logger.error("No processed data available")
-                self.processing_stats['insufficient_data'] += 1
+            # 1. Filter and validate raw data for this currency.
+            filtered = self._filter_currency_data(currency_name)
+            if filtered is None:
                 return None
-            
-            # Filter processed data for this specific currency
-            currency_data = processed_data[
-                processed_data['currency'] == currency_name
-            ].copy()
-            
-            if currency_data.empty:
-                self.logger.warning(f"No processed data found for {currency_name}")
-                self.processing_stats['insufficient_data'] += 1
-                return None
-            
-            self.logger.debug(f"Using processed data for {currency_name}: {len(currency_data)} records")
-            
-            # Log overall data statistics for this currency
-            self.logger.debug(f"Currency data overview for {currency_name}:")
-            self.logger.debug(f"  Total records: {len(currency_data):,}")
-            if 'timestamp' in currency_data.columns:
-                date_range = currency_data['timestamp'].agg(['min', 'max'])
-                self.logger.debug(f"  Date range: {date_range['min']} to {date_range['max']}")
-            
-            # Log league distribution for this currency
-            if 'league_name' in currency_data.columns:
-                league_dist = currency_data['league_name'].value_counts()
-                self.logger.debug(f"League distribution for {currency_name}:")
-                for league, count in league_dist.items():
-                    self.logger.debug(f"  {league}: {count:,} records")
-                
-                # Check for included leagues data
-                if self.config.data.included_leagues:
-                    included_leagues = list(self.config.data.included_leagues)
-                    for league in included_leagues:
-                        league_data = currency_data[currency_data['league_name'].str.contains(league, case=False, na=False)]
-                        if not league_data.empty:
-                            self.logger.debug(f"{league} data available for training: {len(league_data):,} records")
-                        else:
-                            self.logger.warning(f"No {league} data found for {currency_name}")
-            
-            # Use the already processed data directly (no additional feature engineering needed)
-            processed_data = currency_data
-            processing_metadata = {
-                'currency': currency_name,
-                'processing_timestamp': pd.Timestamp.now().isoformat(),
-                'validation_result': 'passed',
-                'feature_engineering_result': 'data_already_processed',
-                'success': True,
-                'leagues_included': list(currency_data['league_name'].unique()) if 'league_name' in currency_data.columns else []
-            }
-            
-            # Prepare features and targets
-            feature_columns = self._get_feature_columns(processed_data)
-            target_column = self._get_target_column(processed_data)
-            
+            data, processing_metadata = filtered['data'], filtered['metadata']
+
+            # 2. Identify feature and target columns.
+            feature_columns = self._get_feature_columns(data)
+            target_column = self._get_target_column(data)
+
             if not feature_columns:
                 self.logger.warning(f"No feature columns found for {currency_name}")
                 self.processing_stats['validation_failures'] += 1
                 return None
-            
+
             if target_column is None:
                 self.logger.warning(f"No target columns found for {currency_name}")
                 self.processing_stats['validation_failures'] += 1
                 return None
-            
-            # Log target column information
-            if isinstance(target_column, list):
-                self.logger.debug(f"Found {len(target_column)} target horizons: {target_column}")
-                # Log NaN statistics for each target column
-                for target_col in target_column:
-                    if target_col in processed_data.columns:
-                        nan_count = processed_data[target_col].isna().sum()
-                        total_count = len(processed_data[target_col])
-                        nan_pct = (nan_count / total_count) * 100 if total_count > 0 else 0
-                        self.logger.debug(f"  {target_col}: {nan_count:,}/{total_count:,} NaN ({nan_pct:.1f}%)")
-            else:
-                self.logger.debug(f"Found single target: {target_column}")
-                if target_column in processed_data.columns:
-                    nan_count = processed_data[target_column].isna().sum()
-                    total_count = len(processed_data[target_column])
-                    nan_pct = (nan_count / total_count) * 100 if total_count > 0 else 0
-                    self.logger.debug(f"  {target_column}: {nan_count:,}/{total_count:,} NaN ({nan_pct:.1f}%)")
-            
-            # Validate target columns exist
-            if isinstance(target_column, list):
-                missing_targets = [col for col in target_column if col not in processed_data.columns]
-                if missing_targets:
-                    self.logger.warning(f"Missing target columns for {currency_name}: {missing_targets}")
-                    self.processing_stats['validation_failures'] += 1
-                    return None
-                self.logger.debug(f"Found {len(target_column)} target horizons: {target_column}")
-            else:
-                if target_column not in processed_data.columns:
-                    self.logger.warning(f"Target column {target_column} not found for {currency_name}")
-                    self.processing_stats['validation_failures'] += 1
-                    return None
-                self.logger.debug(f"Found single target: {target_column}")
-            
-            # Prepare feature matrix
-            X = processed_data[feature_columns].values
-            self.logger.debug(f"Initial feature matrix shape: X={X.shape}")
-            
-            # Check for NaN values in features
-            if X.dtype.kind in 'biufc':  # binary, integer, unsigned, float, complex
-                nan_count = np.isnan(X).sum()
-                self.logger.debug(f"Initial NaN count in features: {nan_count}")
-            else:
-                self.logger.debug(f"Features contain non-numeric data (dtype: {X.dtype})")
-                try:
-                    X = X.astype(float)
-                    nan_count = np.isnan(X).sum()
-                    self.logger.debug(f"Converted to numeric. NaN count in features: {nan_count}")
-                except (ValueError, TypeError) as e:
-                    self.logger.error(f"Cannot convert features to numeric: {e}")
-                    return None
-            
-            # Basic data quality filtering - more lenient for minimal data
-            # Remove rows with too many NaN values (>90% of features are NaN)
-            row_nan_ratio = np.isnan(X).sum(axis=1) / X.shape[1]
-            valid_rows = row_nan_ratio <= 0.9  # More lenient threshold
-            X = X[valid_rows]
-            processed_data = processed_data[valid_rows].reset_index(drop=True)
-            
-            self.logger.debug(
-                f"Feature NaN filtering results:",
-                extra={
-                    'samples_before': len(row_nan_ratio),
-                    'samples_after': len(X),
-                    'removed_samples': len(row_nan_ratio) - len(X),
-                    'max_nan_ratio': float(row_nan_ratio.max()) if len(row_nan_ratio) > 0 else 0,
-                    'mean_nan_ratio': float(row_nan_ratio.mean()) if len(row_nan_ratio) > 0 else 0
-                }
-            )
-            
-            # Create and fit imputer on full dataset (will be reused for all horizons)
-            # This ensures consistent imputation values across all horizons
-            fitted_imputer = None
-            if np.isnan(X).any():
-                fitted_imputer = SimpleImputer(strategy='median')
-                fitted_imputer.fit(X)  # Fit on full dataset
-                X = fitted_imputer.transform(X)  # Transform full dataset
-                self.logger.debug(f"Applied median imputation for remaining NaN values")
-            else:
-                self.logger.debug(f"No NaN values found, skipping imputation")
 
-            if len(X) < 5:  # Reduced minimum from 50 to 5
-                self.logger.warning(f"Insufficient data for {currency_name}: {len(X)} samples")
-                self.processing_stats['insufficient_data'] += 1
+            target_cols = target_column if isinstance(target_column, list) else [target_column]
+            missing = [c for c in target_cols if c not in data.columns]
+            if missing:
+                self.logger.warning(f"Missing target columns for {currency_name}: {missing}")
+                self.processing_stats['validation_failures'] += 1
                 return None
 
-            # Fetch validation data from DynamoDB
-            validation_data = None
-            validation_features = None
-            validation_targets = None
-            current_league = None
-            
-            try:
-                # Check if DynamoDB data source is available (optional for validation data)
-                if not self.dynamo_data_source:
-                    warning_msg = (
-                        f"DynamoDB data source is not available for {currency_name}. "
-                        "Training will continue without validation data. "
-                        "Please check your DynamoDB configuration if validation metrics are needed."
-                    )
-                    self.logger.warning(warning_msg)
-                    self.processing_stats['validation_failures'] += 1
-                    validation_features = None
-                    validation_targets = None
-                else:
-                    # Get current active league
-                    if hasattr(self.dynamo_data_source, '_league_table') and self.dynamo_data_source._league_table:
-                        from ml.utils.data_sources import get_current_seasonal_league_from_table
-                        current_league = get_current_seasonal_league_from_table(self.dynamo_data_source._league_table, self.logger)
-                    else:
-                        warning_msg = (
-                            f"League metadata table is not available for {currency_name}. "
-                            "Training will continue without validation data. "
-                            "Please ensure the league_metadata_table is configured if validation metrics are needed."
-                        )
-                        self.logger.warning(warning_msg)
-                        self.processing_stats['validation_failures'] += 1
-                        validation_features = None
-                        validation_targets = None
-                        current_league = None
-                    
-                    if current_league:
-                        self.logger.info(f"Fetching validation data from current league: {current_league}")
-                        validation_data = self._fetch_validation_data(currency_name, current_league)
-                        
-                        if validation_data is not None and not validation_data.empty:
-                            # Extract validation features and targets
-                            validation_features_raw = validation_data[feature_columns].values
-                            
-                            # Apply same NaN filtering threshold (90%) to validation data
-                            row_nan_ratio_val = np.isnan(validation_features_raw).sum(axis=1) / validation_features_raw.shape[1]
-                            valid_rows_val = row_nan_ratio_val <= 0.9
-                            validation_features_raw = validation_features_raw[valid_rows_val]
-                            validation_data_filtered = validation_data[valid_rows_val].reset_index(drop=True)
-                            
-                            # Apply same imputer (fitted on training data)
-                            if fitted_imputer is not None:
-                                validation_features = fitted_imputer.transform(validation_features_raw)
-                            else:
-                                validation_features = validation_features_raw
-                            
-                            # Extract validation targets (will be extracted per horizon)
-                            validation_targets = validation_data_filtered
-                            
-                            self.logger.info(f"Validation data ready: {len(validation_features)} samples with {len(feature_columns)} features")
-                        else:
-                            warning_msg = (
-                                f"Could not fetch validation data for {currency_name} from league {current_league}. "
-                                "Training will continue without validation data."
-                            )
-                            self.logger.warning(warning_msg)
-                            self.processing_stats['validation_failures'] += 1
-                            validation_features = None
-                            validation_targets = None
-                    else:
-                        warning_msg = (
-                            f"No current league found for {currency_name}. "
-                            "Training will continue without validation data. "
-                            "Please ensure the league metadata table contains an active seasonal league if validation metrics are needed."
-                        )
-                        self.logger.warning(warning_msg)
-                        self.processing_stats['validation_failures'] += 1
-                        validation_features = None
-                        validation_targets = None
-            except Exception as e:
-                warning_msg = f"Error fetching validation data for {currency_name}: {e}. Training will continue without validation data."
-                self.logger.warning(warning_msg, exception=e)
-                self.processing_stats['validation_failures'] += 1
-                validation_features = None
-                validation_targets = None
+            # 3. Build feature matrix, apply NaN row filter.
+            matrix = self._build_feature_matrix(data, feature_columns, currency_name)
+            if matrix is None:
+                return None
+            data = matrix['data']
 
-            # Train model(s) for different prediction horizons
-            if isinstance(target_column, list) and len(target_column) > 1:
-                # Multi-horizon training: train separate models for each horizon
-                self.logger.debug(f"Multi-horizon training for {len(target_column)} horizons: {target_column}")
-                
-                horizon_results = {}
-                horizon_models = {}
-                
-                for target_col in target_column:
-                    horizon = target_col.replace('target_price_', '')
-                    self.logger.debug(f"Training model for {horizon} horizon")
-                    
-                    # Use all available features for this horizon
-                    X_horizon_filtered = processed_data[feature_columns].values
-                    
-                    # Apply same NaN filtering threshold (90%) as training
-                    row_nan_ratio_horizon = np.isnan(X_horizon_filtered).sum(axis=1) / X_horizon_filtered.shape[1]
-                    valid_rows_horizon = row_nan_ratio_horizon <= 0.9
-                    X_horizon_filtered = X_horizon_filtered[valid_rows_horizon]
-                    processed_data_horizon = processed_data[valid_rows_horizon].reset_index(drop=True)
-                    
-                    # Apply the fitted imputer to this horizon's data
-                    if fitted_imputer is not None:
-                        X_horizon_filtered = fitted_imputer.transform(X_horizon_filtered)
-                    
-                    # Get target for this horizon (using filtered processed_data)
-                    y_horizon = processed_data_horizon[target_col].values
-                    
-                    # Log data filtering statistics
-                    total_samples = len(y_horizon)
-                    nan_count = pd.isna(y_horizon).sum()
-                    valid_count = total_samples - nan_count
-                    nan_percentage = (nan_count / total_samples) * 100 if total_samples > 0 else 0
-                    
-                    self.logger.debug(f"Data filtering for {currency_name} {horizon}:")
-                    self.logger.debug(f"  Total samples: {total_samples:,}")
-                    self.logger.debug(f"  NaN values: {nan_count:,} ({nan_percentage:.1f}%)")
-                    self.logger.debug(f"  Valid samples: {valid_count:,}")
-                    
-                    # Filter out NaN values for this specific target
-                    target_valid_mask = ~pd.isna(y_horizon)
-                    X_horizon = X_horizon_filtered[target_valid_mask]
-                    y_horizon = y_horizon[target_valid_mask]
-                    
-                    self.logger.debug(f"  After filtering: {len(X_horizon):,} samples available for training")
-                    
-                    # If we have very few samples, try a more lenient approach
-                    if len(X_horizon) < 20:
-                        # Try using forward-fill for NaN values to preserve more data
-                        y_horizon_ffill = processed_data_horizon[target_col].fillna(method='ffill').values
-                        target_valid_mask_ffill = ~pd.isna(y_horizon_ffill)
-                        X_horizon_ffill = X_horizon_filtered[target_valid_mask_ffill]
-                        y_horizon_ffill = y_horizon_ffill[target_valid_mask_ffill]
-                        
-                        if len(X_horizon_ffill) > len(X_horizon):
-                            self.logger.debug(f"  Using forward-fill strategy: {len(X_horizon_ffill):,} samples (vs {len(X_horizon):,} without)")
-                            X_horizon = X_horizon_ffill
-                            y_horizon = y_horizon_ffill
-                    
-                    if len(X_horizon) < 10:  # Absolute minimum threshold
-                        self.logger.warning(f"Insufficient data for {currency_name} {horizon} horizon: {len(X_horizon)} samples (need at least 10)")
-                        continue
-                    
-                    # Prepare validation data for this horizon (optional - will use train/test split if not available)
-                    X_val_horizon = None
-                    y_val_horizon = None
-                    
-                    if validation_features is not None and validation_targets is not None:
-                        try:
-                            # Extract validation target for this horizon
-                            if target_col in validation_targets.columns:
-                                y_val_horizon_raw = validation_targets[target_col].values
-                                
-                                # Filter out NaN targets
-                                target_valid_mask_val = ~pd.isna(y_val_horizon_raw)
-                                X_val_horizon = validation_features[target_valid_mask_val]
-                                y_val_horizon = y_val_horizon_raw[target_valid_mask_val]
-                                
-                                if len(X_val_horizon) == 0:
-                                    self.logger.warning(f"No valid validation samples for {horizon} horizon. Using train/test split instead.")
-                                    X_val_horizon = None
-                                    y_val_horizon = None
-                                else:
-                                    self.logger.debug(f"Using {len(X_val_horizon)} validation samples for {horizon} horizon")
-                            else:
-                                self.logger.warning(f"Target column {target_col} not found in validation data for {horizon} horizon. Using train/test split instead.")
-                        except Exception as e:
-                            self.logger.warning(f"Error preparing validation data for {horizon} horizon: {e}. Using train/test split instead.")
-                    else:
-                        self.logger.warning(f"Validation data not available for {currency_name} {horizon} horizon. Using train/test split instead.")
-                    
-                    # Train model for this horizon (validation data is optional - will use train/test split if not provided)
-                    training_result = self.model_trainer.train_single_model(
-                        X_horizon, y_horizon, f"{currency_name}_{horizon}", 
-                        target_names=[target_col],
-                        feature_names=feature_columns,
-                        X_val=X_val_horizon,
-                        y_val=y_val_horizon
-                    )
-                    
-                    if training_result is not None:
-                        # Attach the fitted imputer to the training result
-                        # This ensures it gets saved with model artifacts
-                        training_result.imputer = fitted_imputer
-                        horizon_results[horizon] = training_result
-                        horizon_models[horizon] = training_result.model
-                        self.logger.debug(f"Successfully trained {horizon} model for {currency_name}")
-                    else:
-                        self.logger.warning(f"Failed to train {horizon} model for {currency_name}")
-                
-                if not horizon_results:
-                    self.logger.error(f"All horizon models failed for {currency_name}")
-                    return None
-                
-                # Create combined result for multi-horizon models
-                primary_horizon = '1d' if '1d' in horizon_results else list(horizon_results.keys())[0]
-                primary_result = horizon_results[primary_horizon]
-                
-                # Save models for each horizon
-                model_info = {}
-                for horizon, result in horizon_results.items():
-                    try:
-                        horizon_model_dir = self.config.paths.models_dir / f"{currency_name}_{horizon}"
-                        horizon_model_info = save_model_artifacts(result, horizon_model_dir, f"{currency_name}_{horizon}")
-                        model_info[f"{horizon}_model"] = horizon_model_info
-                    except Exception as e:
-                        self.logger.error(f"Failed to save {horizon} model artifacts for {currency_name}: {e}")
-                        return None
-                
-                # Also save the primary model in the main directory for compatibility
-                try:
-                    main_model_info = save_model_artifacts(
-                        primary_result, self.config.paths.models_dir, currency_name
-                    )
-                    model_info['primary_model'] = main_model_info
-                except Exception as e:
-                    self.logger.error(f"Failed to save primary model artifacts for {currency_name}: {e}")
-                    return None
-                
-                # Compile results
-                result = {
-                    'currency': currency_name,
-                    'get_currency': currency['get_currency'],
-                    'training_samples': {horizon: len(processed_data[~pd.isna(processed_data[f'target_price_{horizon}'])]) 
-                                       for horizon in horizon_results.keys()},
-                    'training_metrics': {horizon: result.metrics for horizon, result in horizon_results.items()},
-                    'model_info': model_info,
-                    'processing_metadata': processing_metadata,
-                    'feature_count': len(feature_columns),
-                    'leagues_in_training': processing_metadata.get('leagues_included', []),
-                    'horizons_trained': list(horizon_results.keys()),
-                    'primary_horizon': primary_horizon
-                }
-                
-            else:
-                # Single-horizon training (should not happen with proper multi-horizon setup)
-                self.logger.warning(f"Using single-horizon training fallback for {currency_name}. This indicates a configuration issue.")
-                target_col = target_column if isinstance(target_column, str) else target_column[0]
-                
-                # Extract horizon from target column name (e.g., "target_price_3d" -> "3d")
-                horizon = target_col.replace('target_price_', '') if 'target_price_' in target_col else '1d'
-                
-                # X is already imputed from above, so we can use it directly
-                # Filter out NaN values for target
-                y = processed_data[target_col].values
-                target_valid_mask = ~pd.isna(y)
-                X_filtered = X[target_valid_mask]
-                y_filtered = y[target_valid_mask]
-                
-                if len(X_filtered) < 5:  # Reduced minimum from 50 to 5
-                    self.logger.warning(f"Insufficient data for {currency_name}: {len(X_filtered)} samples")
-                    self.processing_stats['insufficient_data'] += 1
-                    return None
-                
-                # Prepare validation data for single-horizon training if available
-                X_val_single = None
-                y_val_single = None
-                if validation_features is not None and validation_targets is not None:
-                    try:
-                        # Extract validation target for this horizon
-                        if target_col in validation_targets.columns:
-                            y_val_single_raw = validation_targets[target_col].values
-                            
-                            # Filter out NaN targets
-                            target_valid_mask_val = ~pd.isna(y_val_single_raw)
-                            X_val_single = validation_features[target_valid_mask_val]
-                            y_val_single = y_val_single_raw[target_valid_mask_val]
-                            
-                            if len(X_val_single) == 0:
-                                self.logger.warning(f"No valid validation samples for {currency_name} {horizon} horizon. Using train/test split instead.")
-                                X_val_single = None
-                                y_val_single = None
-                            else:
-                                self.logger.debug(f"Using {len(X_val_single)} validation samples for {currency_name} {horizon} horizon")
-                        else:
-                            self.logger.warning(f"Target column {target_col} not found in validation data. Using train/test split instead.")
-                    except Exception as e:
-                        self.logger.warning(f"Error preparing validation data for {currency_name} {horizon}: {e}. Using train/test split instead.")
-                
-                # Train single model (validation data is optional - will use train/test split if not provided)
-                training_result = self.model_trainer.train_single_model(
-                    X_filtered, y_filtered, currency_name, 
-                    target_names=[target_col],
-                    feature_names=feature_columns,
-                    X_val=X_val_single,
-                    y_val=y_val_single
-                )
-                
-                if training_result is None:
-                    self.logger.error(f"Model training failed for {currency_name}")
-                    return None
-                
-                # Attach the fitted imputer to the training result
-                training_result.imputer = fitted_imputer
-                
-                # Save model artifacts
-                try:
-                    model_info = save_model_artifacts(
-                        training_result, self.config.paths.models_dir, currency_name
-                    )
-                except Exception as e:
-                    self.logger.error(f"Failed to save model artifacts for {currency_name}: {e}")
-                    return None
-                
-                # Compile results
-                result = {
-                    'currency': currency_name,
-                    'get_currency': currency['get_currency'],
-                    'training_samples': len(X),
-                    'training_metrics': training_result.metrics,
-                    'model_info': model_info,
-                    'processing_metadata': processing_metadata,
-                    'feature_count': len(feature_columns),
-                    'leagues_in_training': processing_metadata.get('leagues_included', [])
-                }
-            
-            # Log detailed completion statistics
-            self._log_currency_completion_stats(currency_name, result)
-            
-            # Log training result
+            # 4. Fetch current-league validation set (optional).
+            val = self._fetch_validation_set(currency_name, feature_columns)
+
+            # 5. Train per-horizon models and save artifacts.
+            horizon_result = self._train_all_horizons(
+                currency_name, data, feature_columns, target_cols,
+                val['features'], val['targets'],
+            )
+            if horizon_result is None:
+                return None
+
             self.logger.debug(f"Training completed for {currency_name}")
-            
-            return result
+            return {
+                'currency': currency_name,
+                'get_currency': currency['get_currency'],
+                'processing_metadata': processing_metadata,
+                'leagues_in_training': processing_metadata.get('leagues_included', []),
+                **horizon_result,
+            }
     
     def _log_currency_completion_stats(self, currency_name: str, result: Dict[str, Any]) -> None:
         """
@@ -1193,7 +1038,7 @@ class ModelTrainingPipeline:
             result: Training result dictionary
         """
         self.logger.info("=" * 60)
-        self.logger.info(f"✅ CURRENCY TRAINING COMPLETED: {currency_name}")
+        self.logger.info(f"CURRENCY TRAINING COMPLETED: {currency_name}")
         self.logger.info("=" * 60)
         
         # Basic statistics
@@ -1213,7 +1058,7 @@ class ModelTrainingPipeline:
         elif not isinstance(feature_count, (int, float)):
             feature_count = 0
         
-        self.logger.info(f"📊 DATA STATISTICS:")
+        self.logger.info(f"DATA STATISTICS:")
         self.logger.info(f"   • Training samples: {int(training_samples):,}")
         self.logger.info(f"   • Feature count: {int(feature_count)}")
         self.logger.info(f"   • Leagues included: {len(leagues)} ({', '.join(leagues[:3])}{'...' if len(leagues) > 3 else ''})")
@@ -1221,7 +1066,7 @@ class ModelTrainingPipeline:
         # Training metrics
         training_metrics = result.get('training_metrics', {})
         if training_metrics:
-            self.logger.info(f"📈 MODEL PERFORMANCE:")
+            self.logger.info(f"MODEL PERFORMANCE:")
             
             # Handle multi-horizon results
             if 'horizons_trained' in result:
@@ -1250,16 +1095,17 @@ class ModelTrainingPipeline:
         # Model info
         model_info = result.get('model_info', {})
         if model_info:
-            self.logger.info(f"💾 MODEL ARTIFACTS:")
+            self.logger.info(f"MODEL ARTIFACTS:")
             
-            # Handle multi-horizon models (nested structure)
-            if 'primary_model' in model_info:
-                # Multi-horizon: use primary_model info
-                primary_info = model_info.get('primary_model', {})
+            # For multi-horizon training, report size/location of the primary horizon model.
+            # For single-horizon training, model_info has the size/dir directly.
+            primary_h = result.get('primary_horizon', '1d')
+            horizon_key = f"{primary_h}_model"
+            if horizon_key in model_info:
+                primary_info = model_info[horizon_key]
                 model_size = primary_info.get('model_size_mb', 0)
                 model_dir = primary_info.get('model_dir', 'N/A')
             else:
-                # Single-horizon: direct structure
                 model_size = model_info.get('model_size_mb', 0)
                 model_dir = model_info.get('model_dir', 'N/A')
             
@@ -1270,7 +1116,7 @@ class ModelTrainingPipeline:
         processing_metadata = result.get('processing_metadata', {})
         if processing_metadata:
             timestamp = processing_metadata.get('processing_timestamp', 'N/A')
-            self.logger.info(f"⏱️  PROCESSING INFO:")
+            self.logger.info(f"PROCESSING INFO:")
             self.logger.info(f"   • Completed at: {timestamp}")
             self.logger.info(f"   • Status: {processing_metadata.get('validation_result', 'N/A')}")
         
@@ -1309,21 +1155,6 @@ class ModelTrainingPipeline:
                 top_features = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:3]
                 self.logger.info(f"     - Top features: {', '.join([f'{f}({v:.3f})' for f, v in top_features])}")
     
-    def _find_latest_training_data(self) -> str:
-        """Find the latest training data file."""
-        data_dir = self.config.paths.data_dir
-        pattern = self.config.paths.combined_data_pattern.format(
-            experiment_id='*'
-        )
-        
-        files = list(data_dir.glob(pattern))
-        if not files:
-            raise FileNotFoundError(f"No training data files found matching {pattern}")
-        
-        # Sort by modification time
-        latest_file = max(files, key=lambda f: f.stat().st_mtime)
-        return str(latest_file)
-    
     def _fetch_validation_data(
         self,
         currency: str,
@@ -1349,10 +1180,9 @@ class ModelTrainingPipeline:
             # Fetch extended range to ensure future targets are available
             # Features are backward-looking, so we only need future data for targets
             max_horizon = max(self.config.data.prediction_horizons) if self.config.data.prediction_horizons else 7
-            buffer_days = 7  # Extra buffer for safety
-            days_to_fetch = self.config.data.validation_max_days + max_horizon + buffer_days
+            days_to_fetch = self.config.data.validation_max_days + max_horizon + _VALIDATION_FETCH_BUFFER_DAYS
             
-            self.logger.debug(f"Fetching validation data: {days_to_fetch} days (validation={self.config.data.validation_max_days}, horizon={max_horizon}, buffer={buffer_days})")
+            self.logger.debug(f"Fetching validation data: {days_to_fetch} days (validation={self.config.data.validation_max_days}, horizon={max_horizon}, buffer={_VALIDATION_FETCH_BUFFER_DAYS})")
             
             # Fetch raw daily prices from DynamoDB
             validation_df = self.dynamo_data_source.build_validation_dataframe(
@@ -1379,31 +1209,13 @@ class ModelTrainingPipeline:
                 return None
             
             self.logger.debug(f"Processed validation data: {len(validation_processed)} records after feature engineering")
-            
-            # Filter to only samples with complete target variables
-            # This automatically excludes recent dates that don't have future prices yet
-            target_cols = [f'target_price_{h}d' for h in self.config.data.prediction_horizons]
-            complete_mask = validation_processed[target_cols].notna().all(axis=1)
-            validation_complete = validation_processed[complete_mask]
-            
-            if len(validation_complete) == 0:
-                self.logger.warning(f"No validation samples with complete targets for {currency}")
+
+            if len(validation_processed) < 10:
+                self.logger.warning(f"Insufficient validation data: {len(validation_processed)} samples (minimum: 10)")
                 return None
-            
-            # Additional safety: Exclude most recent max_horizon days
-            # (they won't have future targets, but double-check anyway)
-            if 'date' in validation_complete.columns:
-                max_date = validation_complete['date'].max()
-                cutoff_date = max_date - pd.Timedelta(days=max_horizon)
-                validation_complete = validation_complete[validation_complete['date'] <= cutoff_date]
-            
-            if len(validation_complete) < 10:
-                self.logger.warning(f"Insufficient validation data with complete targets: {len(validation_complete)} samples (minimum: 10)")
-                return None
-            
-            self.logger.info(f"Validation data ready: {len(validation_complete)} samples with complete target variables for {currency}")
-            self.logger.debug(f"Features are backward-looking (no future data needed for features)")
-            return validation_complete
+
+            self.logger.info(f"Validation data ready: {len(validation_processed)} samples for {currency}")
+            return validation_processed
             
         except Exception as e:
             self.logger.error(f"Error fetching validation data for {currency}: {e}", exception=e)
@@ -1456,166 +1268,6 @@ class ModelTrainingPipeline:
             # Fallback to any available target
             return sorted(target_cols, key=lambda x: int(''.join(filter(str.isdigit, x))))[0]  # type: ignore[no-any-return]
     
-    def _evaluate_model_comprehensive(
-        self, 
-        df: pd.DataFrame, 
-        training_result: Any, 
-        currency: str,
-        feature_columns: List[str],
-        target_column: Union[str, List[str]]
-    ) -> Dict[str, Any]:
-        """
-        Comprehensive model evaluation including league-specific metrics.
-        
-        Args:
-            df: Complete dataframe with league information
-            training_result: Trained model result
-            currency: Currency name
-            feature_columns: List of feature column names
-            target_column: Target column name(s) - can be single string or list for multi-output
-            
-        Returns:
-            Dictionary containing comprehensive evaluation metrics
-        """
-        evaluation_results: Dict[str, Any] = {
-            'overall_metrics': None,
-            'league_specific_metrics': {},
-            'settlers_detailed_metrics': None,
-            'data_quality_metrics': {}
-        }
-        
-        try:
-            # Handle both single and multi-output cases
-            is_multi_output = isinstance(target_column, list)
-            
-            # Overall evaluation
-            X = df[feature_columns].values
-            
-            if is_multi_output:
-                y = df[target_column].values
-                # For multi-output, remove rows where ALL targets are NaN
-                valid_mask = ~(pd.isna(X).any(axis=1) | pd.isna(y).all(axis=1))
-            else:
-                y = df[target_column].values
-                # For single output, remove rows where target is NaN
-                valid_mask = ~(pd.isna(X).any(axis=1) | pd.isna(y))
-            
-            X_valid = X[valid_mask]
-            y_valid = y[valid_mask]
-            df_valid = df[valid_mask].reset_index(drop=True)
-            
-            if len(X_valid) > 0:
-                # Impute any remaining NaN values
-                # Check if X_valid is numeric before using np.isnan
-                if X_valid.dtype.kind in 'biufc' and np.isnan(X_valid).any():
-                    imputer = SimpleImputer(strategy='median')
-                    X_valid = imputer.fit_transform(X_valid)
-                
-                # Overall predictions
-                y_pred = training_result.model.predict(X_valid)
-                
-                # Calculate metrics based on output type
-                if is_multi_output:
-                    # Multi-output metrics
-                    target_names = target_column
-                    overall_metrics = {}
-                    
-                    for i, target_name in enumerate(target_names):
-                        y_true_single = y_valid[:, i]
-                        y_pred_single = y_pred[:, i]
-                        
-                        # Skip if all values are NaN
-                        valid_mask_single = ~(np.isnan(y_true_single) | np.isnan(y_pred_single))
-                        if not np.any(valid_mask_single):
-                            continue
-                        
-                        y_true_valid = y_true_single[valid_mask_single]
-                        y_pred_valid = y_pred_single[valid_mask_single]
-                        
-                        overall_metrics[target_name] = {
-                            'mae': float(mean_absolute_error(y_true_valid, y_pred_valid)),
-                            'rmse': float(np.sqrt(mean_squared_error(y_true_valid, y_pred_valid))),
-                            'r2': float(r2_score(y_true_valid, y_pred_valid)),
-                            'samples': len(y_true_valid),
-                            'mape': float(np.mean(np.abs((y_true_valid - y_pred_valid) / y_true_valid)) * 100) if np.all(y_true_valid != 0) else None
-                        }
-                    
-                    evaluation_results['overall_metrics'] = overall_metrics
-                else:
-                    # Single output metrics
-                    evaluation_results['overall_metrics'] = {
-                        'mae': float(mean_absolute_error(y_valid, y_pred)),
-                        'rmse': float(np.sqrt(mean_squared_error(y_valid, y_pred))),
-                        'r2': float(r2_score(y_valid, y_pred)),
-                        'samples': len(y_valid),
-                        'mape': float(np.mean(np.abs((y_valid - y_pred) / y_valid)) * 100) if np.all(y_valid != 0) else None
-                    }
-                
-                # League-specific evaluation
-                if 'league_name' in df.columns:
-                    league_names = df_valid['league_name'].unique()
-                    
-                    for league in league_names:
-                        league_mask = df_valid['league_name'] == league
-                        if league_mask.sum() > 5:  # At least 5 samples for evaluation
-                            X_league = X_valid[league_mask]
-                            y_league = y_valid[league_mask]
-                            
-                            y_pred_league = training_result.model.predict(X_league)
-                            
-                            league_metrics = {
-                                'mae': float(mean_absolute_error(y_league, y_pred_league)),
-                                'rmse': float(np.sqrt(mean_squared_error(y_league, y_pred_league))),
-                                'r2': float(r2_score(y_league, y_pred_league)),
-                                'samples': len(y_league),
-                                'mape': float(np.mean(np.abs((y_league - y_pred_league) / y_league)) * 100) if np.all(y_league != 0) else None
-                            }
-                            
-                            evaluation_results['league_specific_metrics'][league] = league_metrics
-                            
-                            # Detailed Settlers evaluation
-                            if 'Settlers' in league:
-                                evaluation_results['settlers_detailed_metrics'] = {
-                                    **league_metrics,
-                                    'prediction_bias': float(np.mean(y_pred_league - y_league)),
-                                    'prediction_std': float(np.std(y_pred_league - y_league)),
-                                    'price_range': {
-                                        'min': float(y_league.min()),
-                                        'max': float(y_league.max()),
-                                        'median': float(np.median(y_league))
-                                    },
-                                    'temporal_coverage': {
-                                        'start_date': df_valid[league_mask]['date'].min().isoformat() if 'date' in df_valid.columns else None,
-                                        'end_date': df_valid[league_mask]['date'].max().isoformat() if 'date' in df_valid.columns else None,
-                                        'days_covered': (df_valid[league_mask]['date'].max() - df_valid[league_mask]['date'].min()).days if 'date' in df_valid.columns else None
-                                    }
-                                }
-                
-                # Data quality metrics
-                data_quality_metrics = {
-                    'total_samples': len(df),
-                    'valid_samples': len(X_valid),
-                    'missing_data_ratio': 1 - (len(X_valid) / len(df)) if len(df) > 0 else 0,
-                    'feature_completeness': {
-                        col: 1 - (df[col].isna().sum() / len(df)) 
-                        for col in feature_columns[:5]  # Sample of first 5 features
-                    },
-                    'leagues_represented': list(df['league_name'].unique()) if 'league_name' in df.columns else []
-                }
-                evaluation_results['data_quality_metrics'] = data_quality_metrics
-                
-            # Log data quality metrics
-            self.logger.debug(f"Data quality metrics calculated for {currency}")
-                
-            self.logger.debug(f"Comprehensive evaluation completed for {currency}")
-            
-        except Exception as e:
-            self.logger.error(f"Comprehensive evaluation failed for {currency}: {str(e)}")
-            evaluation_results['error'] = str(e)
-        
-        return evaluation_results
-    
-
     def _upload_currency_models(self, currency_name: str, result: Dict[str, Any]) -> None:
         """
         Upload models for a specific currency to S3 immediately after training.
@@ -1650,16 +1302,13 @@ class ModelTrainingPipeline:
             # Models are saved in models_dir (which is /app/ml/models/currency/)
             models_dir = self.config.paths.models_dir
             
-            # Find all model directories for this currency
-            # Models are saved as {currency_name}_{horizon}/ or just {currency_name}/
+            # Find all model directories for this currency.
+            # Models are saved as {currency_name}_{horizon}/ (one directory per horizon).
             currency_model_dirs = []
             if models_dir.exists():
                 for item in models_dir.iterdir():
-                    if item.is_dir():
-                        # Check if this directory belongs to this currency
-                        dir_name = item.name
-                        if dir_name.startswith(f"{currency_name}_") or dir_name == currency_name:
-                            currency_model_dirs.append(item)
+                    if item.is_dir() and item.name.startswith(f"{currency_name}_"):
+                        currency_model_dirs.append(item)
             
             if not currency_model_dirs:
                 self.logger.warning(f"No model directories found for {currency_name} in {models_dir}")
@@ -1781,136 +1430,3 @@ class ModelTrainingPipeline:
             self.logger.error("boto3 not available, cannot upload logs to S3")
         except Exception as e:
             self.logger.error(f"Failed to upload logs to S3: {e}")
-
-
-def parse_arguments() -> argparse.Namespace:
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Currency-Specific Model Training",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Default training with full optimization
-  python train_models.py
-  
-  # Train ALL currencies with sufficient data
-  python train_models.py --train-all-currencies
-  
-  # Train ALL currencies with custom thresholds
-  python train_models.py --train-all-currencies --min-avg-value 2.0 --min-records 75
-  
-  # Custom data file
-  python train_models.py --data-path /path/to/data.parquet
-  
-  # Custom configuration
-  python train_models.py --config /path/to/config.json
-        """
-    )
-    
-    
-    parser.add_argument(
-        '--data-path',
-        type=str,
-        help='Path to training data file'
-    )
-    
-    parser.add_argument(
-        '--config',
-        type=str,
-        help='Path to configuration file'
-    )
-    
-    parser.add_argument(
-        '--experiment-id',
-        type=str,
-        help='Custom experiment ID'
-    )
-    
-    parser.add_argument(
-        '--description',
-        type=str,
-        default='',
-        help='Experiment description'
-    )
-    
-    parser.add_argument(
-        '--tags',
-        nargs='*',
-        default=[],
-        help='Experiment tags'
-    )
-    
-    parser.add_argument(
-        '--train-all-currencies',
-        action='store_true',
-        help='Train models for all currencies with sufficient data (not just high-value ones)'
-    )
-    
-    parser.add_argument(
-        '--min-avg-value',
-        type=float,
-        help='Minimum average value (in Chaos Orbs) for currency inclusion when using --train-all-currencies'
-    )
-    
-    parser.add_argument(
-        '--min-records',
-        type=int,
-        help='Minimum number of historical records required when using --train-all-currencies'
-    )
-    
-    return parser.parse_args()
-
-
-def main() -> None:
-    """Main function to run currency-specific training."""
-    args = parse_arguments()
-    
-    try:
-        # Get configuration
-        if args.config:
-            config = MLConfig.from_file(args.config)
-        else:
-            config = get_default_config()
-        
-        # Override configuration with command line arguments
-        if args.experiment_id:
-            config.experiment.experiment_id = args.experiment_id
-        if args.description:
-            config.experiment.description = args.description
-        if args.tags:
-            config.experiment.tags.extend(args.tags)
-        if args.train_all_currencies:
-            config.data.train_all_currencies = True
-        if args.min_avg_value:
-            config.data.min_avg_value_threshold = args.min_avg_value
-        if args.min_records:
-            config.data.min_records_threshold = args.min_records
-        
-        # Add mode tag
-        config.experiment.tags.append(args.mode)
-        
-        # Initialize trainer
-        trainer = ModelTrainingPipeline(config)
-        
-        print(f"Starting currency training in {args.mode} mode...")
-        print(f"Experiment ID: {config.experiment.experiment_id}")
-        
-        # Run training
-        results = trainer.train_all_currencies(args.data_path)
-        
-        if results:
-            print(f"\nSuccessfully trained {len(results)} models!")
-        else:
-            print(f"\nNo models were trained successfully")
-            sys.exit(1)
-            
-    except KeyboardInterrupt:
-        print("\nTraining interrupted by user")
-        sys.exit(1)
-    except Exception as e:
-        print(f"\nTraining failed: {str(e)}")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main() 

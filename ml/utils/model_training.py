@@ -3,7 +3,6 @@ Model training utilities optimized for multi-core systems.
 """
 
 import numpy as np
-import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any, Union
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -16,15 +15,14 @@ from datetime import datetime
 # ML imports
 import lightgbm as lgb
 from sklearn.preprocessing import RobustScaler
-from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.ensemble import (
     RandomForestRegressor,
     ExtraTreesRegressor
 )
 import optuna
 from optuna.samplers import TPESampler
-from optuna.pruners import MedianPruner
 
 from ml.config.training_config import ModelConfig, ProcessingConfig
 from ml.utils.common_utils import MLLogger
@@ -42,70 +40,60 @@ class ModelMetrics:
     def to_dict(self) -> Dict[str, Union[float, Dict[str, float]]]:
         """Convert to dictionary."""
         return asdict(self)
-    
+
+    @staticmethod
+    def _compute_mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+        """Symmetric MAPE with small-value guard, returns inf when no valid pairs."""
+        epsilon = 1e-8
+        values = [
+            abs(t - p) / ((abs(t) + abs(p)) / 2 + epsilon) * 100
+            for t, p in zip(y_true, y_pred)
+            if abs(t) > epsilon
+        ]
+        return float(np.mean(values)) if values else float('inf')
+
     @classmethod
-    def from_predictions(cls, y_true: np.ndarray, y_pred: np.ndarray, 
-                        target_names: Optional[List[str]] = None) -> 'ModelMetrics':
+    def from_predictions(cls, y_true: np.ndarray, y_pred: np.ndarray,
+                         target_names: Optional[List[str]] = None) -> 'ModelMetrics':
         """Calculate metrics from predictions."""
-        # Handle multi-output case
         if y_true.ndim > 1 and y_true.shape[1] > 1 and target_names is not None:
             return cls._from_multi_output_predictions(y_true, y_pred, target_names)
-        
-        # Single output case - flatten if needed
+
         if y_true.ndim > 1:
             y_true = y_true.flatten()
         if y_pred.ndim > 1:
             y_pred = y_pred.flatten()
-        
-        # Basic metrics
+
         mae = mean_absolute_error(y_true, y_pred)
         rmse = np.sqrt(mean_squared_error(y_true, y_pred))
         r2 = r2_score(y_true, y_pred)
-        
-        # MAPE with robust calculation
-        epsilon = 1e-8
-        mape_values = []
-        for true, pred in zip(y_true, y_pred):
-            if abs(true) > epsilon:
-                denominator = (abs(true) + abs(pred)) / 2 + epsilon
-                mape_val = abs(true - pred) / denominator * 100
-                mape_values.append(mape_val)
-        mape = np.mean(mape_values) if mape_values else float('inf')
-        
-        # Directional accuracy
+        mape = cls._compute_mape(y_true, y_pred)
+
         if len(y_true) > 1:
-            true_direction = np.diff(y_true) > 0
-            pred_direction = np.diff(y_pred) > 0
-            directional_accuracy = np.mean(true_direction == pred_direction) * 100
+            directional_accuracy = float(
+                np.mean((np.diff(y_true) > 0) == (np.diff(y_pred) > 0)) * 100
+            )
         else:
             directional_accuracy = 0.0
-        
-        return cls(
-            mae=mae,
-            rmse=rmse,
-            mape=mape,
-            r2=r2,
-            directional_accuracy=directional_accuracy
-        )
-    
+
+        return cls(mae=mae, rmse=rmse, mape=mape, r2=r2,
+                   directional_accuracy=directional_accuracy)
+
     @classmethod
-    def _from_multi_output_predictions(cls, y_true: np.ndarray, y_pred: np.ndarray, 
-                                     target_names: List[str]) -> 'ModelMetrics':
+    def _from_multi_output_predictions(cls, y_true: np.ndarray, y_pred: np.ndarray,
+                                       target_names: List[str]) -> 'ModelMetrics':
         """Calculate metrics for multi-output predictions."""
-        n_outputs = y_true.shape[1]
-        
-        mae_dict = {}
-        rmse_dict = {}
-        mape_dict = {}
-        r2_dict = {}
-        directional_accuracy_dict = {}
-        
+        mae_dict: Dict[str, float] = {}
+        rmse_dict: Dict[str, float] = {}
+        mape_dict: Dict[str, float] = {}
+        r2_dict: Dict[str, float] = {}
+        directional_accuracy_dict: Dict[str, float] = {}
+
         for i, target_name in enumerate(target_names):
-            y_true_single = y_true[:, i]
-            y_pred_single = y_pred[:, i]
-            
-            # Skip if all values are NaN
-            valid_mask = ~(np.isnan(y_true_single) | np.isnan(y_pred_single))
+            y_t = y_true[:, i]
+            y_p = y_pred[:, i]
+
+            valid_mask = ~(np.isnan(y_t) | np.isnan(y_p))
             if not np.any(valid_mask):
                 mae_dict[target_name] = float('inf')
                 rmse_dict[target_name] = float('inf')
@@ -113,40 +101,21 @@ class ModelMetrics:
                 r2_dict[target_name] = -1.0
                 directional_accuracy_dict[target_name] = 0.0
                 continue
-            
-            y_true_valid = y_true_single[valid_mask]
-            y_pred_valid = y_pred_single[valid_mask]
-            
-            # Basic metrics
-            mae_dict[target_name] = mean_absolute_error(y_true_valid, y_pred_valid)
-            rmse_dict[target_name] = np.sqrt(mean_squared_error(y_true_valid, y_pred_valid))
-            r2_dict[target_name] = r2_score(y_true_valid, y_pred_valid)
-            
-            # MAPE with robust calculation
-            epsilon = 1e-8
-            mape_values = []
-            for true, pred in zip(y_true_valid, y_pred_valid):
-                if abs(true) > epsilon:
-                    denominator = (abs(true) + abs(pred)) / 2 + epsilon
-                    mape_val = abs(true - pred) / denominator * 100
-                    mape_values.append(mape_val)
-            mape_dict[target_name] = np.mean(mape_values) if mape_values else float('inf')
-            
-            # Directional accuracy
-            if len(y_true_valid) > 1:
-                true_direction = np.diff(y_true_valid) > 0
-                pred_direction = np.diff(y_pred_valid) > 0
-                directional_accuracy_dict[target_name] = np.mean(true_direction == pred_direction) * 100
-            else:
-                directional_accuracy_dict[target_name] = 0.0
-        
-        return cls(
-            mae=mae_dict,
-            rmse=rmse_dict,
-            mape=mape_dict,
-            r2=r2_dict,
-            directional_accuracy=directional_accuracy_dict
-        )
+
+            y_tv = y_t[valid_mask]
+            y_pv = y_p[valid_mask]
+
+            mae_dict[target_name] = mean_absolute_error(y_tv, y_pv)
+            rmse_dict[target_name] = float(np.sqrt(mean_squared_error(y_tv, y_pv)))
+            r2_dict[target_name] = r2_score(y_tv, y_pv)
+            mape_dict[target_name] = cls._compute_mape(y_tv, y_pv)
+            directional_accuracy_dict[target_name] = (
+                float(np.mean((np.diff(y_tv) > 0) == (np.diff(y_pv) > 0)) * 100)
+                if len(y_tv) > 1 else 0.0
+            )
+
+        return cls(mae=mae_dict, rmse=rmse_dict, mape=mape_dict,
+                   r2=r2_dict, directional_accuracy=directional_accuracy_dict)
 
 
 @dataclass
@@ -159,7 +128,6 @@ class TrainingResult:
     training_time: float = 0.0
     hyperparameters: Dict[str, Any] = None  # type: ignore[assignment]
     feature_importance: Optional[Dict[str, float]] = None
-    cross_validation_scores: Optional[List[float]] = None
     model_type: str = ""
     currency: str = ""
     training_history: Optional[Dict[str, Any]] = None  # Training losses per epoch/trial
@@ -167,6 +135,36 @@ class TrainingResult:
     n_features: int = 0  # Number of features
     confidence_level: float = 0.95  # Confidence level for prediction intervals
     feature_names: Optional[List[str]] = None  # Exact feature names used during training
+
+
+class _MockTrial:
+    """
+    Wraps a pre-computed parameter dict to satisfy the Optuna Trial interface
+    used by each model's ``_create_model`` method.
+    """
+
+    def __init__(self, params: Dict[str, Any]) -> None:
+        self.params = params
+
+    def _lookup(self, name: str) -> Any:
+        if name in self.params:
+            return self.params[name]
+        for key, value in self.params.items():
+            if key.endswith(f"_{name}"):
+                return value
+        raise ValueError(
+            f"Parameter '{name}' not found in optimized parameters. "
+            "This indicates hyperparameter optimization failure."
+        )
+
+    def suggest_float(self, name: str, low: float, high: float, **kwargs) -> float:
+        return self._lookup(name)
+
+    def suggest_int(self, name: str, low: int, high: int, **kwargs) -> int:
+        return self._lookup(name)
+
+    def suggest_categorical(self, name: str, choices: List[Any], **kwargs) -> Any:
+        return self._lookup(name)
 
 
 class BaseModel(ABC):
@@ -187,42 +185,7 @@ class BaseModel(ABC):
     
     def _create_model_with_params(self, params: Dict[str, Any]) -> Any:
         """Create model instance with specific parameters."""
-        # Create a mock trial with the given parameters
-        class MockTrial:
-            def __init__(self, params: Dict[str, Any]):
-                self.params = params
-            
-            def suggest_float(self, name: str, low: float, high: float, **kwargs) -> float:
-                # Try exact match first, then try with prefix stripped
-                if name in self.params:
-                    return self.params[name]
-                # For parameters like 'learning_rate', try 'xgb_learning_rate' or 'lgb_learning_rate'
-                for key, value in self.params.items():
-                    if key.endswith(f"_{name}"):
-                        return value
-                raise ValueError(f"Parameter '{name}' not found in optimized parameters. This indicates hyperparameter optimization failure.")
-            
-            def suggest_int(self, name: str, low: int, high: int, **kwargs) -> int:
-                # Try exact match first, then try with prefix stripped
-                if name in self.params:
-                    return self.params[name]
-                # For parameters like 'n_estimators', try 'xgb_n_estimators' or 'lgb_n_estimators'
-                for key, value in self.params.items():
-                    if key.endswith(f"_{name}"):
-                        return value
-                raise ValueError(f"Parameter '{name}' not found in optimized parameters. This indicates hyperparameter optimization failure.")
-            
-            def suggest_categorical(self, name: str, choices: List[Any], **kwargs) -> Any:
-                # Try exact match first, then try with prefix stripped
-                if name in self.params:
-                    return self.params[name]
-                # For parameters like 'boosting_type', try 'xgb_boosting_type' or 'lgb_boosting_type'
-                for key, value in self.params.items():
-                    if key.endswith(f"_{name}"):
-                        return value
-                raise ValueError(f"Parameter '{name}' not found in optimized parameters. This indicates hyperparameter optimization failure.")
-        
-        return self._create_model(MockTrial(params))
+        return self._create_model(_MockTrial(params))
     
     @abstractmethod
     def get_model_type(self) -> str:
@@ -368,7 +331,7 @@ class LightGBMModel(BaseModel):
         if trial is not None:
             # Hyperparameter optimization
             params = {
-                'n_estimators': trial.suggest_int('lgb_n_estimators', 100, 1000),
+                'n_estimators': trial.suggest_int('lgb_n_estimators', 100, self.config.n_model_trials),
                 'max_depth': trial.suggest_int('lgb_max_depth', 3, 15),
                 'learning_rate': trial.suggest_float('lgb_learning_rate', 0.01, 0.3),
                 'num_leaves': trial.suggest_int('lgb_num_leaves', 10, 300),
@@ -397,7 +360,8 @@ class LightGBMModel(BaseModel):
             'random_state': self.config.random_state,
             'n_jobs': self.config.model_n_jobs,
             'force_row_wise': True,  # Better for multi-threading
-            'verbose': -1
+            'verbose': -1,
+            'importance_type': 'gain',
         })
         
         return lgb.LGBMRegressor(**params)  # type: ignore[arg-type]
@@ -413,19 +377,17 @@ class RandomForestModel(BaseModel):
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> RandomForestRegressor:
         """Create Random Forest model."""
         if trial is not None:
-            # Hyperparameter optimization
             params = {
-                'n_estimators': trial.suggest_int('rf_n_estimators', 100, 1000),
+                'n_estimators': trial.suggest_int('rf_n_estimators', 100, 500),
                 'max_depth': trial.suggest_int('rf_max_depth', 5, 20),
                 'min_samples_split': trial.suggest_int('rf_min_samples_split', 2, 20),
                 'min_samples_leaf': trial.suggest_int('rf_min_samples_leaf', 1, 10),
                 'max_features': trial.suggest_categorical('rf_max_features', ['sqrt', 'log2', None]),
             }
         else:
-            # Default parameters
             params = {
-                'n_estimators': 1000,
-                'max_depth': 10,
+                'n_estimators': self.config.n_model_trials,
+                'max_depth': self.config.max_depth,
                 'min_samples_split': 5,
                 'min_samples_leaf': 2,
                 'max_features': 'sqrt',
@@ -450,19 +412,17 @@ class ExtraTreesModel(BaseModel):
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> ExtraTreesRegressor:
         """Create Extra Trees model."""
         if trial is not None:
-            # Hyperparameter optimization
             params = {
-                'n_estimators': trial.suggest_int('et_n_estimators', 100, 1000),
+                'n_estimators': trial.suggest_int('et_n_estimators', 100, 500),
                 'max_depth': trial.suggest_int('et_max_depth', 5, 20),
                 'min_samples_split': trial.suggest_int('et_min_samples_split', 2, 20),
                 'min_samples_leaf': trial.suggest_int('et_min_samples_leaf', 1, 10),
                 'max_features': trial.suggest_categorical('et_max_features', ['sqrt', 'log2', None]),
             }
         else:
-            # Default parameters - Extra Trees often work well with more trees
             params = {
-                'n_estimators': 1000,
-                'max_depth': 10,
+                'n_estimators': self.config.n_model_trials,
+                'max_depth': self.config.max_depth,
                 'min_samples_split': 5,
                 'min_samples_leaf': 2,
                 'max_features': 'sqrt',
@@ -764,19 +724,12 @@ class HyperparameterOptimizer:
                 
                 return float(np.mean(scores))
         
-        # Create study with proper storage for parallelization
         # Make study name unique per currency and model type to avoid conflicts
         study_name = f"{model_class.__name__}_{currency}_{self.config.random_state}"
         
-        # Initialize storage_file variable for cleanup
-        storage_file = None
-        
-        # Use in-memory storage to avoid excessive disk I/O
-        storage_file = None
         study = optuna.create_study(
             direction='minimize',
             sampler=TPESampler(seed=self.config.random_state),
-            pruner=MedianPruner(),
             study_name=study_name,
             load_if_exists=True
         )
@@ -873,16 +826,9 @@ class EnsembleWeightOptimizer:
         # Create study
         study_name = f"ensemble_weights_{currency}_{self.config.random_state}"
         
-        # Initialize storage_file variable for cleanup
-        storage_file = None
-        
-        # Use in-memory storage to avoid excessive disk I/O
-        # Weight optimization is fast and doesn't need persistent storage
-        storage_file = None
         study = optuna.create_study(
             direction='minimize',
             sampler=TPESampler(seed=self.config.random_state),
-            pruner=MedianPruner(),
             study_name=study_name,
             load_if_exists=True
         )
@@ -950,8 +896,6 @@ class ModelTrainer:
         if self.logger:
             self.logger.debug(f"Training {model_type} model for {currency}")
         
-        # Use provided validation data from DynamoDB if available, otherwise use train/test split
-        validation_data_source = None
         if X_val is None or y_val is None:
             # No validation data provided - use train/test split from training data
             if self.logger:
@@ -959,41 +903,59 @@ class ModelTrainer:
                     f"Validation data not available for {currency}. "
                     "Using train/test split from training data instead."
                 )
-            
-            # Use 80/20 split for train/validation (maintaining temporal order for time series)
-            split_idx = int(len(X) * 0.8)
-            if split_idx < 10:
-                # If we have very few samples, use at least 10 for training
-                split_idx = max(10, len(X) - 5) if len(X) > 15 else len(X) - 1
-            
-            X_train_split = X[:split_idx]
-            y_train_split = y[:split_idx]
-            X_val = X[split_idx:]
-            y_val = y[split_idx:]
-            validation_data_source = 'train_test_split'
-            
+
+            # Use 60/20/20 split: train / early-stop val / weight-opt val
+            # Temporal order is preserved so later slices are always more recent
+            train_end = int(len(X) * 0.6)
+            val_end = int(len(X) * 0.8)
+            if train_end < 10:
+                # Fall back to 80/20 with no weight-opt split for very small datasets
+                train_end = max(10, len(X) - 5) if len(X) > 15 else len(X) - 1
+                val_end = len(X)
+
+            X_train_split = X[:train_end]
+            y_train_split = y[:train_end]
+            X_val = X[train_end:val_end]
+            y_val = y[train_end:val_end]
+            X_weight_opt = X[val_end:]
+            y_weight_opt = y[val_end:]
+
             if self.logger:
-                self.logger.debug(f"Using train/test split: {len(X_train_split)} training, {len(X_val)} validation samples")
+                self.logger.debug(
+                    f"Using 60/20/20 temporal split: {len(X_train_split)} train, "
+                    f"{len(X_val)} val, {len(X_weight_opt)} weight-opt samples"
+                )
         else:
             # Use provided validation data from DynamoDB
             X_train_split = X  # All historical data for training
             y_train_split = y
-            validation_data_source = 'dynamodb_daily_prices'
+            # Split DynamoDB val data 50/50 into early-stop val and weight-opt val
+            val_mid = len(X_val) // 2
+            X_weight_opt = X_val[val_mid:]
+            y_weight_opt = y_val[val_mid:]
+            X_val = X_val[:val_mid]
+            y_val = y_val[:val_mid]
             if self.logger:
-                self.logger.debug(f"Using DynamoDB validation data: {len(X_val)} samples")
+                self.logger.debug(
+                    f"Using DynamoDB validation data: {len(X_val)} early-stop val, "
+                    f"{len(X_weight_opt)} weight-opt samples"
+                )
         
-        # Scale features if needed
+        # Scale features if needed — scaler is fit on train only to prevent leakage.
+        # All downstream splits (val and weight-opt) must use the same transform.
         scaler = None
         if self.processing_config.robust_scaling:
             scaler = RobustScaler()
             X_train_split = scaler.fit_transform(X_train_split)
             if X_val is not None:
                 X_val = scaler.transform(X_val)
+            if X_weight_opt is not None and len(X_weight_opt) > 0:
+                X_weight_opt = scaler.transform(X_weight_opt)
         
         # Train model (validation data is always available now)
         training_history = None
         if model_type == "ensemble":
-            model: Any = self._train_ensemble_model(X_train_split, y_train_split, X_val, y_val, currency)
+            model: Any = self._train_ensemble_model(X_train_split, y_train_split, X_val, y_val, currency, X_weight_opt, y_weight_opt)
             # Get training history from ensemble
             if hasattr(model, 'models'):
                 training_history = {}
@@ -1011,15 +973,10 @@ class ModelTrainer:
         y_pred = model.predict(X_val)
         metrics = ModelMetrics.from_predictions(y_val, y_pred, target_names)
         
-        # Get number of validation samples and features
-        n_test = len(y_val)
+        n_train = len(y_train_split)
         n_features = X_val.shape[1]
-        
-        # Get feature importance with feature names
+
         feature_importance = model.get_feature_importance(feature_names=feature_names)
-        
-        # Calculate cross-validation scores
-        cv_scores = self._calculate_cv_scores(model, X_train_split, y_train_split)
         training_time = time.time() - start_time
         
         # Get hyperparameters
@@ -1051,110 +1008,81 @@ class ModelTrainer:
             training_time=training_time,
             hyperparameters=hyperparameters,
             feature_importance=feature_importance,
-            cross_validation_scores=cv_scores,
             model_type=model_type,
             currency=currency,
             training_history=training_history,
-            training_samples=n_test,
+            training_samples=n_train,
             n_features=n_features,
             confidence_level=0.95,
-            feature_names=feature_names,  # Store exact feature names used during training
+            feature_names=feature_names,
         )
     
+    def _build_base_model(
+        self,
+        model_class: type,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
+        currency: str,
+    ) -> BaseModel:
+        """
+        Instantiate *model_class* and, when optimisation is enabled, tune its
+        hyperparameters.  Falls back to default parameters on any error.
+        """
+        model = model_class(self.config, self.logger)
+        if self.config.n_hyperparameter_trials > 1:
+            if self.logger:
+                self.logger.debug(
+                    f"Optimizing {model_class.__name__} hyperparameters for {currency}"
+                )
+            try:
+                params = self.hyperparameter_optimizer.optimize(
+                    model_class, X_train, y_train, X_val, y_val,
+                    currency, self.config.cv_folds,
+                )
+                model.model = model._create_model_with_params(params)
+                if self.logger:
+                    self.logger.debug(
+                        f"Using optimized {model_class.__name__} params for {currency}"
+                    )
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(
+                        f"{model_class.__name__} optimisation failed for {currency}: "
+                        f"{e}. Using default parameters."
+                    )
+                model.model = model._create_model()
+        else:
+            model.model = model._create_model()
+        return model
+
     def _train_ensemble_model(
         self,
         X_train: np.ndarray,
         y_train: np.ndarray,
         X_val: np.ndarray,
         y_val: np.ndarray,
-        currency: str
+        currency: str,
+        X_weight_opt: Optional[np.ndarray] = None,
+        y_weight_opt: Optional[np.ndarray] = None,
     ) -> EnsembleModel:
         """Train ensemble model using per-currency hyperparameter optimization."""
-        models = []
-        
-        # Perform per-currency hyperparameter optimization if enabled
-        if self.config.n_hyperparameter_trials > 1:
-            if self.config.use_lightgbm:
-                lgb_model = LightGBMModel(self.config, self.logger)
-                
-                # Perform individual optimization for this currency
-                if self.logger:
-                    self.logger.debug(f"Optimizing LightGBM hyperparameters for {currency}")
-                
-                try:
-                    optimized_params = self.hyperparameter_optimizer.optimize(
-                        LightGBMModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
-                    )
-                    lgb_model.model = lgb_model._create_model_with_params(optimized_params)
-                    if self.logger:
-                        self.logger.debug(f"Using optimized LightGBM params for {currency}")
-                except Exception as e:
-                    if self.logger:
-                        self.logger.warning(f"LightGBM optimization failed for {currency}: {e}. Using default parameters.")
-                    lgb_model.model = lgb_model._create_model()
-                
-                models.append(lgb_model)
-            
-            if self.config.use_random_forest:
-                rf_model = RandomForestModel(self.config, self.logger)
-                
-                # Perform individual optimization for this currency
-                if self.logger:
-                    self.logger.debug(f"Optimizing RandomForest hyperparameters for {currency}")
-                
-                try:
-                    optimized_params = self.hyperparameter_optimizer.optimize(
-                        RandomForestModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
-                    )
-                    rf_model.model = rf_model._create_model_with_params(optimized_params)
-                    if self.logger:
-                        self.logger.debug(f"Using optimized RandomForest params for {currency}")
-                except Exception as e:
-                    if self.logger:
-                        self.logger.warning(f"RandomForest optimization failed for {currency}: {e}. Using default parameters.")
-                    rf_model.model = rf_model._create_model()
-                
-                models.append(rf_model)  # type: ignore[arg-type]
-            
-            if self.config.use_extra_trees:
-                et_model = ExtraTreesModel(self.config, self.logger)
-                
-                # Perform individual optimization for this currency
-                if self.logger:
-                    self.logger.debug(f"Optimizing ExtraTrees hyperparameters for {currency}")
-                
-                try:
-                    optimized_params = self.hyperparameter_optimizer.optimize(
-                        ExtraTreesModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
-                    )
-                    et_model.model = et_model._create_model_with_params(optimized_params)
-                    if self.logger:
-                        self.logger.debug(f"Using optimized ExtraTrees params for {currency}")
-                except Exception as e:
-                    if self.logger:
-                        self.logger.warning(f"ExtraTrees optimization failed for {currency}: {e}. Using default parameters.")
-                    et_model.model = et_model._create_model()
-                
-                models.append(et_model)  # type: ignore[arg-type]
-        else:
-            # Use default parameters if optimization is disabled
-            if self.logger:
-                self.logger.warning(f"Hyperparameter optimization disabled for {currency}. Using default parameters.")
-            
-            if self.config.use_lightgbm:
-                lgb_model = LightGBMModel(self.config, self.logger)
-                lgb_model.model = lgb_model._create_model()
-                models.append(lgb_model)
-            
-            if self.config.use_random_forest:
-                rf_model = RandomForestModel(self.config, self.logger)
-                rf_model.model = rf_model._create_model()
-                models.append(rf_model)  # type: ignore[arg-type]
-            
-            if self.config.use_extra_trees:
-                et_model = ExtraTreesModel(self.config, self.logger)
-                et_model.model = et_model._create_model()
-                models.append(et_model)  # type: ignore[arg-type]
+        if self.config.n_hyperparameter_trials <= 1 and self.logger:
+            self.logger.warning(
+                f"Hyperparameter optimization disabled for {currency}. Using default parameters."
+            )
+
+        enabled_classes = [
+            (self.config.use_lightgbm, LightGBMModel),
+            (self.config.use_random_forest, RandomForestModel),
+            (self.config.use_extra_trees, ExtraTreesModel),
+        ]
+        models: List[BaseModel] = [
+            self._build_base_model(cls, X_train, y_train, X_val, y_val, currency)
+            for enabled, cls in enabled_classes
+            if enabled
+        ]
         
         # Ensure we have the three required models
         if len(models) == 0:
@@ -1170,16 +1098,22 @@ class ModelTrainer:
                 model.model = model._create_model()
             model.fit(X_train, y_train, X_val, y_val)
         
-        # Optimize ensemble weights if enabled
+        # Optimize ensemble weights if enabled, using the held-out weight-opt split
         optimized_weights = None
         if self.config.optimize_ensemble_weights and len(models) >= 2:
+            X_wo = X_weight_opt if X_weight_opt is not None and len(X_weight_opt) > 0 else X_val
+            y_wo = y_weight_opt if y_weight_opt is not None and len(y_weight_opt) > 0 else y_val
             if self.logger:
-                self.logger.debug(f"Optimizing ensemble weights for {currency}")
-            
+                self.logger.debug(
+                    f"Optimizing ensemble weights for {currency} on "
+                    f"{'weight-opt' if X_weight_opt is not None and len(X_weight_opt) > 0 else 'val (fallback)'} set "
+                    f"({len(X_wo)} samples)"
+                )
+
             try:
                 weight_optimizer = EnsembleWeightOptimizer(self.config, self.logger)
                 optimized_weights = weight_optimizer.optimize_weights(
-                    models, X_val, y_val, currency, 
+                    models, X_wo, y_wo, currency,
                     n_trials=self.config.ensemble_weight_optimization_trials
                 )
                 if self.logger:
@@ -1249,64 +1183,6 @@ class ModelTrainer:
         model.fit(X_train, y_train, X_val, y_val)
         return model
     
-    def _calculate_cv_scores(self, model: Any, X: np.ndarray, y: np.ndarray) -> List[float]:
-        """Calculate cross-validation scores."""
-        try:
-            # Ensure we have enough data for cross-validation
-            min_samples_per_fold = 10
-            max_folds = max(2, len(X) // min_samples_per_fold)  # At least 2 folds
-            n_splits = min(self.config.cv_folds, max_folds)
-            
-            if n_splits < 2:
-                if self.logger:
-                    self.logger.warning(f"Insufficient data for cross-validation: {len(X)} samples, need at least {min_samples_per_fold * 2}")
-                return []
-            
-            tscv = TimeSeriesSplit(n_splits=n_splits)
-            
-            if hasattr(model, 'model'):
-                # Single model
-                scores = cross_val_score(
-                    model.model, X, y,
-                    cv=tscv,
-                    scoring='neg_mean_absolute_error',
-                    n_jobs=1  # Use single job for CV to avoid conflicts
-                )
-            else:
-                # Ensemble - manual CV
-                scores = []
-                for train_idx, val_idx in tscv.split(X):
-                    X_train_cv, X_val_cv = X[train_idx], X[val_idx]
-                    y_train_cv, y_val_cv = y[train_idx], y[val_idx]
-                    
-                    # Create temporary model with logger for proper error handling
-                    temp_ensemble = EnsembleModel([
-                        LightGBMModel(self.config, self.logger),
-                        RandomForestModel(self.config, self.logger),
-                        ExtraTreesModel(self.config, self.logger)
-                    ], logger=self.logger)
-                    temp_ensemble.fit(X_train_cv, y_train_cv)
-                    
-                    y_pred_cv = temp_ensemble.predict(X_val_cv)
-                    mae = mean_absolute_error(y_val_cv, y_pred_cv)
-                    scores.append(-mae)  # Negative for consistency
-            
-            return scores  # type: ignore[no-any-return]
-            
-        except Exception as e:
-            # Use try/except to avoid logger errors masking CV errors
-            try:
-                if self.logger and hasattr(self.logger, 'logger') and self.logger.logger is not None:
-                    self.logger.warning(f"Cross-validation failed: {str(e)}")
-                else:
-                    # Fallback to print if logger is not available
-                    import sys
-                    sys.stderr.write(f"Cross-validation failed: {str(e)}\n")
-            except Exception as logger_error:
-                # If logger itself fails, use stderr as last resort
-                import sys
-                sys.stderr.write(f"Cross-validation failed: {str(e)} (logger error: {str(logger_error)})\n")
-            return []
 
 
 def save_model_artifacts(

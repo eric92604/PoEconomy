@@ -2,158 +2,95 @@
 """
 Configuration for ML model inference (prediction) pipeline.
 
-This module provides configurations specifically optimized for inference,
-separate from training configurations. Inference has different requirements:
-- Use all available historical data (not limited by training constraints)
-- Optimize for prediction accuracy over training speed
-- Handle real-time prediction scenarios
+Uses the shared DataConfig and ProcessingConfig from training with
+inference-appropriate defaults, eliminating duplicate class definitions.
+
+Environment Variables:
+    MAX_LEAGUE_DAYS: Maximum days of league history to use (default: 200)
+    MIN_LEAGUE_DAYS: Minimum days required (default: 0)
+    MAX_NAN_RATIO: Maximum NaN ratio per row before dropping (default: 0.9)
+    MODELS_DIR: Directory containing trained model artifacts (default: /var/task/models)
+    PREDICTION_CACHE_TTL_HOURS: TTL for prediction cache in hours (default: 2)
+    DEFAULT_CONFIDENCE_LEVEL: Confidence level for prediction intervals (default: 0.60)
+    LOG_LEVEL: Logging level (default: INFO)
+    DISABLE_FILE_LOGGING: Set to 'true' to disable file logging (default: false)
 """
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
 
-from ml.config.training_config import MLConfig, DynamoConfig, LoggingConfig
-
-
-@dataclass
-class InferenceDataConfig:
-    """Data configuration optimized for inference."""
-    
-    # League parameters - more permissive for inference
-    max_league_days: int = int(os.getenv("MAX_LEAGUE_DAYS", "200"))
-    min_league_days: int = int(os.getenv("MIN_LEAGUE_DAYS", "0"))
-    
-    # League inclusion settings - use all available leagues for inference
-    included_leagues: Optional[List[str]] = None  # None means use all available
-    excluded_leagues: List[str] = field(default_factory=list)
-    
-    # Currency selection strategy - no minimum records for inference
-    min_records_threshold: int = int(os.getenv("MIN_RECORDS_THRESHOLD", "1"))  # Minimal threshold
-    max_currencies_to_train: Optional[int] = None  # No limit for inference
-    
-    # Target variables - use all available horizons
-    prediction_horizons: List[int] = field(default_factory=lambda: [1, 3, 7])
-    
-    # Feature engineering windows
-    rolling_windows: List[int] = field(default_factory=lambda: [1, 3, 5, 7])
-    momentum_periods: List[int] = field(default_factory=lambda: [1, 3, 5, 7])
-    
-    # Volatility feature engineering
-    volatility_windows: List[int] = field(default_factory=lambda: [3, 5, 7])
-    include_volatility_features: bool = True
-    volatility_types: List[str] = field(default_factory=lambda: ['std', 'cv', 'range', 'garch'])
+from ml.config.training_config import DataConfig, DynamoConfig, LoggingConfig, ProcessingConfig
 
 
-@dataclass
-class InferenceProcessingConfig:
-    """Processing configuration optimized for inference."""
-    
-    # Feature Engineering - comprehensive for best predictions
-    max_lag_features: int = int(os.getenv("MAX_LAG_FEATURES", "15"))  # More lag features
-    technical_indicators: bool = True
-    statistical_features: bool = True
-    
-    # Data Quality - more lenient for inference
-    outlier_threshold: float = float(os.getenv("OUTLIER_THRESHOLD", "4.0"))  # More lenient
-    missing_value_threshold: float = float(os.getenv("MISSING_VALUE_THRESHOLD", "0.7"))  # More lenient
-    
-    # Scaling - keep robust scaling
-    robust_scaling: bool = True
-    
-    # Price transformations
-    log_transform: bool = True
-    log_transform_ratio_threshold: float = 10.0
-    
-    # Data processing options - more conservative for inference
-    outlier_removal: bool = bool(os.getenv("OUTLIER_REMOVAL", "false").lower() == "true")  # Keep outliers by default
+def _build_inference_data_config() -> DataConfig:
+    """Create a DataConfig with inference-appropriate defaults.
+
+    Key differences from training:
+    - max_league_days is larger (200 vs 60) to use all available price history.
+    - min_league_days can be overridden via env var.
+    """
+    config = DataConfig()
+    config.max_league_days = int(os.getenv("MAX_LEAGUE_DAYS", "200"))
+    config.min_league_days = int(os.getenv("MIN_LEAGUE_DAYS", "0"))
+    return config
+
+
+def _build_inference_processing_config() -> ProcessingConfig:
+    """Create a ProcessingConfig with inference-appropriate defaults.
+
+    Key differences from training:
+    - Outlier removal is disabled — inference must predict on any input value.
+    - max_nan_ratio is handled by ProcessingConfig itself via MAX_NAN_RATIO env var,
+      keeping the value consistent with the training path.
+    """
+    config = ProcessingConfig()
+    config.outlier_removal = False
+    return config
 
 
 @dataclass
 class InferenceConfig:
     """Complete configuration for ML model inference."""
-    
-    # Core configurations
-    data: InferenceDataConfig = field(default_factory=InferenceDataConfig)
-    processing: InferenceProcessingConfig = field(default_factory=InferenceProcessingConfig)
+
+    data: DataConfig = field(default_factory=_build_inference_data_config)
+    processing: ProcessingConfig = field(default_factory=_build_inference_processing_config)
     dynamo: DynamoConfig = field(default_factory=DynamoConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
-    
-    # Inference-specific settings
+
     models_dir: Path = field(default_factory=lambda: Path(os.getenv("MODELS_DIR", "/var/task/models")))
-    enable_model_caching: bool = True
-    prediction_timeout_seconds: int = int(os.getenv("PREDICTION_TIMEOUT_SECONDS", "30"))
-    
-    # Performance settings
-    max_concurrent_predictions: int = int(os.getenv("MAX_CONCURRENT_PREDICTIONS", "10"))
-    enable_prediction_caching: bool = bool(os.getenv("ENABLE_PREDICTION_CACHING", "true").lower() == "true")
-    prediction_cache_ttl_hours: int = int(os.getenv("PREDICTION_CACHE_TTL_HOURS", "2"))
-    
-    # Prediction interval settings
-    default_confidence_level: float = float(os.getenv("DEFAULT_CONFIDENCE_LEVEL", "0.86"))  # 60% confidence for narrower prediction ranges
-    
+
+    prediction_cache_ttl_hours: int = field(
+        default_factory=lambda: int(os.getenv("PREDICTION_CACHE_TTL_HOURS", "2"))
+    )
+
+    # Confidence level used when computing ensemble prediction intervals.
+    # 0.60 is the production-proven default; override with DEFAULT_CONFIDENCE_LEVEL env var.
+    default_confidence_level: float = field(
+        default_factory=lambda: float(os.getenv("DEFAULT_CONFIDENCE_LEVEL", "0.60"))
+    )
+
     def __post_init__(self) -> None:
-        """Post-initialization setup."""
-        # Ensure models directory exists (for local development)
+        """Ensure models directory exists for local development."""
         if not os.getenv('AWS_LAMBDA_FUNCTION_NAME'):
             self.models_dir.mkdir(parents=True, exist_ok=True)
 
 
 def get_inference_config() -> InferenceConfig:
-    """
-    Get the default inference configuration.
-    
-    This configuration is optimized for making predictions with trained models,
-    using all available historical data and comprehensive feature engineering.
+    """Get the inference configuration.
+
+    All env vars are read at instantiation time via field default_factory.
     """
     return InferenceConfig()
 
 
-def get_inference_config_from_env() -> InferenceConfig:
-    """
-    Get inference configuration with environment variable overrides.
-    
-    This allows runtime configuration of inference parameters through
-    environment variables, which is useful for Lambda deployments.
-    """
-    config = InferenceConfig()
-    
-    # Override with environment variables if present
-    if os.getenv("MAX_LEAGUE_DAYS"):
-        config.data.max_league_days = int(os.getenv("MAX_LEAGUE_DAYS"))
-    if os.getenv("MIN_LEAGUE_DAYS"):
-        config.data.min_league_days = int(os.getenv("MIN_LEAGUE_DAYS", "10"))
-    if os.getenv("MIN_RECORDS_THRESHOLD"):
-        config.data.min_records_threshold = int(os.getenv("MIN_RECORDS_THRESHOLD", "1"))
-    if os.getenv("MAX_LAG_FEATURES"):
-        config.processing.max_lag_features = int(os.getenv("MAX_LAG_FEATURES", "20"))
-    if os.getenv("OUTLIER_THRESHOLD"):
-        config.processing.outlier_threshold = float(os.getenv("OUTLIER_THRESHOLD", "3.0"))
-    if os.getenv("MISSING_VALUE_THRESHOLD"):
-        config.processing.missing_value_threshold = float(os.getenv("MISSING_VALUE_THRESHOLD", "0.1"))
-    if os.getenv("OUTLIER_REMOVAL"):
-        outlier_removal = os.getenv("OUTLIER_REMOVAL")
-        if outlier_removal:
-            config.processing.outlier_removal = outlier_removal.lower() == "true"
-    if os.getenv("PREDICTION_TIMEOUT_SECONDS"):
-        config.prediction_timeout_seconds = int(os.getenv("PREDICTION_TIMEOUT_SECONDS", "30"))
-    if os.getenv("MAX_CONCURRENT_PREDICTIONS"):
-        config.max_concurrent_predictions = int(os.getenv("MAX_CONCURRENT_PREDICTIONS", "10"))
-    if os.getenv("ENABLE_PREDICTION_CACHING"):
-        caching = os.getenv("ENABLE_PREDICTION_CACHING")
-        if caching:
-            config.enable_prediction_caching = caching.lower() == "true"
-    if os.getenv("PREDICTION_CACHE_TTL_HOURS"):
-        config.prediction_cache_ttl_hours = int(os.getenv("PREDICTION_CACHE_TTL_HOURS", "2"))
-    
-    return config
+# Alias kept so existing callers compile without change.
+# Both functions are equivalent: env vars are already applied at dataclass init.
+get_inference_config_from_env = get_inference_config
 
 
 __all__ = [
-    "InferenceDataConfig",
-    "InferenceProcessingConfig", 
     "InferenceConfig",
     "get_inference_config",
-    "get_inference_config_from_env"
+    "get_inference_config_from_env",
 ]

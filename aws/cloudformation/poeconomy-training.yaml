@@ -2,22 +2,13 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: PoEconomy training infrastructure (ECS Fargate Spot) - reads from base data lake, writes to models bucket
 
 Parameters:
-  EnvironmentName:
-    Type: String
-    Default: dev
-    Description: Environment identifier
-  TrainingMode:
-    Type: String
-    Default: production
-    AllowedValues: [production, development, test]
-    Description: Training mode (production, development, test)
   TaskCpu:
     Type: Number
     Default: 16384
     Description: CPU units for the training task (1024 = 1 vCPU)
   TaskMemory:
     Type: Number
-    Default: 32768
+    Default: 65536
     Description: Memory in MB for the training task
   EphemeralStorageGiB:
     Type: Number
@@ -27,30 +18,46 @@ Parameters:
     Type: Number
     Default: 50
     Description: Minimum number of records required for training
-  TaskTimeoutMinutes:
-    Type: Number
-    Default: 1440
-    Description: Task timeout in minutes
   MaxCurrenciesToTrain:
     Type: Number
     Default: 0
     Description: Maximum number of currencies to train (0 = no limit)
   MaxCurrencyWorkers:
     Type: Number
-    Default: 8
+    Default: 16
     Description: Number of parallel currency workers for training
+  MaxOptunaWorkers:
+    Type: Number
+    Default: 2
+    Description: Number of Optuna workers per currency for hyperparameter search
+  ModelNJobs:
+    Type: Number
+    Default: 2
+    Description: Number of parallel jobs for RandomForest/ExtraTrees model training
   NHyperparameterTrials:
     Type: Number
-    Default: 200
+    Default: 100
     Description: Number of hyperparameter optimization trials
   NModelTrials:
     Type: Number
-    Default: 1000
-    Description: Number of model training iterations (boosting rounds)
+    Default: 500
+    Description: Number of model training iterations (boosting rounds for LightGBM ceiling; n_estimators fallback for RF/ET when HPO is disabled or fails)
   CVFolds:
     Type: Number
     Default: 5
     Description: Number of cross-validation folds
+  EarlyStoppingRounds:
+    Type: Number
+    Default: 50
+    Description: LightGBM patience rounds before early stopping triggers
+  EnsembleWeightOptTrials:
+    Type: Number
+    Default: 50
+    Description: Number of Optuna trials used to optimize ensemble model weights per currency
+  ValidationMaxDays:
+    Type: Number
+    Default: 60
+    Description: Maximum days of recent DynamoDB price data fetched as the validation set
   MinAvgValueThreshold:
     Type: String
     Default: '0.25'
@@ -84,7 +91,7 @@ Resources:
       EnableDnsSupport: true
       Tags:
         - Key: Name
-          Value: !Sub 'poeconomy-${EnvironmentName}-training-vpc'
+          Value: !Sub '${AWS::StackName}-vpc'
 
   # Internet Gateway
   TrainingInternetGateway:
@@ -92,7 +99,7 @@ Resources:
     Properties:
       Tags:
         - Key: Name
-          Value: !Sub 'poeconomy-${EnvironmentName}-training-igw'
+          Value: !Sub '${AWS::StackName}-igw'
 
   # Attach Internet Gateway to VPC
   TrainingInternetGatewayAttachment:
@@ -111,7 +118,7 @@ Resources:
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: !Sub 'poeconomy-${EnvironmentName}-training-public-subnet-a'
+          Value: !Sub '${AWS::StackName}-public-subnet-a'
 
   # Public Subnet B
   TrainingPublicSubnetB:
@@ -123,7 +130,7 @@ Resources:
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: !Sub 'poeconomy-${EnvironmentName}-training-public-subnet-b'
+          Value: !Sub '${AWS::StackName}-public-subnet-b'
 
   # Route Table
   TrainingPublicRouteTable:
@@ -132,7 +139,7 @@ Resources:
       VpcId: !Ref TrainingVPC
       Tags:
         - Key: Name
-          Value: !Sub 'poeconomy-${EnvironmentName}-training-public-routes'
+          Value: !Sub '${AWS::StackName}-public-routes'
 
   # Default Route
   TrainingDefaultPublicRoute:
@@ -161,7 +168,7 @@ Resources:
   TrainingSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: !Sub 'poeconomy-${EnvironmentName}-training-sg'
+      GroupName: !Sub '${AWS::StackName}-sg'
       GroupDescription: Security group for PoEconomy training tasks
       VpcId: !Ref TrainingVPC
       SecurityGroupEgress:
@@ -169,13 +176,13 @@ Resources:
           CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
-          Value: !Sub 'poeconomy-${EnvironmentName}-training-sg'
+          Value: !Sub '${AWS::StackName}-sg'
 
   # ECS Cluster
   TrainingCluster:
     Type: AWS::ECS::Cluster
     Properties:
-      ClusterName: !Sub 'poeconomy-${EnvironmentName}-training'
+      ClusterName: !Sub '${AWS::StackName}'
       CapacityProviders:
         - FARGATE_SPOT
       DefaultCapacityProviderStrategy:
@@ -183,13 +190,13 @@ Resources:
           Weight: 1
       Tags:
         - Key: Name
-          Value: !Sub 'poeconomy-${EnvironmentName}-training-cluster'
+          Value: !Sub '${AWS::StackName}-cluster'
 
   # CloudWatch Log Group
   TrainingLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub '/aws/ecs/poeconomy/${EnvironmentName}/training'
+      LogGroupName: !Sub '/aws/ecs/${AWS::StackName}'
       RetentionInDays: 14
       Tags:
         - Key: App
@@ -201,7 +208,7 @@ Resources:
   TrainingTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: !Sub 'poeconomy-${EnvironmentName}-training'
+      Family: !Sub '${AWS::StackName}'
       NetworkMode: awsvpc
       RequiresCompatibilities:
         - FARGATE
@@ -222,14 +229,8 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: ecs
           Environment:
-            - Name: ENVIRONMENT
-              Value: !Ref EnvironmentName
-            - Name: TRAINING_MODE
-              Value: !Ref TrainingMode
             - Name: MIN_RECORDS_THRESHOLD
               Value: !Ref MinRecordsThreshold
-            - Name: TASK_TIMEOUT_MINUTES
-              Value: !Ref TaskTimeoutMinutes
             - Name: MAX_CURRENCIES_TO_TRAIN
               Value: !Ref MaxCurrenciesToTrain
             - Name: DATA_LAKE_BUCKET
@@ -240,9 +241,9 @@ Resources:
             - Name: MAX_CURRENCY_WORKERS
               Value: !Ref MaxCurrencyWorkers
             - Name: MAX_OPTUNA_WORKERS
-              Value: '2'
+              Value: !Ref MaxOptunaWorkers
             - Name: MODEL_N_JOBS
-              Value: '4'
+              Value: !Ref ModelNJobs
             # Logging
             - Name: LOG_LEVEL
               Value: !Ref LogLevel
@@ -255,14 +256,24 @@ Resources:
               Value: !Ref NModelTrials
             - Name: CV_FOLDS
               Value: !Ref CVFolds
+            - Name: EARLY_STOPPING_ROUNDS
+              Value: !Ref EarlyStoppingRounds
+            - Name: ENSEMBLE_WEIGHT_OPT_TRIALS
+              Value: !Ref EnsembleWeightOptTrials
             # Data Selection
             - Name: MIN_AVG_VALUE_THRESHOLD
               Value: !Ref MinAvgValueThreshold
+            - Name: VALIDATION_MAX_DAYS
+              Value: !Ref ValidationMaxDays
             # DynamoDB Tables
             - Name: DYNAMO_LEAGUE_METADATA_TABLE
               Value:
                 Fn::ImportValue:
                   Fn::Sub: '${IngestionStackName}-LeagueMetadataTable'
+            - Name: DYNAMO_DAILY_PRICES_TABLE
+              Value:
+                Fn::ImportValue:
+                  Fn::Sub: '${IngestionStackName}-DailyPricesTable'
           StopTimeout: 60
       Tags:
         - Key: App
@@ -272,7 +283,7 @@ Resources:
   TrainingExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub 'poeconomy-${EnvironmentName}-training-execution-role'
+      RoleName: !Sub '${AWS::StackName}-execution-role'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -284,13 +295,13 @@ Resources:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
       Tags:
         - Key: Name
-          Value: !Sub 'poeconomy-${EnvironmentName}-training-execution-role'
+          Value: !Sub '${AWS::StackName}-execution-role'
 
   # IAM Role for ECS Task
   TrainingTaskRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub 'poeconomy-${EnvironmentName}-training-task-role'
+      RoleName: !Sub '${AWS::StackName}-task-role'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -356,7 +367,7 @@ Resources:
                           Fn::Sub: '${IngestionStackName}-DailyPricesTable'
       Tags:
         - Key: Name
-          Value: !Sub 'poeconomy-${EnvironmentName}-training-task-role'
+          Value: !Sub '${AWS::StackName}-task-role'
 
 Outputs:
   TrainingClusterName:
