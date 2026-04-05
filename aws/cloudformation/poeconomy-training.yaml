@@ -2,6 +2,11 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: PoEconomy training infrastructure (ECS Fargate Spot) - reads from base data lake, writes to models bucket
 
 Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedPattern: '[a-zA-Z0-9-]+'
+    Description: Environment identifier (e.g. dev, staging, production)
   TaskCpu:
     Type: Number
     Default: 16384
@@ -64,8 +69,7 @@ Parameters:
     Description: Minimum average value threshold for currency selection
   BaseStackName:
     Type: String
-    Default: poeconomy-production-base
-    Description: Name of the base infrastructure stack
+    Description: Name of the base infrastructure stack (e.g. poeconomy-production-base; pass from deploy script)
   IngestionStackName:
     Type: String
     Description: Name of the ingestion stack to import DynamoDB tables from
@@ -92,6 +96,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-vpc'
+        - Key: Environment
+          Value: !Ref EnvironmentName
 
   # Internet Gateway
   TrainingInternetGateway:
@@ -100,6 +106,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-igw'
+        - Key: Environment
+          Value: !Ref EnvironmentName
 
   # Attach Internet Gateway to VPC
   TrainingInternetGatewayAttachment:
@@ -119,6 +127,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-public-subnet-a'
+        - Key: Environment
+          Value: !Ref EnvironmentName
 
   # Public Subnet B
   TrainingPublicSubnetB:
@@ -131,6 +141,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-public-subnet-b'
+        - Key: Environment
+          Value: !Ref EnvironmentName
 
   # Route Table
   TrainingPublicRouteTable:
@@ -140,6 +152,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-public-routes'
+        - Key: Environment
+          Value: !Ref EnvironmentName
 
   # Default Route
   TrainingDefaultPublicRoute:
@@ -177,6 +191,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-sg'
+        - Key: Environment
+          Value: !Ref EnvironmentName
 
   # ECS Cluster
   TrainingCluster:
@@ -191,6 +207,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-cluster'
+        - Key: Environment
+          Value: !Ref EnvironmentName
 
   # CloudWatch Log Group
   TrainingLogGroup:
@@ -199,6 +217,8 @@ Resources:
       LogGroupName: !Sub '/aws/ecs/${AWS::StackName}'
       RetentionInDays: 14
       Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
         - Key: App
           Value: PoEconomy
     DeletionPolicy: Delete
@@ -229,6 +249,8 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: ecs
           Environment:
+            - Name: ENVIRONMENT
+              Value: !Ref EnvironmentName
             - Name: MIN_RECORDS_THRESHOLD
               Value: !Ref MinRecordsThreshold
             - Name: MAX_CURRENCIES_TO_TRAIN
@@ -276,6 +298,8 @@ Resources:
                   Fn::Sub: '${IngestionStackName}-DailyPricesTable'
           StopTimeout: 60
       Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
         - Key: App
           Value: PoEconomy
 
@@ -296,6 +320,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-execution-role'
+        - Key: Environment
+          Value: !Ref EnvironmentName
 
   # IAM Role for ECS Task
   TrainingTaskRole:
@@ -368,6 +394,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-task-role'
+        - Key: Environment
+          Value: !Ref EnvironmentName
 
 Outputs:
   TrainingClusterName:

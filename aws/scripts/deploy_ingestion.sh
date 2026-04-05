@@ -39,18 +39,21 @@ echo "Logging in to ECR..."
 aws ecr get-login-password --region "$REGION" \
   | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
 
-# Build the container image
+# Build the container image (buildx + no attestations: Lambda requires a plain Docker v2 manifest,
+# not an OCI image index from BuildKit provenance/SBOM defaults)
 echo "Building Docker image (linux/amd64)..."
-docker build \
+if ! docker buildx build \
   --platform linux/amd64 \
+  --progress=plain \
+  --load \
+  --provenance=false \
+  --sbom=false \
   --tag "$CONTAINER_NAME:$IMAGE_TAG" \
   --file "$ROOT_DIR/aws/lambdas/ingestion/container/Dockerfile" \
   --no-cache \
-  "$ROOT_DIR"
-
-if [ $? -ne 0 ]; then
-    echo "❌ Failed to build Docker image"
-    exit 1
+  "$ROOT_DIR"; then
+  echo "❌ Failed to build Docker image"
+  exit 1
 fi
 
 echo "✅ Docker image built successfully"

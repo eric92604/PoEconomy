@@ -25,6 +25,7 @@ build_and_push_training_image
 echo "Deploying training infrastructure..."
 
 OVERRIDES=(
+  "EnvironmentName=$ENVIRONMENT"
   "BaseStackName=$BASE_STACK_NAME"
   "IngestionStackName=$INGESTION_STACK_NAME"
   "DataLakeBucketName=$DATA_LAKE_BUCKET_NAME"

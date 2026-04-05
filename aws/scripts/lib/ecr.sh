@@ -63,7 +63,12 @@ build_and_push_feature_engineering_image() {
   [[ -f "$ROOT_DIR/.dockerignore" ]] && cp "$ROOT_DIR/.dockerignore" "$ROOT_DIR/.dockerignore.bak"
   cp "$ROOT_DIR/aws/feature-engineering/container/.dockerignore" "$ROOT_DIR/.dockerignore"
 
-  docker build \
+  docker buildx build \
+    --platform linux/amd64 \
+    --progress=plain \
+    --load \
+    --provenance=false \
+    --sbom=false \
     -t "poeconomy-${ENVIRONMENT}-feature-engineering:latest" \
     -f "$ROOT_DIR/aws/feature-engineering/container/Dockerfile" \
     "$ROOT_DIR"
@@ -95,7 +100,12 @@ build_and_push_training_image() {
   [[ -f "$ROOT_DIR/.dockerignore" ]] && cp "$ROOT_DIR/.dockerignore" "$ROOT_DIR/.dockerignore.bak"
   cp "$ROOT_DIR/aws/training/container/.dockerignore" "$ROOT_DIR/.dockerignore"
 
-  docker build \
+  docker buildx build \
+    --platform linux/amd64 \
+    --progress=plain \
+    --load \
+    --provenance=false \
+    --sbom=false \
     -t "poeconomy-${ENVIRONMENT}-training:latest" \
     -f "$ROOT_DIR/aws/training/container/Dockerfile" \
     "$ROOT_DIR"

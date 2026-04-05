@@ -29,6 +29,7 @@ upload_training_data_if_needed
 echo "Deploying feature engineering infrastructure..."
 
 OVERRIDES=(
+  "EnvironmentName=$ENVIRONMENT"
   "DataLakeBucketName=$DATA_LAKE_BUCKET_NAME"
   "BaseStackName=$BASE_STACK_NAME"
   "FeatureEngineeringImageUri=$FEATURE_ENGINEERING_IMAGE_URI"

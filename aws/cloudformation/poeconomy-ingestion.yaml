@@ -4,7 +4,7 @@ Description: PoEconomy Ingestion Lambda functions and DynamoDB tables
 Parameters:
   EnvironmentName:
     Type: String
-    Default: dev
+    Default: production
     AllowedPattern: '[a-zA-Z0-9-]+'
     Description: Environment identifier (e.g. dev, staging, production)
   IngestionScheduleExpression:

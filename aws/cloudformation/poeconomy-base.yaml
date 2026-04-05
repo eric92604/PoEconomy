@@ -4,7 +4,7 @@ Description: PoEconomy base infrastructure (shared S3 bucket and cross-stack IAM
 Parameters:
   EnvironmentName:
     Type: String
-    Default: dev
+    Default: production
     AllowedPattern: '[a-zA-Z0-9-]+'
     Description: Environment identifier (e.g. dev, staging, production)
   DataLakeStorageClass:
