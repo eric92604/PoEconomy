@@ -12,6 +12,7 @@ build_and_push_lambda_image() {
     | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
 
   echo "Building Lambda container image with models..."
+  # Uses LATEST_EXPERIMENT / LATEST_EXPERIMENT_FROM_S3_XP_LISTING when set by verify_local_backup (no second S3 listing).
   build_lambda_image_with_models
 
   local timestamp

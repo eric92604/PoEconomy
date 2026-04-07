@@ -21,8 +21,7 @@ ensure_prerequisites
 # Verify models in S3 for Lambda container
 verify_models_in_s3
 
-# Check for local backup and set MODELS_AVAILABLE
-echo "Checking for local model backup..."
+# Validates local cache, lists S3 once for xp_* latest, exports LATEST_EXPERIMENT* for the image build below.
 if verify_local_backup; then
   echo "✅ Local models available"
   export MODELS_AVAILABLE="true"

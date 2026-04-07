@@ -3,50 +3,77 @@
 # Model management functions for PoEconomy Lambda image builds.
 # Source shared_config.sh before this file.
 
-# Find the most recent experiment directory (xp_YYYYMMDD_HHMMSS) that contains .pkl files.
+# Pick the newest experiment name by xp_YYYYMMDD_HHMMSS sort key (same ordering as training folders).
+# Args: one or more directory names (e.g. xp_20260406_004633). Prints the winner; returns 1 if none valid.
+pick_latest_experiment_name() {
+  local latest_experiment="" latest_sort_key=0
+  local exp_name sort_key rest digits
+  for exp_name in "$@"; do
+    sort_key=0
+    rest="${exp_name#xp_}"
+    if [[ "$rest" =~ ^([0-9]{8})_([0-9]{6})$ ]]; then
+      sort_key="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+    else
+      digits="${exp_name//[^0-9]/}"
+      [[ -n "$digits" ]] && sort_key="${digits:0:14}"
+    fi
+    [[ "$sort_key" =~ ^[0-9]+$ ]] || sort_key=0
+    [[ "$sort_key" -gt "$latest_sort_key" ]] || continue
+    latest_sort_key=$sort_key
+    latest_experiment="$exp_name"
+  done
+  [[ -n "$latest_experiment" ]] || return 1
+  echo "$latest_experiment"
+}
+
+# List s3://$DATA_LAKE_BUCKET_NAME/models/currency/ for xp_* prefixes only (no object download).
+# Prints the newest experiment folder name.
+# Returns 0 on success, 1 if no xp_* prefixes (legacy layout or empty), 2 if the AWS API call failed.
+find_latest_experiment_in_s3() {
+  local prefixes prefix base names=()
+  if ! prefixes=$(aws s3api list-objects-v2 \
+    --bucket "$DATA_LAKE_BUCKET_NAME" \
+    --prefix "models/currency/" \
+    --delimiter "/" \
+    --region "$REGION" \
+    --query 'CommonPrefixes[].Prefix' \
+    --output text); then
+    echo "❌ Failed to list S3 prefixes under models/currency/ (check AWS credentials and bucket)." >&2
+    return 2
+  fi
+  [[ -z "$prefixes" ]] && return 1
+  for prefix in $prefixes; do
+    [[ -z "$prefix" ]] && continue
+    base=$(basename "${prefix%/}")
+    [[ "$base" == xp_* ]] || continue
+    names+=("$base")
+  done
+  [[ ${#names[@]} -eq 0 ]] && return 1
+  pick_latest_experiment_name "${names[@]}"
+}
+
+# Find the most recent experiment directory under local backup (xp_YYYYMMDD_HHMMSS) that contains .pkl files.
 # Prints the experiment directory name on success, returns 1 if none found.
 find_latest_experiment() {
   local backup_dir="$ROOT_DIR/s3_backup/models/currency"
-  local latest_experiment=""
-  local latest_timestamp=0
+  local names=() exp_dir exp_name exp_models
 
   for exp_dir in "$backup_dir"/xp_*; do
     [[ -d "$exp_dir" ]] || continue
-    local exp_name
     exp_name=$(basename "$exp_dir")
-    local exp_models
     exp_models=$(find "$exp_dir" -name "*.pkl" 2>/dev/null | wc -l)
     [[ "$exp_models" -gt 0 ]] || continue
-
-    # Parse timestamp from xp_YYYYMMDD_HHMMSS
-    local timestamp_str="${exp_name#xp_}"
-    timestamp_str="${timestamp_str/_/ }"
-    local epoch_time=0
-    if [[ "$timestamp_str" =~ ^[0-9]{8}\ [0-9]{6}$ ]]; then
-      epoch_time=$(date -d "$timestamp_str" +%s 2>/dev/null || echo "0")
-    fi
-    # Fallback: use digits from directory name for ordering
-    if [[ "$epoch_time" -eq 0 ]]; then
-      local digits="${exp_name//[^0-9]/}"
-      epoch_time="${digits:0:14}"
-    fi
-
-    if [[ "$epoch_time" -gt "$latest_timestamp" ]]; then
-      latest_timestamp=$epoch_time
-      latest_experiment="$exp_name"
-    fi
+    names+=("$exp_name")
   done
-
-  if [[ -n "$latest_experiment" ]]; then
-    echo "$latest_experiment"
-    return 0
-  fi
-  return 1
+  [[ ${#names[@]} -eq 0 ]] && return 1
+  pick_latest_experiment_name "${names[@]}"
 }
 
-# Verify local model backup exists and set LATEST_EXPERIMENT if an xp_* directory is found.
+# Verify local model backup: when S3 uses xp_* folders, S3 listing is authoritative — local must
+# contain that latest folder with .pkl files or it is treated as stale (build will sync that prefix).
 verify_local_backup() {
   echo "Checking for local model backup..."
+  unset LATEST_EXPERIMENT LATEST_EXPERIMENT_FROM_S3_XP_LISTING
   local backup_dir="$ROOT_DIR/s3_backup/models/currency"
 
   if [[ ! -d "$backup_dir" ]]; then
@@ -56,20 +83,52 @@ verify_local_backup() {
 
   echo "✅ Local backup directory found: $backup_dir"
 
+  local s3_latest local_latest model_count metadata_count exp_dir s3_rc
+
+  s3_latest=$(find_latest_experiment_in_s3)
+  s3_rc=$?
+  if [[ "$s3_rc" -eq 0 ]]; then
+    export LATEST_EXPERIMENT="$s3_latest"
+    export LATEST_EXPERIMENT_FROM_S3_XP_LISTING=1
+    echo "📡 Latest experiment in S3: $s3_latest"
+    exp_dir="$backup_dir/$s3_latest"
+    model_count=0
+    metadata_count=0
+    if [[ -d "$exp_dir" ]]; then
+      model_count=$(find "$exp_dir" -name "*.pkl" 2>/dev/null | wc -l)
+      metadata_count=$(find "$exp_dir" -name "model_metadata.json" 2>/dev/null | wc -l)
+    fi
+    if [[ -d "$exp_dir" ]] && [[ "$model_count" -gt 0 ]]; then
+      echo "📁 Local copy matches S3 latest: $s3_latest ($model_count models, $metadata_count metadata files)"
+      return 0
+    fi
+    if local_latest=$(find_latest_experiment); then
+      echo "⚠️  Local newest experiment is $local_latest but S3 newest is $s3_latest — local tree is stale or incomplete."
+    else
+      echo "⚠️  S3 latest $s3_latest is missing locally or has no .pkl files."
+    fi
+    return 1
+  fi
+  if [[ "$s3_rc" -eq 2 ]]; then
+    echo "❌ Cannot validate local models against S3 (S3 listing failed)." >&2
+    return 1
+  fi
+
+  echo "ℹ️  No xp_* experiment prefixes found in S3; validating local layout only."
+
   local latest_experiment
   latest_experiment=$(find_latest_experiment)
   if [[ -n "$latest_experiment" ]]; then
-    local exp_dir="$backup_dir/$latest_experiment"
-    local model_count metadata_count
+    exp_dir="$backup_dir/$latest_experiment"
     model_count=$(find "$exp_dir" -name "*.pkl" 2>/dev/null | wc -l)
     metadata_count=$(find "$exp_dir" -name "model_metadata.json" 2>/dev/null | wc -l)
-    echo "📁 Latest experiment: $latest_experiment ($model_count models, $metadata_count metadata files)"
+    echo "📁 Latest experiment (local only): $latest_experiment ($model_count models, $metadata_count metadata files)"
     export LATEST_EXPERIMENT="$latest_experiment"
+    export LATEST_EXPERIMENT_FROM_S3_XP_LISTING=0
     return 0
   fi
 
   # Fallback: flat model structure (no experiment directories)
-  local model_count
   model_count=$(find "$backup_dir" -mindepth 2 -maxdepth 2 -name "*.pkl" 2>/dev/null | wc -l)
   if [[ "$model_count" -gt 0 ]]; then
     echo "📁 Found $model_count models in flat structure"
@@ -83,16 +142,72 @@ verify_local_backup() {
 # Build a Lambda container image with the latest experiment's models baked in.
 # Isolates the latest experiment by atomically swapping s3_backup/models so the Docker
 # build context contains only that experiment — no rsync, no Windows path workarounds.
+#
+# When deploy_prediction.sh has already run verify_local_backup, LATEST_EXPERIMENT and
+# LATEST_EXPERIMENT_FROM_S3_XP_LISTING are set — this function skips another S3 listing
+# and uses those values. Standalone invocation still discovers the experiment here.
 build_lambda_image_with_models() {
   local models_dir="$ROOT_DIR/s3_backup/models"
   local models_bak=""  # non-empty if we renamed models_dir for isolation
+  local s3_latest s3_rc resolved_experiment target_dir n_pkls
 
-  # Download models from S3 if not present locally
-  if [[ ! -d "$models_dir" ]]; then
-    echo "Local models not found, downloading from S3..."
-    mkdir -p "$models_dir"
-    aws s3 sync "s3://$DATA_LAKE_BUCKET_NAME/models/currency/" "$models_dir/currency/" --region "$REGION"
-    echo "✅ Models downloaded from S3"
+  mkdir -p "$models_dir/currency"
+
+  resolved_experiment="${LATEST_EXPERIMENT:-}"
+  if [[ -n "$resolved_experiment" ]]; then
+    echo "Using latest experiment from deployment prep: $resolved_experiment"
+  else
+    # S3-first: latest experiment folder name from listing only; sync that prefix if missing locally.
+    s3_latest=$(find_latest_experiment_in_s3)
+    s3_rc=$?
+    case $s3_rc in
+      0)
+        resolved_experiment="$s3_latest"
+        export LATEST_EXPERIMENT="$resolved_experiment"
+        export LATEST_EXPERIMENT_FROM_S3_XP_LISTING=1
+        ;;
+      2)
+        echo "❌ S3 listing failed; cannot ensure latest models for the image build." >&2
+        exit 1
+        ;;
+      *)
+        echo "ℹ️  No xp_* prefixes in S3 (or listing empty); using full currency sync if local cache is empty."
+        if [[ ! -d "$models_dir/currency" ]] || [[ -z "$(ls -A "$models_dir/currency" 2>/dev/null)" ]]; then
+          echo "Local currency tree empty, downloading from S3..."
+          if ! aws s3 sync "s3://$DATA_LAKE_BUCKET_NAME/models/currency/" "$models_dir/currency/" --region "$REGION"; then
+            echo "❌ Failed to sync models/currency/ from S3" >&2
+            exit 1
+          fi
+          echo "✅ Models downloaded from S3"
+        fi
+        if resolved_experiment=$(find_latest_experiment); then
+          export LATEST_EXPERIMENT="$resolved_experiment"
+          export LATEST_EXPERIMENT_FROM_S3_XP_LISTING=0
+          echo "📁 Latest experiment (from local tree): $LATEST_EXPERIMENT"
+        fi
+        ;;
+    esac
+  fi
+
+  # Per-experiment S3 prefix sync only when S3 uses xp_* prefixes for this name (see verify_local_backup).
+  if [[ -n "${resolved_experiment:-}" ]] && [[ "${LATEST_EXPERIMENT_FROM_S3_XP_LISTING:-1}" == "1" ]]; then
+    target_dir="$models_dir/currency/$resolved_experiment"
+    # With set -o pipefail, skip find until the directory exists (stale local cache).
+    n_pkls=0
+    if [[ -d "$target_dir" ]]; then
+      n_pkls=$(find "$target_dir" -name "*.pkl" 2>/dev/null | wc -l)
+    fi
+    if [[ ! -d "$target_dir" ]] || [[ "$n_pkls" -eq 0 ]]; then
+      echo "Syncing latest experiment from S3: $resolved_experiment"
+      mkdir -p "$target_dir"
+      if ! aws s3 sync "s3://$DATA_LAKE_BUCKET_NAME/models/currency/$resolved_experiment/" "$target_dir/" --region "$REGION"; then
+        echo "❌ Failed to sync s3://$DATA_LAKE_BUCKET_NAME/models/currency/$resolved_experiment/" >&2
+        exit 1
+      fi
+      echo "✅ Models synced for $resolved_experiment"
+    else
+      echo "✅ Local models match S3 latest ($resolved_experiment); skipping download"
+    fi
   fi
 
   # Isolate the latest experiment if multiple experiments exist
