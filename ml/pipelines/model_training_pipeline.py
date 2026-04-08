@@ -111,7 +111,8 @@ class ModelTrainingPipeline:
             'successful_training': 0,
             'failed_training': 0,
             'insufficient_data': 0,
-            'validation_failures': 0
+            'validation_failures': 0,
+            'skipped_no_validation': 0,
         }
     
     def train_all_currencies(self, data_path: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -818,9 +819,15 @@ class ModelTrainingPipeline:
         val_features: Optional[np.ndarray],
         val_targets: Optional[pd.DataFrame],
         currency_name: str,
+        col_indices: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         """
         Extract (X_val, y_val) for a single horizon from the validation set.
+
+        Args:
+            col_indices: Optional list of column indices to select from val_features.
+                When provided (for horizon-specific feature subsets), only those
+                columns are returned in X_val, matching the training X_h shape.
 
         Returns a dict with keys 'X_val' and 'y_val' (both None if unavailable).
         """
@@ -842,6 +849,8 @@ class ModelTrainingPipeline:
             y_val_raw = val_targets[target_col].values
             valid_mask = ~pd.isna(y_val_raw)
             X_val = val_features[valid_mask]
+            if col_indices is not None:
+                X_val = X_val[:, col_indices]
             y_val = y_val_raw[valid_mask]
 
             if len(X_val) == 0:
@@ -861,6 +870,32 @@ class ModelTrainingPipeline:
             )
             return {'X_val': None, 'y_val': None}
 
+    # Features that are pure short-term oscillators — noisy at 7d scale.
+    _MACD_COLS: frozenset = frozenset({"macd", "macd_signal", "macd_hist"})
+    # Suffix patterns identifying 14d-only features — no predictive value for 1d models.
+    _LONG_RANGE_SUFFIXES: tuple = ("_14d",)
+
+    @staticmethod
+    def _horizon_feature_cols(all_cols: List[str], horizon: int) -> List[str]:
+        """
+        Return the feature subset appropriate for a given prediction horizon.
+
+        - 7d: exclude MACD (calibrated for 1-5d noise, hurts 7d generalisation).
+          14d lags/rolling stats remain — they're the most useful long-range signals.
+        - 1d: exclude 14d lags and rolling windows. These are NaN-heavy for short
+          leagues and carry no signal at a one-day forecast scale.
+        - 3d: use everything (balanced horizon; both short and medium signals useful).
+        """
+        if horizon == 7:
+            exclude = ModelTrainingPipeline._MACD_COLS
+            return [c for c in all_cols if c not in exclude]
+        elif horizon == 1:
+            return [
+                c for c in all_cols
+                if not any(c.endswith(sfx) for sfx in ModelTrainingPipeline._LONG_RANGE_SUFFIXES)
+            ]
+        return list(all_cols)
+
     def _train_all_horizons(
         self,
         currency_name: str,
@@ -873,23 +908,32 @@ class ModelTrainingPipeline:
         """
         Train one model per prediction horizon and save each to its own directory.
 
+        Each horizon receives a filtered feature subset via _horizon_feature_cols():
+        the 7d model excludes MACD; the 1d model excludes 14d-only features.
+        The per-horizon feature list is stored in model_metadata.json so that
+        inference automatically reconstructs the same subset.
+
         Returns a result dict on success, None if every horizon fails.
         """
-        max_nan_ratio = self.config.processing.max_nan_ratio
         horizon_results = {}
 
         for target_col in target_cols:
-            horizon = target_col.replace('target_price_', '')
-            self.logger.debug(f"Training {horizon} model for {currency_name}")
+            horizon_str = target_col.replace('target_price_', '')
+            self.logger.debug(f"Training {horizon_str} model for {currency_name}")
 
-            # Per-horizon NaN row filter on features
-            X_h = data[feature_cols].values
-            row_nan = np.isnan(X_h).sum(axis=1) / X_h.shape[1]
-            keep = row_nan <= max_nan_ratio
-            X_h = X_h[keep]
-            data_h = data[keep].reset_index(drop=True)
+            try:
+                horizon_int = int(horizon_str.replace('d', ''))
+            except ValueError:
+                horizon_int = 0
 
-            y_h = data_h[target_col].values
+            # Select the feature subset for this horizon.
+            h_feature_cols = self._horizon_feature_cols(feature_cols, horizon_int)
+
+            # _build_feature_matrix already removed rows above the NaN threshold;
+            # only filter rows where this horizon's target is NaN.
+            X_h = data[h_feature_cols].values
+            y_h = data[target_col].values
+            horizon = horizon_str
             total = len(y_h)
             nan_count = pd.isna(y_h).sum()
             self.logger.debug(
@@ -907,16 +951,21 @@ class ModelTrainingPipeline:
                 )
                 continue
 
+            # Build column index list so _extract_horizon_val can slice val_features
+            # (a numpy array built from the full feature_cols) to match X_h's shape.
+            col_idx = [feature_cols.index(c) for c in h_feature_cols]
             val = self._extract_horizon_val(
-                target_col, horizon, val_features, val_targets, currency_name
+                target_col, horizon, val_features, val_targets, currency_name,
+                col_indices=col_idx,
             )
 
             training_result = self.model_trainer.train_single_model(
                 X_h, y_h, f"{currency_name}_{horizon}",
                 target_names=[target_col],
-                feature_names=feature_cols,
+                feature_names=h_feature_cols,
                 X_val=val['X_val'],
                 y_val=val['y_val'],
+                train_df=data,
             )
 
             if training_result is not None:
@@ -1009,8 +1058,18 @@ class ModelTrainingPipeline:
                 return None
             data = matrix['data']
 
-            # 4. Fetch current-league validation set (optional).
+            # 4. Fetch current-league validation set.
+            # Skip training entirely if no current-league data is available — models
+            # trained without live-league validation use an inferior temporal split
+            # and are unreliable for current-league inference.
             val = self._fetch_validation_set(currency_name, feature_columns)
+            if val.get('features') is None:
+                self.logger.warning(
+                    f"[{currency_name}] Skipping model training — "
+                    "no current-league validation data available."
+                )
+                self.processing_stats['skipped_no_validation'] += 1
+                return None
 
             # 5. Train per-horizon models and save artifacts.
             horizon_result = self._train_all_horizons(

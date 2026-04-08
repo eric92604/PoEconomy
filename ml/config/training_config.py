@@ -54,7 +54,14 @@ class ModelConfig:
     # Model Selection
     use_lightgbm: bool = True
     use_random_forest: bool = True
-    use_extra_trees: bool = True
+    use_extra_trees: bool = False
+    use_catboost: bool = True
+
+    # Walk-forward cross-validation across leagues for Optuna HP search.
+    # When True and training data contains >= min_leagues_for_walk_forward distinct
+    # leagues, LeagueWalkForwardSplit is used instead of TimeSeriesSplit.
+    use_league_walk_forward: bool = True
+    min_leagues_for_walk_forward: int = 3
 
     # Ensemble Weight Optimization
     optimize_ensemble_weights: bool = True
@@ -110,11 +117,14 @@ class DataConfig:
 
     # Feature engineering windows — all must match between training and inference paths.
     # Rolling window sizes (window=1 is skipped internally — mean/min/max equal raw price)
-    rolling_windows: List[int] = field(default_factory=lambda: [3, 5, 7])
-    # Multi-day momentum periods (period=1 is skipped internally)
+    # 14d window is included for the 7d horizon model; 1d models exclude it via horizon filtering.
+    # 14d rolling stats will be NaN for the first ~2 days of a league — imputed by SimpleImputer.
+    rolling_windows: List[int] = field(default_factory=lambda: [3, 5, 7, 14])
+    # Multi-day momentum pct_change periods (period=1 is skipped internally)
     momentum_periods: List[int] = field(default_factory=lambda: [3, 5, 7])
-    # Explicit price lag look-back periods — highest-impact feature class for tree-based models
-    lag_periods: List[int] = field(default_factory=lambda: [1, 2, 3, 5, 7])
+    # Explicit price lag look-back periods — highest-impact feature class for tree-based models.
+    # price_lag_14d is NaN for the first 14 days of a league and is imputed at inference.
+    lag_periods: List[int] = field(default_factory=lambda: [1, 2, 3, 5, 7, 14])
     # Exponential moving average spans
     ema_spans: List[int] = field(default_factory=lambda: [3, 7, 14])
     # MACD parameters (scaled for ≤60-day league windows; standard 12/26/9 is too wide)
@@ -139,10 +149,6 @@ class ProcessingConfig:
 
     # Scaling
     robust_scaling: bool = True
-
-    # Price transformations
-    log_transform: bool = True
-    log_transform_ratio_threshold: float = 10.0
 
     # Outlier removal (disabled in inference; controlled by profile in training)
     outlier_removal: bool = True

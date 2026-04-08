@@ -11,44 +11,47 @@ training and inference.  All features are designed to be:
 Feature Catalogue
 -----------------
 Time:
-    day_of_week, dow_sin, dow_cos, day_of_month, month, is_weekend,
-    league_day, league_progress, league_age_days,
-    is_supply_shock (league day ≤ 3), league_phase (0–3)
+    month, league_day, league_progress, league_age_days,
+    supply_shock_decay  (exp(-league_day/5), replaces binary is_supply_shock)
 
 Price lags (causal look-back windows):
-    price_lag_{1,2,3,5,7}d
+    price_lag_{1,2,3,5,7,14}d
+    Note: price_lag_14d is NaN for the first 14 league days and is imputed
+    (median) at inference time by the existing SimpleImputer.
 
 Price changes:
-    price_change_1d, price_change_pct_1d, log_return_1d, price_accel_1d,
-    momentum_{3,5,7}d
+    price_change_1d, momentum_{3,5,7}d
 
-Optional log transform:
-    price_log  (only when max/min ratio > log_transform_ratio_threshold)
+Price log (always computed; comparable across currencies):
+    price_log  (log1p(price))
 
 League expanding stats (causal — from league start to current day only):
     price_exp_mean, price_exp_std, price_exp_min, price_exp_max,
-    price_vs_exp_mean, price_exp_zscore, league_recency_rank
+    price_vs_exp_mean, price_exp_zscore, league_recency_rank,
+    price_pct_of_league_high  (price / expanding max),
+    price_pct_of_league_low   (price / expanding min),
+    price_recovery_strength   (Williams %R in league range: 0=low, 1=high),
+    days_since_league_high, days_since_league_low
 
-Rolling windows (default: 3, 5, 7 days):
+Rolling windows (default: 3, 5, 7, 14 days):
     price_mean_{w}d, price_std_{w}d, price_min_{w}d, price_max_{w}d,
-    price_range_{w}d, price_zscore_{w}d, bb_pct_b_{w}d
+    price_zscore_{w}d
+    Note: 14d rolling stats are NaN before day 2 and are imputed at inference.
 
 Exponential moving averages:
     price_ema_{3,7,14}d, price_to_ema7
 
 MACD (fast=5, slow=14, signal=3):
     macd, macd_signal, macd_hist
+    Note: MACD is excluded for the 7d horizon model (short-term oscillator).
 
 Volatility (windows 3, 5, 7):
     price_volatility_{w}d  (CoV = std / mean)
-    volatility_garch_{w}d  (EWM realised vol of log returns)
-    volatility_clustering_{w}d  (mean squared successive difference)
+    volatility_garch_{w}d  (EWM realised vol of percentage returns)
+    volatility_clustering_7d  (mean squared successive difference, 7d only)
 
-Trend (windows 3, 5, 7):
-    trend_strength_{w}d  (OLS slope over rolling window)
-
-RSI (windows 3, 5, 7):
-    momentum_rsi_{w}d  (Wilder RSI)
+Trend (windows >= 7):
+    trend_strength_{w}d  (OLS slope over rolling w-day window)
 """
 
 import pandas as pd
@@ -58,6 +61,11 @@ from dataclasses import dataclass
 
 from ml.config.training_config import DataConfig, ProcessingConfig
 from ml.utils.common_utils import MLLogger
+
+
+def compute_price_log(price: pd.Series) -> pd.Series:
+    """log1p(price) with non-negative clip; used in FE and when backfilling missing columns."""
+    return np.log1p(price.clip(lower=0.0))
 
 
 @dataclass
@@ -234,23 +242,19 @@ class FeatureEngineer:
         """
         Create calendar and league-cycle time features.
 
-        Cyclical sine/cosine encoding for day-of-week avoids the artificial
-        discontinuity between Sunday (6) and Monday (0) that an ordinal integer
-        would introduce.
+        Calendar features are limited to ``month`` — day-of-week and
+        day-of-month carry negligible importance in PoE markets since there
+        is no market close or weekly settlement cycle.
 
-        League phase and supply-shock flags capture the well-known POE
-        early-league price dynamics where supply is constrained for the first
-        few days before content becomes farmable.
+        ``supply_shock_decay`` replaces the old binary ``is_supply_shock``
+        flag with a continuous exponential decay (1.0 on league day 0,
+        ~0.14 by day 10) that captures the well-known early-league supply
+        constraint without an artificial threshold.
         """
         if "date" not in df.columns:
             return df
 
-        df["day_of_week"] = df["date"].dt.dayofweek
-        df["dow_sin"] = np.sin(2.0 * np.pi * df["day_of_week"] / 7.0)
-        df["dow_cos"] = np.cos(2.0 * np.pi * df["day_of_week"] / 7.0)
-        df["day_of_month"] = df["date"].dt.day
         df["month"] = df["date"].dt.month
-        df["is_weekend"] = df["day_of_week"].isin([5, 6]).astype(int)
 
         if "league_name" in df.columns:
             league_starts = df.groupby("league_name")["date"].min()
@@ -265,15 +269,10 @@ class FeatureEngineer:
                 (latest_start - league_starts).dt.days
             )
 
-            # Supply-shock period: prices spike on days 0–3 before content is farmable
-            df["is_supply_shock"] = (df["league_day"] <= 3).astype(int)
-
-            # Ordinal league phase: 0=shock, 1=early, 2=mid, 3=late
-            df["league_phase"] = pd.cut(
-                df["league_day"],
-                bins=[-1, 3, 7, 21, float("inf")],
-                labels=[0, 1, 2, 3],
-            ).astype(float)
+            # Continuous supply-shock decay: prices spike on days 0-3 before
+            # content is farmable, then normalise. exp(-day/5) gives a smooth
+            # decay to ~0.14 by day 10 with no arbitrary threshold.
+            df["supply_shock_decay"] = np.exp(-df["league_day"] / 5.0)
 
         return df
 
@@ -288,39 +287,15 @@ class FeatureEngineer:
         if "price" not in df.columns:
             return df
 
-        # Optional log transform when price range is large
-        if self.processing_config.log_transform:
-            price_min = df["price"].min()
-            if price_min > 0:
-                price_range = df["price"].max() / price_min
-                if price_range > self.processing_config.log_transform_ratio_threshold:
-                    df["price_log"] = np.log1p(df["price"])
+        df["price_log"] = compute_price_log(df["price"])
 
         df = self._add_lag_features(df)
 
-        # 1-day change and percentage change
+        # 1-day change
         if "league_name" in df.columns:
             df["price_change_1d"] = df.groupby("league_name")["price"].diff()
-            df["price_change_pct_1d"] = df.groupby("league_name")["price"].pct_change()
         else:
             df["price_change_1d"] = df["price"].diff()
-            df["price_change_pct_1d"] = df["price"].pct_change()
-
-        # Log return: ln(p_t / p_{t-1}) — more statistically stable than pct_change
-        # for heavy-tailed price distributions
-        if "price_lag_1d" in df.columns:
-            valid = (df["price"] > 0) & (df["price_lag_1d"] > 0)
-            df["log_return_1d"] = np.nan
-            df.loc[valid, "log_return_1d"] = np.log(
-                df.loc[valid, "price"] / df.loc[valid, "price_lag_1d"]
-            )
-
-        # Price acceleration: second difference of price (catches trend reversals)
-        if "price_change_1d" in df.columns:
-            if "league_name" in df.columns:
-                df["price_accel_1d"] = df.groupby("league_name")["price_change_1d"].diff()
-            else:
-                df["price_accel_1d"] = df["price_change_1d"].diff()
 
         # Multi-day momentum (percentage change over N days, within each league)
         momentum_periods: List[int] = getattr(self.config, "momentum_periods", [3, 5, 7])
@@ -384,6 +359,39 @@ class FeatureEngineer:
         df.loc[valid_std, "price_exp_zscore"] = (
             (df.loc[valid_std, "price"] - df.loc[valid_std, "price_exp_mean"])
             / df.loc[valid_std, "price_exp_std"]
+        )
+
+        # Price position relative to league high/low (causal expanding bounds)
+        df["price_pct_of_league_high"] = df["price"] / df["price_exp_max"].replace(0, np.nan)
+        df["price_pct_of_league_low"] = df["price"] / df["price_exp_min"].replace(0, np.nan)
+
+        # Williams %R in league context: 0 = at league low, 1 = at league high.
+        # More directly interpretable than z-score for tree splits.
+        league_range = (df["price_exp_max"] - df["price_exp_min"]).replace(0, np.nan)
+        df["price_recovery_strength"] = (df["price"] - df["price_exp_min"]) / league_range
+
+        # Days since the expanding high/low was last set.
+        # If the league high was yesterday → likely momentum continuation.
+        # If 20 days ago → likely in a sustained downtrend.
+        def _days_since_extreme(prices: pd.Series, mode: str) -> pd.Series:
+            result = np.zeros(len(prices), dtype=float)
+            extreme = prices.iloc[0]
+            last_extreme_pos = 0
+            for i, val in enumerate(prices):
+                if mode == "high" and val >= extreme:
+                    extreme = val
+                    last_extreme_pos = i
+                elif mode == "low" and val <= extreme:
+                    extreme = val
+                    last_extreme_pos = i
+                result[i] = i - last_extreme_pos
+            return pd.Series(result, index=prices.index)
+
+        df["days_since_league_high"] = df.groupby("league_name")["price"].transform(
+            lambda x: _days_since_extreme(x, "high")
+        )
+        df["days_since_league_low"] = df.groupby("league_name")["price"].transform(
+            lambda x: _days_since_extreme(x, "low")
         )
 
         # League recency rank: newer leagues get a lower rank number.
@@ -458,10 +466,6 @@ class FeatureEngineer:
                     window, min_periods=1
                 ).max()
 
-            df[f"price_range_{window}d"] = (
-                df[f"price_max_{window}d"] - df[f"price_min_{window}d"]
-            )
-
             # Z-score (only where std is well-defined and positive)
             std_col = f"price_std_{window}d"
             mean_col = f"price_mean_{window}d"
@@ -472,15 +476,6 @@ class FeatureEngineer:
                 / df.loc[valid_std, std_col]
             )
 
-            # Bollinger Band %B: 0 = at lower band, 0.5 = at midline, 1 = at upper band
-            # Formula: (price - lower_band) / (upper_band - lower_band) = (price - (mean - 2σ)) / (4σ)
-            bandwidth = 4.0 * df[std_col]
-            df[f"bb_pct_b_{window}d"] = np.nan
-            df.loc[valid_std, f"bb_pct_b_{window}d"] = (
-                df.loc[valid_std, "price"]
-                - (df.loc[valid_std, mean_col] - 2.0 * df.loc[valid_std, std_col])
-            ) / bandwidth.loc[valid_std]
-
             self.logger.debug(
                 f"Rolling {window}d: {df[std_col].isna().sum()}/{len(df)} NaN in std"
             )
@@ -488,7 +483,6 @@ class FeatureEngineer:
         self._add_ema_macd_features(df)
         self._add_volatility_features(df)
         self._add_trend_strength_features(df)
-        self._add_momentum_indicators(df)
 
         return df
 
@@ -548,15 +542,16 @@ class FeatureEngineer:
         """
         Add volatility features derived from rolling statistics.
 
-        Three non-overlapping measures are computed per window to avoid
-        redundancy (all previous duplicate columns have been removed):
+        Two measures are computed per window:
 
         - ``price_volatility_{w}d``: coefficient of variation (std / mean).
           Normalised volatility, comparable across different price levels.
-        - ``volatility_garch_{w}d``: EWM realised volatility of log returns.
+        - ``volatility_garch_{w}d``: EWM realised volatility of percentage returns.
           Captures volatility clustering — large moves tend to follow large moves.
-        - ``volatility_clustering_{w}d``: mean squared successive difference.
-          Measures how jagged the price path is within the window.
+
+        ``volatility_clustering_7d`` (mean squared successive difference) is
+        computed for the 7-day window only — the 3d/5d variants had negligible
+        importance and are redundant with the garch measure.
 
         ``price_std_{w}d`` and ``price_mean_{w}d`` (computed in
         ``_engineer_rolling_features``) are reused here to avoid redundant
@@ -604,36 +599,38 @@ class FeatureEngineer:
                 df[f"volatility_garch_{window}d"].fillna(0.0)
             )
 
-            # Volatility clustering: mean squared successive price difference
-            if "league_name" in df.columns:
-                df[f"volatility_clustering_{window}d"] = df.groupby("league_name")[
-                    "price"
-                ].transform(
-                    lambda x, w=window: x.rolling(w, min_periods=2).apply(
-                        lambda y: float(
-                            np.sum(np.diff(y) ** 2) / max(len(y) - 1, 1)
-                        ),
+            # Volatility clustering: mean squared successive price difference.
+            # Only computed for the 7d window — 3d/5d variants are redundant
+            # with volatility_garch and had negligible importance.
+            if window == 7:
+                if "league_name" in df.columns:
+                    df["volatility_clustering_7d"] = df.groupby("league_name")[
+                        "price"
+                    ].transform(
+                        lambda x: x.rolling(7, min_periods=2).apply(
+                            lambda y: float(
+                                np.sum(np.diff(y) ** 2) / max(len(y) - 1, 1)
+                            ),
+                            raw=True,
+                        )
+                    )
+                else:
+                    df["volatility_clustering_7d"] = df["price"].rolling(
+                        7, min_periods=2
+                    ).apply(
+                        lambda y: float(np.sum(np.diff(y) ** 2) / max(len(y) - 1, 1)),
                         raw=True,
                     )
-                )
-            else:
-                df[f"volatility_clustering_{window}d"] = df["price"].rolling(
-                    window, min_periods=2
-                ).apply(
-                    lambda y: float(np.sum(np.diff(y) ** 2) / max(len(y) - 1, 1)),
-                    raw=True,
-                )
-            df[f"volatility_clustering_{window}d"] = (
-                df[f"volatility_clustering_{window}d"].fillna(0.0)
-            )
+                df["volatility_clustering_7d"] = df["volatility_clustering_7d"].fillna(0.0)
 
     def _add_trend_strength_features(self, df: pd.DataFrame) -> None:
         """
         Add linear trend slope features over rolling windows.
 
         The OLS slope of the last *w* prices indicates whether price has been
-        trending up (positive) or down (negative).  Window=1 is excluded
-        because a slope through a single point is undefined.
+        trending up (positive) or down (negative).  Only computed for windows
+        >= 7 — shorter windows (3d, 5d) produced near-zero importance and OLS
+        over 3 data points is statistically unreliable.
         """
         if "price" not in df.columns:
             return
@@ -648,7 +645,7 @@ class FeatureEngineer:
                 return 0.0
 
         rolling_windows: List[int] = getattr(self.config, "rolling_windows", [3, 5, 7])
-        trend_windows = [w for w in rolling_windows if w >= 2]
+        trend_windows = [w for w in rolling_windows if w >= 7]
 
         for window in trend_windows:
             if "league_name" in df.columns:
@@ -664,58 +661,6 @@ class FeatureEngineer:
                     window, min_periods=window
                 ).apply(lambda y, w=window: _polyfit_slope(y, w), raw=True)
 
-    def _add_momentum_indicators(self, df: pd.DataFrame) -> None:
-        """
-        Add RSI momentum indicators using the standard Wilder formula.
-
-        RSI < 30 signals oversold conditions; RSI > 70 signals overbought.
-        Window=1 is excluded (RSI is undefined for a single observation).
-
-        Edge cases:
-        - loss == 0, gain > 0  → fully overbought → RSI = 100
-        - loss == 0, gain == 0 → no movement      → RSI = 50  (neutral)
-        """
-        if "price" not in df.columns:
-            return
-
-        def _rsi(prices: pd.Series, window: int) -> pd.Series:
-            delta = prices.diff()
-            gain = (
-                delta.clip(lower=0.0)
-                .rolling(window=window, min_periods=window)
-                .mean()
-            )
-            loss = (
-                (-delta.clip(upper=0.0))
-                .rolling(window=window, min_periods=window)
-                .mean()
-            )
-            rs = gain / loss.replace(0.0, np.nan)
-            rsi_vals = 100.0 - (100.0 / (1.0 + rs))
-            # When loss == 0: overbought if prices rose, neutral if flat
-            rsi_vals = rsi_vals.where(
-                loss > 0, np.where(gain > 0, 100.0, 50.0)
-            )
-            return rsi_vals.fillna(50.0)
-
-        momentum_periods: List[int] = getattr(self.config, "momentum_periods", [3, 5, 7])
-        rsi_windows = [w for w in momentum_periods if w >= 2]
-
-        for window in rsi_windows:
-            if "league_name" in df.columns:
-                df[f"momentum_rsi_{window}d"] = df.groupby("league_name")[
-                    "price"
-                ].transform(
-                    lambda x, w=window: (
-                        _rsi(x, w) if len(x) >= w else pd.Series(50.0, index=x.index)
-                    )
-                )
-            else:
-                df[f"momentum_rsi_{window}d"] = (
-                    _rsi(df["price"], window)
-                    if len(df) >= window
-                    else pd.Series(50.0, index=df.index)
-                )
 
     def _create_targets(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create forward-shifted price targets for each prediction horizon."""
@@ -817,101 +762,3 @@ class FeatureEngineer:
             )
 
         return df.reset_index(drop=True)
-
-
-# ------------------------------------------------------------------
-# Shared inference utilities
-# ------------------------------------------------------------------
-
-
-def ensure_required_features(
-    df: pd.DataFrame,
-    required_features: List[str],
-    currency: str,
-    logger: Optional[MLLogger] = None,
-) -> pd.DataFrame:
-    """
-    Ensure every feature expected by a trained model is present in *df*.
-
-    Some features are computed conditionally during training (e.g.
-    ``price_log`` is only created when the price range exceeds a threshold).
-    If the inference data does not meet the same condition the feature is
-    absent, causing a column-alignment error.  This function reconstructs
-    any such missing features so that the model's feature matrix is
-    consistent with training.
-
-    For features that cannot be meaningfully reconstructed a neutral fill
-    value of ``0.0`` is used, which is preferable to raising an error during
-    inference.
-
-    Args:
-        df: Dataframe after feature engineering (inference or validation path).
-        required_features: Feature names recorded in ``model_metadata.json``.
-        currency: Identifier used only for log messages.
-        logger: Optional logger; a default instance is created if omitted.
-
-    Returns:
-        Dataframe with any missing required features added.
-    """
-    if logger is None:
-        logger = MLLogger("ensure_required_features")
-
-    df = df.copy()
-    missing = [f for f in required_features if f not in df.columns]
-
-    if not missing:
-        return df
-
-    logger.debug(
-        f"Reconstructing {len(missing)} missing feature(s) for {currency}: {missing}"
-    )
-
-    for feat in missing:
-        try:
-            if feat == "price_log":
-                # Conditionally created during training when price range is large
-                if "price" in df.columns:
-                    df["price_log"] = np.log1p(df["price"].clip(lower=0.0))
-                else:
-                    logger.warning(
-                        f"Cannot reconstruct '{feat}' for {currency}: 'price' not found"
-                    )
-
-            elif feat.startswith("price_lag_") and "price" in df.columns:
-                # Reconstruct a lag feature that may be absent due to version skew
-                try:
-                    lag = int(feat.split("_")[-1].rstrip("d"))
-                except ValueError:
-                    lag = None
-                if lag is not None:
-                    if "league_name" in df.columns:
-                        df[feat] = df.groupby("league_name")["price"].transform(
-                            lambda x, k=lag: x.shift(k)
-                        )
-                    else:
-                        df[feat] = df["price"].shift(lag)
-
-            elif feat == "log_return_1d" and "price" in df.columns:
-                lag_price = (
-                    df.groupby("league_name")["price"].shift(1)
-                    if "league_name" in df.columns
-                    else df["price"].shift(1)
-                )
-                valid = (df["price"] > 0) & (lag_price > 0)
-                df["log_return_1d"] = np.nan
-                df.loc[valid, "log_return_1d"] = np.log(
-                    df.loc[valid, "price"] / lag_price.loc[valid]
-                )
-
-            else:
-                logger.debug(
-                    f"Feature '{feat}' missing for {currency}; filling with 0.0"
-                )
-                df[feat] = 0.0
-
-        except Exception as exc:
-            logger.warning(
-                f"Could not reconstruct feature '{feat}' for {currency}: {exc}"
-            )
-
-    return df
