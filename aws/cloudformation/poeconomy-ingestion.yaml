@@ -4,7 +4,7 @@ Description: PoEconomy Ingestion Lambda functions and DynamoDB tables
 Parameters:
   EnvironmentName:
     Type: String
-    Default: dev
+    Default: production
     AllowedPattern: '[a-zA-Z0-9-]+'
     Description: Environment identifier (e.g. dev, staging, production)
   IngestionScheduleExpression:
@@ -19,12 +19,20 @@ Parameters:
     Type: String
     Default: cron(0 2 * * ? *)
     Description: EventBridge schedule expression for daily price aggregation (daily at 2 AM UTC)
+  SchedulesEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Set to true to enable EventBridge schedules. Default false prevents dev environments from triggering hourly ingestion.
   BaseStackName:
     Type: String
     Description: Name of the base stack to import data lake bucket from
   IngestionContainerImageUri:
     Type: String
     Description: URI of the ingestion container image for Lambda functions
+
+Conditions:
+  SchedulesActive: !Equals [!Ref SchedulesEnabled, "true"]
 
 Resources:
   # DynamoDB Tables for Ingestion
@@ -483,7 +491,7 @@ Resources:
       Name: !Sub 'poeconomy-${EnvironmentName}-ingestion-schedule'
       Description: Schedule for POE Watch ingestion
       ScheduleExpression: !Ref IngestionScheduleExpression
-      State: ENABLED
+      State: !If [SchedulesActive, ENABLED, DISABLED]
       Targets:
         - Arn: !GetAtt IngestionLambdaFunction.Arn
           Id: IngestionTarget
@@ -495,7 +503,7 @@ Resources:
       Name: !Sub 'poeconomy-${EnvironmentName}-league-metadata-schedule'
       Description: Schedule for league metadata ingestion
       ScheduleExpression: !Ref LeagueMetadataScheduleExpression
-      State: ENABLED
+      State: !If [SchedulesActive, ENABLED, DISABLED]
       Targets:
         - Arn: !GetAtt LeagueMetadataLambdaFunction.Arn
           Id: LeagueMetadataTarget
@@ -507,7 +515,7 @@ Resources:
       Name: !Sub 'poeconomy-${EnvironmentName}-daily-aggregation-schedule'
       Description: Schedule for daily price aggregation
       ScheduleExpression: !Ref DailyAggregationScheduleExpression
-      State: ENABLED
+      State: !If [SchedulesActive, ENABLED, DISABLED]
       Targets:
         - Arn: !GetAtt DailyAggregationLambdaFunction.Arn
           Id: DailyAggregationTarget

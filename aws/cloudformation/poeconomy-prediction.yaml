@@ -4,7 +4,7 @@ Description: PoEconomy Prediction Refresh Lambda function and DynamoDB table
 Parameters:
   EnvironmentName:
     Type: String
-    Default: dev
+    Default: production
     AllowedPattern: '[a-zA-Z0-9-]+'
     Description: Environment identifier (e.g. dev, staging, production)
   BaseStackName:

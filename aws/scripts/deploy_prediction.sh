@@ -6,6 +6,8 @@
 # Load shared configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/shared_config.sh"
+source "$SCRIPT_DIR/lib/models.sh"
+source "$SCRIPT_DIR/lib/ecr.sh"
 
 print_deployment_info
 
@@ -19,8 +21,7 @@ ensure_prerequisites
 # Verify models in S3 for Lambda container
 verify_models_in_s3
 
-# Check for local backup and set MODELS_AVAILABLE
-echo "Checking for local model backup..."
+# Validates local cache, lists S3 once for xp_* latest, exports LATEST_EXPERIMENT* for the image build below.
 if verify_local_backup; then
   echo "✅ Local models available"
   export MODELS_AVAILABLE="true"
@@ -34,6 +35,7 @@ echo "Building and pushing container images..."
 build_and_push_lambda_image
 
 # Deploy prediction infrastructure
+# All parameters for poeconomy-prediction.yaml
 echo "Deploying prediction infrastructure..."
 if ! deploy_cloudformation_stack "$PREDICTION_STACK_NAME" "$PREDICTION_TEMPLATE" \
   "EnvironmentName=$ENVIRONMENT" \

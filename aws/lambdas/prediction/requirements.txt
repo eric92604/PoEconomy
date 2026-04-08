@@ -1,4 +1,4 @@
-# PoEconomy Lambda Prediction requirements
+# PoEconomy Lambda Prediction requirements (pins match aws/training/container/requirements.txt)
 
 # Core ML Libraries
 numpy==1.24.3

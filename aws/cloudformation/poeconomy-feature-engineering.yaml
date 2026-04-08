@@ -2,6 +2,11 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: PoEconomy feature engineering infrastructure (Fargate Spot) - uploads to base data lake
 
 Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedPattern: '[a-zA-Z0-9-]+'
+    Description: Environment identifier (e.g. dev, staging, production)
   TaskTimeoutMinutes:
     Type: Number
     Default: 60
@@ -31,6 +36,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-vpc'
+        - Key: Environment
+          Value: !Ref EnvironmentName
         - Key: App
           Value: PoEconomy
 
@@ -44,6 +51,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-public-subnet-a'
+        - Key: Environment
+          Value: !Ref EnvironmentName
         - Key: App
           Value: PoEconomy
 
@@ -57,6 +66,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-public-subnet-b'
+        - Key: Environment
+          Value: !Ref EnvironmentName
         - Key: App
           Value: PoEconomy
 
@@ -66,6 +77,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-igw'
+        - Key: Environment
+          Value: !Ref EnvironmentName
         - Key: App
           Value: PoEconomy
 
@@ -82,6 +95,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-public-rt'
+        - Key: Environment
+          Value: !Ref EnvironmentName
         - Key: App
           Value: PoEconomy
 
@@ -114,6 +129,8 @@ Resources:
         - IpProtocol: -1
           CidrIp: 0.0.0.0/0
       Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
         - Key: App
           Value: PoEconomy
 
@@ -123,6 +140,8 @@ Resources:
       LogGroupName: !Sub '/aws/ecs/${AWS::StackName}'
       RetentionInDays: 14
       Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
         - Key: App
           Value: PoEconomy
     DeletionPolicy: Delete
@@ -139,6 +158,8 @@ Resources:
         - CapacityProvider: FARGATE_SPOT
           Weight: 1
       Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
         - Key: App
           Value: PoEconomy
 
@@ -184,6 +205,8 @@ Resources:
                     - 'arn:aws:s3:::${DataLakeBucketName}/*'
                     - DataLakeBucketName: !Ref DataLakeBucketName
       Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
         - Key: App
           Value: PoEconomy
 
@@ -209,6 +232,8 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: ecs
           Environment:
+            - Name: ENVIRONMENT
+              Value: !Ref EnvironmentName
             - Name: AWS_DEFAULT_REGION
               Value: !Ref AWS::Region
             - Name: DATA_LAKE_BUCKET
@@ -221,6 +246,8 @@ Resources:
               Value: 'true'
           StopTimeout: 60
       Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
         - Key: App
           Value: PoEconomy
 
