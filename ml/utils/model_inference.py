@@ -22,7 +22,6 @@ from ml.config.inference_config import InferenceConfig, get_inference_config
 from ml.utils.data_processing import DataProcessor
 from ml.utils.data_sources import create_data_source, DataSourceConfig, BaseDataSource
 from ml.utils.common_utils import MLLogger
-from ml.utils.feature_engineering import ensure_required_features
 
 HORIZON_SUFFIXES = {"1d", "3d", "7d", "14d", "30d"}
 
@@ -469,9 +468,7 @@ class ModelPredictor:
         # Require stored feature names in model metadata for exact feature matching
         if not model_metadata or 'feature_names' not in model_metadata:
             error_msg = (
-                f"Model metadata missing 'feature_names' for {currency} ({horizon}). "
-                f"This model was trained before feature names were stored in metadata. "
-                f"Please retrain the model to include feature names in metadata."
+                f"Model metadata must define 'feature_names' for {currency} ({horizon})."
             )
             self.logger.error(error_msg)
             raise ValueError(error_msg)
@@ -482,55 +479,23 @@ class ModelPredictor:
             extra={"currency": currency, "horizon": horizon}
         )
         
-        # Verify all stored features exist in processed data
-        available_features = []
-        missing_features = []
-        for feat_name in stored_feature_names:
-            if feat_name in processed_data.columns:
-                available_features.append(feat_name)
-            else:
-                missing_features.append(feat_name)
-        
-        # Create missing conditional features that were used during training
-        # This handles cases where features like price_log are conditionally created
-        # based on data characteristics that may differ between training and inference
+        missing_features = [
+            f for f in stored_feature_names if f not in processed_data.columns
+        ]
         if missing_features:
-            processed_data = ensure_required_features(
-                processed_data, 
-                stored_feature_names,  # Pass all required features, function will filter
-                currency,
-                logger=self.logger
-            )
-            
-            # Re-check after attempting to create missing features
-            still_missing = []
-            for feat_name in missing_features:
-                if feat_name in processed_data.columns:
-                    available_features.append(feat_name)
-                    self.logger.info(f"Created missing conditional feature: {feat_name} for {currency} ({horizon})")
-                else:
-                    still_missing.append(feat_name)
-            
-            if still_missing:
-                error_msg = (
-                    f"Missing {len(still_missing)} stored features in processed data for {currency} ({horizon}). "
-                    f"This indicates a mismatch between training and inference feature engineering. "
-                    f"Missing features: {still_missing[:10]}{'...' if len(still_missing) > 10 else ''}"
-                )
-                self.logger.error(error_msg, extra={"missing_features": still_missing})
-                raise ValueError(error_msg)
-        
-        if not available_features:
             error_msg = (
-                f"None of the stored feature names are available in processed data for {currency} ({horizon}). "
-                f"This indicates a critical mismatch between training and inference feature engineering."
+                f"Processed data is missing {len(missing_features)} feature column(s) required by model "
+                f"metadata for {currency} ({horizon}). Retrain the model or align the feature pipeline. "
+                f"Missing: {missing_features[:15]}{'...' if len(missing_features) > 15 else ''}"
             )
-            self.logger.error(error_msg)
+            self.logger.error(error_msg, extra={"missing_features": missing_features})
             raise ValueError(error_msg)
-        
-        # Use stored feature names exactly as they were during training
-        feature_columns = available_features
-        self.logger.debug(f"Using {len(feature_columns)} features from stored metadata (expected {len(stored_feature_names)})")
+
+        feature_columns = list(stored_feature_names)
+        self.logger.debug(
+            f"Using {len(feature_columns)} features from stored metadata",
+            extra={"currency": currency, "horizon": horizon},
+        )
         
         return processed_data, feature_columns
 

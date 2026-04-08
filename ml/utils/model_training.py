@@ -3,6 +3,7 @@ Model training utilities optimized for multi-core systems.
 """
 
 import numpy as np
+import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any, Union
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -408,7 +409,7 @@ class RandomForestModel(BaseModel):
 
 class ExtraTreesModel(BaseModel):
     """Extra Trees (Extremely Randomized Trees) model implementation."""
-    
+
     def _create_model(self, trial: Optional[optuna.Trial] = None) -> ExtraTreesRegressor:
         """Create Extra Trees model."""
         if trial is not None:
@@ -427,18 +428,64 @@ class ExtraTreesModel(BaseModel):
                 'min_samples_leaf': 2,
                 'max_features': 'sqrt',
             }
-        
+
         # Use configured model_n_jobs from environment variable (MODEL_N_JOBS)
         params.update({
             'random_state': self.config.random_state,
             'n_jobs': self.config.model_n_jobs,
         })
-        
+
         return ExtraTreesRegressor(**params)
-    
+
     def get_model_type(self) -> str:
         """Get model type identifier."""
         return "extra_trees"
+
+
+class CatBoostModel(BaseModel):
+    """
+    CatBoost gradient boosting model implementation.
+
+    CatBoost with ordered boosting resists overfitting on small tabular datasets,
+    making it a better fit than ExtraTrees for per-currency training sets that
+    typically have 60–200 samples. Replaces ExtraTrees in the ensemble.
+    """
+
+    def _create_model(self, trial: Optional[optuna.Trial] = None):
+        """Create CatBoost model with optional Optuna hyperparameter search."""
+        from catboost import CatBoostRegressor  # lazy import — optional dependency
+
+        if trial is not None:
+            params = {
+                'iterations': trial.suggest_int('cb_iterations', 200, 1000),
+                'depth': trial.suggest_int('cb_depth', 4, 10),
+                'learning_rate': trial.suggest_float('cb_lr', 0.01, 0.3, log=True),
+                'l2_leaf_reg': trial.suggest_float('cb_l2', 1.0, 10.0),
+                'bagging_temperature': trial.suggest_float('cb_bagging_temp', 0.0, 1.0),
+                'random_strength': trial.suggest_float('cb_random_strength', 0.0, 1.0),
+            }
+        else:
+            params = {
+                'iterations': 500,
+                'depth': 6,
+                'learning_rate': 0.05,
+                'l2_leaf_reg': 3.0,
+                'bagging_temperature': 0.5,
+                'random_strength': 0.5,
+            }
+
+        params.update({
+            'cat_features': [],  # all features are numeric; update if categoricals are added
+            'random_seed': self.config.random_state,
+            'verbose': 0,
+            'thread_count': self.config.model_n_jobs,
+        })
+
+        return CatBoostRegressor(**params)
+
+    def get_model_type(self) -> str:
+        """Get model type identifier."""
+        return "catboost"
 
 
 class EnsembleModel:
@@ -649,9 +696,61 @@ class EnsembleModel:
         return "ensemble"
 
 
+class LeagueWalkForwardSplit:
+    """
+    Walk-forward cross-validation splits by league boundary.
+
+    For N historical leagues (sorted chronologically), generates up to N-2 folds:
+        fold 0: train=league_0,           val=league_1
+        fold 1: train=league_0+league_1,  val=league_2
+        ...
+
+    The most recent (current) league is excluded from folds — it is reserved for
+    early stopping and ensemble weight optimisation. This prevents future-leakage
+    into the HP search objective.
+
+    Falls back gracefully: if fewer than min_leagues distinct leagues are found in
+    the training DataFrame, is_usable() returns False and TimeSeriesSplit is used.
+
+    Requires a 'league_name' column in the DataFrame and uses the first observed
+    date per league to determine chronological order.
+    """
+
+    def __init__(self, df: pd.DataFrame, min_leagues: int = 3) -> None:
+        self.df = df.reset_index(drop=True)
+        self.min_leagues = min_leagues
+        if 'league_name' in df.columns and 'date' in df.columns:
+            league_first_dates = df.groupby('league_name')['date'].min().sort_values()
+            self._leagues: List[str] = league_first_dates.index.tolist()
+        else:
+            self._leagues = []
+
+    def is_usable(self) -> bool:
+        """Return True when enough leagues exist to generate at least one fold."""
+        return len(self._leagues) >= self.min_leagues
+
+    def split(self) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """
+        Generate (train_idx, val_idx) pairs.
+
+        The last league in self._leagues is treated as the current league and is
+        excluded from folds. Only historical leagues are used for walk-forward CV.
+        """
+        historical = self._leagues[:-1]  # exclude current (most recent) league
+        folds: List[Tuple[np.ndarray, np.ndarray]] = []
+        for i in range(1, len(historical)):
+            train_leagues = set(historical[:i])
+            val_league = historical[i]
+            train_idx = self.df.index[self.df['league_name'].isin(train_leagues)].to_numpy()
+            val_idx = self.df.index[self.df['league_name'] == val_league].to_numpy()
+            if len(train_idx) >= 10 and len(val_idx) >= 5:
+                folds.append((train_idx, val_idx))
+        return folds
+
+
 class HyperparameterOptimizer:
     """Hyperparameter optimizer using Optuna with per-currency optimization."""
-    
+
     def __init__(
         self,
         config: ModelConfig,
@@ -659,7 +758,7 @@ class HyperparameterOptimizer:
     ):
         self.config = config
         self.logger = logger
-        
+
         # Configure Optuna to be less verbose
         optuna.logging.set_verbosity(optuna.logging.WARNING)
     
@@ -671,58 +770,90 @@ class HyperparameterOptimizer:
         X_val: np.ndarray,
         y_val: np.ndarray,
         currency: str,
-        cv_folds: int = 5
+        cv_folds: int = 5,
+        train_df: Optional[pd.DataFrame] = None,
     ) -> Dict[str, Any]:
-        """Optimize hyperparameters for a model."""
-        
+        """
+        Optimize hyperparameters for a model.
+
+        When train_df is provided and contains enough distinct leagues, the Optuna
+        objective uses LeagueWalkForwardSplit for cross-validation instead of the
+        single current-league validation set. This prevents HP overfitting to one
+        league's price dynamics and generalises better across league resets.
+        """
+        use_walk_forward = getattr(self.config, 'use_league_walk_forward', True)
+        min_wf_leagues = getattr(self.config, 'min_leagues_for_walk_forward', 3)
+
+        # Pre-compute walk-forward folds outside the trial function (expensive).
+        wf_folds: List[Tuple[np.ndarray, np.ndarray]] = []
+        if use_walk_forward and train_df is not None:
+            splitter = LeagueWalkForwardSplit(train_df, min_leagues=min_wf_leagues)
+            if splitter.is_usable():
+                wf_folds = splitter.split()
+                if self.logger and wf_folds:
+                    self.logger.debug(
+                        f"Using LeagueWalkForwardSplit for {currency}: "
+                        f"{len(wf_folds)} fold(s)"
+                    )
+
         def objective(trial: Any) -> float:
             # Create model with trial parameters
             model = model_class(self.config, self.logger)
             model._is_optuna_trial = True  # Mark as Optuna trial to suppress logging
             model.model = model._create_model(trial)
-            
-            # Use provided validation data if available, otherwise use cross-validation
+
+            # Priority 1: League walk-forward CV across historical leagues.
+            # Evaluates HP on held-out leagues → better generalisation than single-league val.
+            if wf_folds:
+                scores = []
+                for train_idx, val_idx in wf_folds:
+                    X_train_fold = X[train_idx]
+                    y_train_fold = y[train_idx]
+                    X_val_fold = X[val_idx]
+                    y_val_fold = y[val_idx]
+                    model.fit(X_train_fold, y_train_fold)
+                    y_pred = model.predict(X_val_fold)
+                    scores.append(float(mean_absolute_error(y_val_fold, y_pred)))
+                return float(np.mean(scores))
+
+            # Priority 2: Use current-league validation data directly.
             if X_val is not None and y_val is not None and len(X_val) >= 5:
-                # Use provided validation data with early stopping
                 model.fit(X, y, X_val, y_val)
                 y_pred = model.predict(X_val)
                 mae = mean_absolute_error(y_val, y_pred)
                 return float(mae)
-            else:
-                # Fall back to time series cross-validation with proper validation
-                min_samples_per_fold = 10
-                max_folds = max(2, len(X) // min_samples_per_fold)  # At least 2 folds
-                n_splits = min(cv_folds, max_folds)
-                
-                if n_splits < 2:
-                    if self.logger:
-                        self.logger.warning(f"Insufficient data for cross-validation: {len(X)} samples, need at least {min_samples_per_fold * 2}. Using simple train/validation split.")
-                    # Use simple train/validation split instead
-                    split_idx = int(len(X) * 0.8)
-                    X_train_fold, X_val_fold = X[:split_idx], X[split_idx:]
-                    y_train_fold, y_val_fold = y[:split_idx], y[split_idx:]
-                    
-                    model.fit(X_train_fold, y_train_fold)
-                    y_pred = model.predict(X_val_fold)
-                    mae = mean_absolute_error(y_val_fold, y_pred)
-                    return float(mae)
-                
-                tscv = TimeSeriesSplit(n_splits=n_splits)
-                scores = []
-                
-                for train_idx, val_idx in tscv.split(X):
-                    X_train_fold, X_val_fold = X[train_idx], X[val_idx]
-                    y_train_fold, y_val_fold = y[train_idx], y[val_idx]
-                    
-                    # Train and evaluate
-                    model.fit(X_train_fold, y_train_fold)
-                    y_pred = model.predict(X_val_fold)
-                    
-                    # Calculate MAE as objective
-                    mae = mean_absolute_error(y_val_fold, y_pred)
-                    scores.append(mae)
-                
-                return float(np.mean(scores))
+
+            # Priority 3: Fall back to time series cross-validation.
+            min_samples_per_fold = 10
+            max_folds = max(2, len(X) // min_samples_per_fold)
+            n_splits = min(cv_folds, max_folds)
+
+            if n_splits < 2:
+                if self.logger:
+                    self.logger.warning(
+                        f"Insufficient data for cross-validation: {len(X)} samples, "
+                        f"need at least {min_samples_per_fold * 2}. "
+                        "Using simple train/validation split."
+                    )
+                split_idx = int(len(X) * 0.8)
+                X_train_fold, X_val_fold = X[:split_idx], X[split_idx:]
+                y_train_fold, y_val_fold = y[:split_idx], y[split_idx:]
+                model.fit(X_train_fold, y_train_fold)
+                y_pred = model.predict(X_val_fold)
+                mae = mean_absolute_error(y_val_fold, y_pred)
+                return float(mae)
+
+            tscv = TimeSeriesSplit(n_splits=n_splits)
+            scores = []
+            for train_idx, val_idx in tscv.split(X):
+                X_train_fold, X_val_fold = X[train_idx], X[val_idx]
+                y_train_fold, y_val_fold = y[train_idx], y[val_idx]
+                model.fit(X_train_fold, y_train_fold)
+                y_pred = model.predict(X_val_fold)
+                mae = mean_absolute_error(y_val_fold, y_pred)
+                scores.append(mae)
+
+            return float(np.mean(scores))
         
         # Make study name unique per currency and model type to avoid conflicts
         study_name = f"{model_class.__name__}_{currency}_{self.config.random_state}"
@@ -888,7 +1019,8 @@ class ModelTrainer:
         target_names: Optional[List[str]] = None,
         feature_names: Optional[List[str]] = None,
         X_val: Optional[np.ndarray] = None,
-        y_val: Optional[np.ndarray] = None
+        y_val: Optional[np.ndarray] = None,
+        train_df: Optional[pd.DataFrame] = None,
     ) -> TrainingResult:
         """Train a single model with configured parameters."""
         start_time = time.time()
@@ -955,7 +1087,7 @@ class ModelTrainer:
         # Train model (validation data is always available now)
         training_history = None
         if model_type == "ensemble":
-            model: Any = self._train_ensemble_model(X_train_split, y_train_split, X_val, y_val, currency, X_weight_opt, y_weight_opt)
+            model: Any = self._train_ensemble_model(X_train_split, y_train_split, X_val, y_val, currency, X_weight_opt, y_weight_opt, train_df=train_df)
             # Get training history from ensemble
             if hasattr(model, 'models'):
                 training_history = {}
@@ -969,12 +1101,17 @@ class ModelTrainer:
             if hasattr(model, 'training_history'):
                 training_history = model.training_history
         
-        # Make predictions and calculate metrics on validation set
-        y_pred = model.predict(X_val)
-        metrics = ModelMetrics.from_predictions(y_val, y_pred, target_names)
-        
+        # Evaluate on the held-out weight-opt split so metrics are not contaminated
+        # by the data used for Optuna hyperparameter selection and LightGBM early
+        # stopping.  Fall back to X_val only when the weight-opt split is empty
+        # (very small datasets that hit the 60/20/20 fallback path).
+        eval_X = X_weight_opt if len(X_weight_opt) > 0 else X_val
+        eval_y = y_weight_opt if len(X_weight_opt) > 0 else y_val
+        y_pred = model.predict(eval_X)
+        metrics = ModelMetrics.from_predictions(eval_y, y_pred, target_names)
+
         n_train = len(y_train_split)
-        n_features = X_val.shape[1]
+        n_features = X_train_split.shape[1]
 
         feature_importance = model.get_feature_importance(feature_names=feature_names)
         training_time = time.time() - start_time
@@ -1025,10 +1162,14 @@ class ModelTrainer:
         X_val: np.ndarray,
         y_val: np.ndarray,
         currency: str,
+        train_df: Optional[pd.DataFrame] = None,
     ) -> BaseModel:
         """
         Instantiate *model_class* and, when optimisation is enabled, tune its
         hyperparameters.  Falls back to default parameters on any error.
+
+        train_df: Optional full training DataFrame with league_name and date
+            columns used by LeagueWalkForwardSplit in the Optuna objective.
         """
         model = model_class(self.config, self.logger)
         if self.config.n_hyperparameter_trials > 1:
@@ -1040,6 +1181,7 @@ class ModelTrainer:
                 params = self.hyperparameter_optimizer.optimize(
                     model_class, X_train, y_train, X_val, y_val,
                     currency, self.config.cv_folds,
+                    train_df=train_df,
                 )
                 model.model = model._create_model_with_params(params)
                 if self.logger:
@@ -1066,6 +1208,7 @@ class ModelTrainer:
         currency: str,
         X_weight_opt: Optional[np.ndarray] = None,
         y_weight_opt: Optional[np.ndarray] = None,
+        train_df: Optional[pd.DataFrame] = None,
     ) -> EnsembleModel:
         """Train ensemble model using per-currency hyperparameter optimization."""
         if self.config.n_hyperparameter_trials <= 1 and self.logger:
@@ -1076,17 +1219,21 @@ class ModelTrainer:
         enabled_classes = [
             (self.config.use_lightgbm, LightGBMModel),
             (self.config.use_random_forest, RandomForestModel),
+            (getattr(self.config, 'use_catboost', False), CatBoostModel),
             (self.config.use_extra_trees, ExtraTreesModel),
         ]
         models: List[BaseModel] = [
-            self._build_base_model(cls, X_train, y_train, X_val, y_val, currency)
+            self._build_base_model(cls, X_train, y_train, X_val, y_val, currency, train_df=train_df)
             for enabled, cls in enabled_classes
             if enabled
         ]
-        
-        # Ensure we have the three required models
+
+        # Ensure we have at least one model
         if len(models) == 0:
-            raise ValueError("No models were created for ensemble. Ensure use_lightgbm, use_random_forest, and use_extra_trees are enabled.")
+            raise ValueError(
+                "No models were created for ensemble. "
+                "Enable at least one of: use_lightgbm, use_random_forest, use_catboost."
+            )
         
         if self.logger:
             model_types = [model.get_model_type() for model in models]
@@ -1162,9 +1309,15 @@ class ModelTrainer:
                 )
                 model = ExtraTreesModel(self.config, self.logger)
                 model.model = model._create_model_with_params(params)
+            elif model_type == "catboost":
+                params = optimizer.optimize(
+                    CatBoostModel, X_train, y_train, X_val, y_val, currency, self.config.cv_folds
+                )
+                model = CatBoostModel(self.config, self.logger)
+                model.model = model._create_model_with_params(params)
             else:
                 raise ValueError(f"Unknown model type: {model_type}")
-            
+
             if self.logger:
                 self.logger.debug(f"{model_type} optimized params: {params}")
         else:
@@ -1175,6 +1328,8 @@ class ModelTrainer:
                 model = RandomForestModel(self.config, self.logger)
             elif model_type == "extra_trees":
                 model = ExtraTreesModel(self.config, self.logger)
+            elif model_type == "catboost":
+                model = CatBoostModel(self.config, self.logger)
             else:
                 raise ValueError(f"Unknown model type: {model_type}")
             
