@@ -4,7 +4,7 @@
  * Investment Currency Table - Shows only relevant profit column for selected timeframe
  */
 
-import React, { useState, useMemo, useCallback, memo } from "react";
+import React, { useState, useMemo, useCallback, useEffect, memo } from "react";
 import {
   Table,
   TableBody,
@@ -46,8 +46,15 @@ export const InvestmentCurrencyTable = memo(function InvestmentCurrencyTable({
   timeframe,
   expandedContent,
 }: InvestmentCurrencyTableProps) {
-  const [sortField, setSortField] = useState<CurrencySortField>("profit_1d");
+  const [sortField, setSortField] = useState<CurrencySortField>(() =>
+    `profit_${timeframe}` as CurrencySortField
+  );
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+
+  useEffect(() => {
+    setSortField(`profit_${timeframe}` as CurrencySortField);
+    setSortDirection("desc");
+  }, [timeframe]);
 
   // Sort currencies (filtering is done at parent level)
   const sortedCurrencies = useMemo(() => {

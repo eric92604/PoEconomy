@@ -268,16 +268,8 @@ export default function InvestmentsPage() {
       return prediction; // Include all currencies with predictions, regardless of profit direction
     });
 
-    // Then apply additional filters
-    const filtered = filterCurrencies(timeframeFiltered, filters);
-
-    // Sort by profit percentage (highest to lowest, so negative profits appear at the bottom)
-    return filtered.sort((a, b) => {
-      const horizon: "1d" | "3d" | "7d" = selectedTab === "short" ? "1d" : selectedTab === "medium" ? "3d" : "7d";
-      const aProfit = a.predictions[horizon]?.price_change_percent || 0;
-      const bProfit = b.predictions[horizon]?.price_change_percent || 0;
-      return bProfit - aProfit;
-    });
+    // Then apply additional filters (row order is applied in InvestmentCurrencyTable)
+    return filterCurrencies(timeframeFiltered, filters);
   }, [currenciesWithPredictions, selectedTab, filters]);
 
   const isLoading = currenciesLoading || leaguesLoading || predictionsLoading;
