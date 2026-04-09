@@ -119,7 +119,9 @@ All endpoints proxied through Cloudflare Worker with edge caching.
 - **GET /predict/currency** - Currency predictions (cached 10min)
 - **GET /predict/latest** - Latest predictions with filtering (cached 10min)
 - **GET /prices/live** - Live price data (cached 5min)
-- **GET /prices/historical** - Historical price data
+- **GET /prices/history** - Historical price data
+- **GET /prices/leagues** - Historical league list from archive table
+- **GET /prices/league-history** - Cross-league historical comparison series
 
 **Rate Limiting**: 60 requests/minute per IP
 

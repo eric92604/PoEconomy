@@ -35,6 +35,7 @@ import { useLeagues, useHistoricalPrices, useBatchPredictions, useLatestPredicti
 import { useQueryClient } from "@tanstack/react-query";
 import { PriceChart } from "@/components/charts";
 import { cn } from "@/lib/utils";
+import { LATEST_PREDICTIONS_HORIZONS } from "@/lib/constants/predictions";
 import type { ChartDataPoint, CurrencyFilters } from "@/types";
 
 export default function PricesPage() {
@@ -71,7 +72,7 @@ export default function PricesPage() {
   const { data: latestPredictionsData, isFetching: latestPredictionsFetching } = useLatestPredictions(
     {
       league: selectedLeague,
-      horizons: ["1d"],
+      horizons: [...LATEST_PREDICTIONS_HORIZONS],
       limit: 500,
       enabled: !!selectedLeague,
     }

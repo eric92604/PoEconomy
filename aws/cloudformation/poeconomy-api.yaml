@@ -252,21 +252,21 @@ Resources:
     Properties:
       RestApiId: !Ref PredictionApiRestApi
       ParentId: !Ref PricesResource
-      PathPart: historical
+      PathPart: history
 
   LeagueHistoricalResource:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId: !Ref PredictionApiRestApi
       ParentId: !Ref PricesResource
-      PathPart: league-historical
+      PathPart: league-history
 
   LeagueListResource:
     Type: AWS::ApiGateway::Resource
     Properties:
       RestApiId: !Ref PredictionApiRestApi
       ParentId: !Ref PricesResource
-      PathPart: league-list
+      PathPart: leagues
 
   # API Gateway Methods
   HealthGetMethod:
