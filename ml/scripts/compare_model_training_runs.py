@@ -1,6 +1,11 @@
 """
 Compare two or more on-disk model training runs (metadata + training history only).
 
+By default, comparisons are **anchored to the latest run**: only model keys present in the
+last ``--runs`` directory are used for pairwise metrics, run-level means, and feature churn
+(so aggregates are comparable across experiments). Pass ``--no-anchor-to-latest`` for the
+legacy behavior (all overlapping keys per pair).
+
 Install plotting deps: ``pip install -r ml/requirements.txt -r ml/requirements-analysis.txt``
 
 Two-run example (backward-compatible)::
@@ -41,6 +46,7 @@ from ml.utils.model_run_comparison import (
     aggregate_run_metrics,
     build_comparison_frame,
     build_feature_evolution_frame,
+    filter_records_to_model_keys,
     load_training_history,
     mean_normalized_importance_by_feature,
     records_by_key,
@@ -432,11 +438,17 @@ def _run_pairwise_comparison(
     max_lc_models: int,
     rng: np.random.Generator,
     logger: Any,
+    anchor_model_keys: frozenset[str] | None = None,
+    anchor_run_label: str | None = None,
 ) -> tuple[dict[str, ModelMetadataRecord], dict[str, ModelMetadataRecord], pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Execute a full pairwise comparison between two run directories.
 
     Writes all outputs (CSVs, figures, REPORT.md) into ``out_dir``.
+
+    When ``anchor_model_keys`` is set, both sides are restricted to those keys so metrics
+    match the cohort produced by the latest training run (intersected with keys present in
+    each run).
 
     Returns:
         Tuple of ``(base_recs, cand_recs, comparison_df, summary_overall, summary_horizon)``.
@@ -448,6 +460,10 @@ def _run_pairwise_comparison(
     with logger.log_operation("load_metadata"):
         base_recs = records_by_key(baseline_root)
         cand_recs = records_by_key(candidate_root)
+
+    if anchor_model_keys is not None:
+        base_recs = filter_records_to_model_keys(base_recs, anchor_model_keys)
+        cand_recs = filter_records_to_model_keys(cand_recs, anchor_model_keys)
 
     keys_b = set(base_recs.keys())
     keys_c = set(cand_recs.keys())
@@ -502,7 +518,18 @@ def _run_pairwise_comparison(
             continue
         _plot_topk_pair(base_recs[key], cand_recs[key], key, pair_dir / f"pair_{_safe_filename_fragment(key)}.png", top_k=top_k)
 
-    _write_pairwise_report_markdown(out_dir, baseline_root, candidate_root, len(matched), len(only_b), len(only_c), summary_overall, summary_horizon)
+    _write_pairwise_report_markdown(
+        out_dir,
+        baseline_root,
+        candidate_root,
+        len(matched),
+        len(only_b),
+        len(only_c),
+        summary_overall,
+        summary_horizon,
+        anchor_run_label=anchor_run_label,
+        n_anchor_keys=len(anchor_model_keys) if anchor_model_keys is not None else None,
+    )
 
     logger.info(
         "Pairwise comparison complete",
@@ -513,6 +540,8 @@ def _run_pairwise_comparison(
             "n_matched": len(matched),
             "n_baseline_only": len(only_b),
             "n_candidate_only": len(only_c),
+            "anchored_to_latest": anchor_model_keys is not None,
+            "n_anchor_keys": len(anchor_model_keys) if anchor_model_keys is not None else None,
         },
     )
     return base_recs, cand_recs, comp, summary_overall, summary_horizon
@@ -527,6 +556,9 @@ def _write_pairwise_report_markdown(
     n_cand_only: int,
     summary_overall: pd.DataFrame,
     summary_horizon: pd.DataFrame,
+    *,
+    anchor_run_label: str | None = None,
+    n_anchor_keys: int | None = None,
 ) -> None:
     disclaimer = textwrap.dedent(
         """
@@ -548,6 +580,15 @@ def _write_pairwise_report_markdown(
         f"- **Matched models:** {n_match}",
         f"- **Baseline-only keys:** {n_base_only}",
         f"- **Candidate-only keys:** {n_cand_only}",
+    ]
+    if anchor_run_label is not None and n_anchor_keys is not None:
+        lines += [
+            "",
+            f"- **Comparison cohort:** Model keys restricted to those present in the latest run "
+            f"`{anchor_run_label}` (**{n_anchor_keys}** keys). Pairwise metrics include only keys "
+            "that exist on **both** sides within this cohort.",
+        ]
+    lines += [
         "",
         "## Overall summary (deltas = candidate − baseline)",
         "",
@@ -560,6 +601,14 @@ def _write_pairwise_report_markdown(
         "## Interpretation",
         "",
         disclaimer,
+    ]
+    if anchor_run_label is not None:
+        lines += [
+            "",
+            "When a comparison cohort is set, aggregate metrics refer to the intersection of that "
+            "cohort with models available in each run — not the full universe of each run alone.",
+        ]
+    lines += [
         "",
         "## Outputs",
         "",
@@ -715,6 +764,10 @@ def _write_multi_run_report_markdown(
     pair_summaries_overall: list[pd.DataFrame],
     pair_summaries_horizon: list[pd.DataFrame],
     recommendations: list[str],
+    *,
+    anchor_to_latest: bool = True,
+    latest_run_label: str | None = None,
+    n_anchor_keys: int | None = None,
 ) -> None:
     """Write the comprehensive multi-experiment REPORT.md."""
 
@@ -733,6 +786,18 @@ def _write_multi_run_report_markdown(
     lines: list[str] = [
         "# Multi-experiment model comparison",
         "",
+    ]
+    if anchor_to_latest and latest_run_label is not None and n_anchor_keys is not None:
+        lines += [
+            "## Comparison cohort (anchored to latest run)",
+            "",
+            f"Pairwise metrics, run-level means in the table below, and feature evolution "
+            f"are restricted to model keys produced by the latest training run "
+            f"`{latest_run_label}` (**{n_anchor_keys}** keys). Older runs contribute fewer rows "
+            "if they did not train every key in that cohort.",
+            "",
+        ]
+    lines += [
         "## Experiments",
         "",
     ]
@@ -743,7 +808,12 @@ def _write_multi_run_report_markdown(
     lines += [
         "## Run summary",
         "",
-        "Mean validation metrics across all models in each run.",
+        "Mean validation metrics across models in each run"
+        + (
+            " (cohort = keys from latest run, intersected with models available in that run)."
+            if anchor_to_latest
+            else "."
+        ),
         "",
         _df_to_md_table(run_summary_df),
         "",
@@ -754,7 +824,9 @@ def _write_multi_run_report_markdown(
         lines += [
             "## Feature engineering evolution",
             "",
-            "Feature counts and churn between consecutive runs (union across common models).",
+            "Feature counts and churn between consecutive runs (union across common models"
+            + ("; cohort anchored to latest run" if anchor_to_latest else "")
+            + ").",
             "",
             _df_to_md_table(evo_display),
             "",
@@ -805,7 +877,8 @@ def _write_multi_run_report_markdown(
         "",
         "## Output structure",
         "",
-        "- `run_summary.csv` — per-run mean metrics",
+        "- `run_summary.csv` — per-run mean metrics"
+        + (" (same cohort as latest run)" if anchor_to_latest else ""),
         "- `feature_evolution.csv` — feature churn between consecutive runs",
         "- `metric_progression.png` — mean metric trend across experiments",
         "- `feature_evolution.png` — stacked bar of feature additions/removals",
@@ -830,6 +903,7 @@ def _run_multi_experiment_comparison(
     max_lc_models: int,
     seed: int,
     logger: Any,
+    anchor_to_latest: bool = True,
 ) -> None:
     """
     Orchestrate a multi-run (N >= 2) experiment comparison.
@@ -839,6 +913,10 @@ def _run_multi_experiment_comparison(
     - Pairwise comparison between first and last run (baseline vs latest).
     - Aggregate progression charts across all runs.
     - Comprehensive REPORT.md with feature evolution and data-driven recommendations.
+
+    When ``anchor_to_latest`` is True (default), all pairwise metrics, run-level aggregates,
+    and feature-evolution stats use only model keys present in the **last** run in
+    ``run_paths`` (ordered oldest-to-newest), so experiments are comparable on the same cohort.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     run_labels = [p.name for p in run_paths]
@@ -850,6 +928,21 @@ def _run_multi_experiment_comparison(
         recs = records_by_key(path)
         all_records.append(recs)
         logger.info("Loaded run", extra={"run": path.name, "n_models": len(recs)})
+
+    anchor_keys: frozenset[str] | None = None
+    latest_label = run_labels[-1]
+    if anchor_to_latest:
+        anchor_keys = frozenset(all_records[-1].keys())
+        logger.info(
+            "Anchoring comparison cohort to latest run",
+            extra={"latest_run": latest_label, "n_anchor_keys": len(anchor_keys)},
+        )
+
+    all_records_cohort: list[dict[str, ModelMetadataRecord]] = (
+        [filter_records_to_model_keys(r, anchor_keys) for r in all_records]
+        if anchor_keys is not None
+        else all_records
+    )
 
     # ---- Pairwise comparisons (consecutive pairs + baseline vs latest) ----
     rng = np.random.default_rng(seed)
@@ -877,6 +970,8 @@ def _run_multi_experiment_comparison(
             max_lc_models,
             rng,
             logger,
+            anchor_model_keys=anchor_keys,
+            anchor_run_label=latest_label if anchor_keys is not None else None,
         )
         pair_labels.append(label.replace("_", " "))
         pair_dirs.append(pair_dir)
@@ -884,15 +979,19 @@ def _run_multi_experiment_comparison(
         pair_summaries_horizon.append(sh)
 
     # ---- Aggregate run summary ----
-    run_summary_df = _build_run_summary_table(run_labels, all_records)
+    run_summary_df = _build_run_summary_table(run_labels, all_records_cohort)
     run_summary_df.to_csv(out_dir / "run_summary.csv", index=False)
 
     # ---- Feature evolution ----
-    evo_df = build_feature_evolution_frame(run_labels, all_records)
+    evo_df = build_feature_evolution_frame(
+        run_labels,
+        all_records_cohort,
+        anchor_model_keys=anchor_keys,
+    )
     evo_df.to_csv(out_dir / "feature_evolution.csv", index=False)
 
     # ---- Progression and evolution plots ----
-    run_metrics_list = [aggregate_run_metrics(r) for r in all_records]
+    run_metrics_list = [aggregate_run_metrics(r) for r in all_records_cohort]
     _plot_metric_progression_across_runs(run_labels, run_metrics_list, out_dir / "metric_progression.png")
     _plot_feature_evolution_stacked(evo_df, out_dir / "feature_evolution.png")
 
@@ -916,6 +1015,9 @@ def _run_multi_experiment_comparison(
         pair_summaries_overall,
         pair_summaries_horizon,
         recommendations,
+        anchor_to_latest=anchor_to_latest,
+        latest_run_label=latest_label,
+        n_anchor_keys=len(anchor_keys) if anchor_keys is not None else None,
     )
 
     logger.info(
@@ -925,6 +1027,8 @@ def _run_multi_experiment_comparison(
             "n_runs": len(run_paths),
             "n_pairs_compared": len(pairs_to_compare),
             "report": str(out_dir / "REPORT.md"),
+            "anchored_to_latest": anchor_keys is not None,
+            "n_anchor_keys": len(anchor_keys) if anchor_keys is not None else None,
         },
     )
 
@@ -963,6 +1067,14 @@ def main() -> None:
         help="Max number of models to plot learning curves for (both runs).",
     )
     parser.add_argument("--seed", type=int, default=42, help="RNG seed for stratified LC sampling.")
+    parser.add_argument(
+        "--no-anchor-to-latest",
+        action="store_true",
+        help=(
+            "Disable anchoring: use every model key each run has instead of restricting to keys "
+            "from the last run in --runs (or the candidate run for --baseline/--candidate)."
+        ),
+    )
     args = parser.parse_args()
 
     logger = MLLogger("compare_model_training_runs", level="INFO", console_output=True)
@@ -986,6 +1098,7 @@ def main() -> None:
         max_lc_models=args.max_learning_curve_models,
         seed=args.seed,
         logger=logger,
+        anchor_to_latest=not args.no_anchor_to_latest,
     )
 
 

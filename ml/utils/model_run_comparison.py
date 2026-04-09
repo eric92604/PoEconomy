@@ -106,6 +106,18 @@ def records_by_key(run_root: Path) -> dict[str, ModelMetadataRecord]:
     return out
 
 
+def filter_records_to_model_keys(
+    records: dict[str, ModelMetadataRecord],
+    model_keys: set[str] | frozenset[str],
+) -> dict[str, ModelMetadataRecord]:
+    """
+    Return a subset of ``records`` whose keys appear in ``model_keys``.
+
+    Used to anchor multi-run comparisons to a fixed cohort (e.g. models trained in the latest run).
+    """
+    return {k: records[k] for k in records if k in model_keys}
+
+
 def load_training_history(model_dir: Path) -> dict[str, dict[str, list[float]]] | None:
     """
     Load ``training_history.json`` if present.
@@ -334,6 +346,7 @@ def aggregate_run_metrics(
 def build_feature_evolution_frame(
     run_labels: list[str],
     run_records: list[dict[str, ModelMetadataRecord]],
+    anchor_model_keys: set[str] | frozenset[str] | None = None,
 ) -> pd.DataFrame:
     """
     Summarise feature-set changes between each pair of consecutive runs.
@@ -345,6 +358,9 @@ def build_feature_evolution_frame(
     Args:
         run_labels: Human-readable label for each run (e.g. experiment directory name).
         run_records: Parallel list of ``model_key -> ModelMetadataRecord`` dicts.
+        anchor_model_keys: When set, only models whose keys appear here are used when
+            forming the common-model set for each consecutive pair (stabilizes churn stats
+            to the same cohort as the latest run).
 
     Returns:
         DataFrame with one row per consecutive pair and columns:
@@ -360,7 +376,10 @@ def build_feature_evolution_frame(
     for i in range(len(run_labels) - 1):
         label_a, label_b = run_labels[i], run_labels[i + 1]
         recs_a, recs_b = run_records[i], run_records[i + 1]
-        common_keys = sorted(set(recs_a.keys()) & set(recs_b.keys()))
+        common = set(recs_a.keys()) & set(recs_b.keys())
+        if anchor_model_keys is not None:
+            common &= anchor_model_keys
+        common_keys = sorted(common)
         if not common_keys:
             continue
         feats_a: set[str] = set()
