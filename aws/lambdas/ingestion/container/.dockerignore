@@ -1,16 +1,19 @@
-# Lambda Container .dockerignore
-# This file controls what gets included in the Docker build context for Lambda functions
+# Ingestion Lambda container .dockerignore
+#
+# Docker only reads .dockerignore at the build context root. deploy_ingestion.sh backs up the
+# repo-root .dockerignore and copies this file there for `docker build` — same pattern as
+# aws/lambdas/prediction/container/.dockerignore for the prediction Lambda.
+#
+# Ingestion does not COPY s3_backup/models; exclude the full local s3 mirror to keep context small.
 
 # Exclude large model files from build context (models downloaded during build)
 models_context/
 training_data/
 
-# Exclude most of s3_backup, only include specific experiment models
-s3_backup/processed_data/
-s3_backup/training-data/
+# Local S3 mirror / backups (multi-GB; not used by ingestion image)
+s3_backup/
 
 # Exclude other AWS containers (keep only lambda)
-# Note: s3_backup/models must remain visible — prediction Dockerfile COPYs it into the image.
 aws/feature-engineering/
 aws/training/
 aws/cloudformation/

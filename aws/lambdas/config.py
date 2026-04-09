@@ -31,6 +31,7 @@ class AppEnvironment:
     live_prices_table: str
     predictions_table: str
     league_metadata_table: Optional[str]
+    historical_league_prices_table: Optional[str]
     default_leagues: List[str]
     models_s3_prefix: Optional[str]
     models_local_dir: str
@@ -51,6 +52,7 @@ def load_environment(default_leagues: Optional[List[str]] = None) -> AppEnvironm
         live_prices_table=_require_env("DYNAMO_CURRENCY_PRICES_TABLE"),
         predictions_table=os.getenv("DYNAMO_PREDICTIONS_TABLE"),
         league_metadata_table=os.getenv("DYNAMO_LEAGUE_METADATA_TABLE"),
+        historical_league_prices_table=os.getenv("HISTORICAL_LEAGUE_PRICES_TABLE"),
         default_leagues=leagues_from_env,
         models_s3_prefix=os.getenv("MODELS_S3_PREFIX"),
         models_local_dir=os.getenv("MODELS_DIR", "/var/task/models"),

@@ -74,6 +74,9 @@ Resources:
                   # GSI permissions for daily-prices table
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/poeconomy-${EnvironmentName}-daily-prices/index/currency-date-index'
                   - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/poeconomy-${EnvironmentName}-daily-prices/index/league-date-index'
+                  # GSI permissions for historical-league-prices table
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/poeconomy-${EnvironmentName}-historical-league-prices'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/poeconomy-${EnvironmentName}-historical-league-prices/index/league-date-index'
         - PolicyName: S3Access
           PolicyDocument:
             Version: '2012-10-17'
@@ -147,6 +150,9 @@ Resources:
           DAILY_PRICES_TABLE: 
             Fn::ImportValue:
               Fn::Sub: '${IngestionStackName}-DailyPricesTable'
+          HISTORICAL_LEAGUE_PRICES_TABLE:
+            Fn::ImportValue:
+              Fn::Sub: '${IngestionStackName}-HistoricalLeaguePricesTable'
           DATA_LAKE_BUCKET: 
             Fn::ImportValue:
               Fn::Sub: '${BaseStackName}-DataLakeBucket'
@@ -247,6 +253,20 @@ Resources:
       RestApiId: !Ref PredictionApiRestApi
       ParentId: !Ref PricesResource
       PathPart: historical
+
+  LeagueHistoricalResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ParentId: !Ref PricesResource
+      PathPart: league-historical
+
+  LeagueListResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ParentId: !Ref PricesResource
+      PathPart: league-list
 
   # API Gateway Methods
   HealthGetMethod:
@@ -595,6 +615,86 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambdaFunction.Arn}/invocations'
 
+  LeagueHistoricalOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !Ref LeagueHistoricalResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,x-api-key'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  LeagueHistoricalGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !Ref LeagueHistoricalResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambdaFunction.Arn}/invocations'
+
+  LeagueListOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !Ref LeagueListResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      ApiKeyRequired: false
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,x-api-key'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  LeagueListGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PredictionApiRestApi
+      ResourceId: !Ref LeagueListResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambdaFunction.Arn}/invocations'
+
   # Lambda Permission for API Gateway
   ApiLambdaPermission:
     Type: AWS::Lambda::Permission
@@ -626,6 +726,10 @@ Resources:
       - LiveOptionsMethod
       - HistoricalGetMethod
       - HistoricalOptionsMethod
+      - LeagueHistoricalGetMethod
+      - LeagueHistoricalOptionsMethod
+      - LeagueListGetMethod
+      - LeagueListOptionsMethod
     Properties:
       RestApiId: !Ref PredictionApiRestApi
       StageName: !Ref ApiGatewayStageName

@@ -204,9 +204,655 @@ print_deployment_info() {
   echo "========================================"
 }
 
-# ---------------------------------------------------------------------------
-# Training data upload
-# ---------------------------------------------------------------------------
+build_and_push_lambda_image() {
+  local repository="poeconomy-${ENVIRONMENT}-lambdas"
+  ensure_ecr_repository "$repository"
+  
+  echo "Logging in to ECR ($ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com)"
+  "$AWS_CMD" ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
+  
+  echo "Building Lambda container image with models (prediction capabilities enabled)"
+  build_lambda_image_with_models
+  
+  echo "Pushing image to ECR"
+  local timestamp=$(date +%Y%m%d%H%M%S)
+  docker tag "poeconomy-${ENVIRONMENT}-lambda:latest" "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$repository:latest"
+  docker tag "poeconomy-${ENVIRONMENT}-lambda:latest" "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$repository:$timestamp"
+  
+  # Push images to ECR
+  echo "Pushing images to ECR..."
+  docker push "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$repository:latest"
+  docker push "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$repository:$timestamp"
+  
+  # Verify the pushed image manifest
+  echo "Verifying pushed image manifest..."
+  "$AWS_CMD" ecr describe-images --repository-name "$repository" --image-ids imageTag=latest --region "$REGION" --query 'imageDetails[0].{Digest:imageDigest,Size:imageSizeInBytes,PushedAt:imagePushedAt,ImageManifestMediaType:imageManifestMediaType}' --output table
+  
+  # Resolve immutable image digest and use digest-pinned URI for Lambda deployments.
+  # This avoids tag-resolution races during CloudFormation updates.
+  local image_digest
+  image_digest=$("$AWS_CMD" ecr describe-images \
+    --repository-name "$repository" \
+    --image-ids imageTag="$timestamp" \
+    --region "$REGION" \
+    --query 'imageDetails[0].imageDigest' \
+    --output text)
+  
+  if [[ -z "$image_digest" ]] || [[ "$image_digest" == "None" ]]; then
+    echo "❌ Failed to resolve image digest for tag: $timestamp"
+    exit 1
+  fi
+  
+  # Additional verification - check if the image can be pulled and inspected
+  echo "Testing ECR image pull and inspection..."
+  docker pull "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$repository:$timestamp"
+  local pulled_arch
+  pulled_arch=$(docker inspect "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$repository:$timestamp" --format='{{.Architecture}}')
+  echo "Pulled image architecture: $pulled_arch"
+  
+  if [[ "$pulled_arch" != "amd64" ]]; then
+    echo "❌ Pulled image architecture is $pulled_arch, expected amd64"
+    exit 1
+  fi
+  
+  echo "✅ ECR image verification successful"
+  
+  INFERENCE_IMAGE_URI="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$repository@$image_digest"
+  echo "Using immutable Lambda image URI: $INFERENCE_IMAGE_URI"
+}
+
+find_latest_experiment() {
+  local backup_dir="$ROOT_DIR/s3_backup/models/currency"
+  local latest_experiment=""
+  local latest_timestamp=0
+  
+  # Find all experiment directories (xp_* pattern)
+  for exp_dir in "$backup_dir"/xp_*; do
+    if [[ -d "$exp_dir" ]]; then
+      local exp_name=$(basename "$exp_dir")
+      local exp_models=$(find "$exp_dir" -name "*.pkl" 2>/dev/null | wc -l)
+      
+      if [[ $exp_models -gt 0 ]]; then
+        # Extract timestamp from directory name (xp_YYYYMMDD_HHMMSS)
+        local timestamp_str=$(echo "$exp_name" | sed 's/xp_//' | sed 's/_/ /')
+        local epoch_time=0
+        
+        # Try to parse timestamp (format: YYYYMMDD HHMMSS)
+        if [[ "$timestamp_str" =~ ^[0-9]{8}\ [0-9]{6}$ ]]; then
+          # Convert to epoch (works on Linux/Mac)
+          epoch_time=$(date -d "$timestamp_str" +%s 2>/dev/null || date -j -f "%Y%m%d %H%M%S" "$timestamp_str" +%s 2>/dev/null || echo "0")
+        fi
+        
+        # Fallback: use directory name for comparison if date parsing fails
+        # Extract digits using bash parameter expansion (more portable than tr)
+        if [[ $epoch_time -eq 0 ]]; then
+          # Remove all non-digit characters using bash parameter expansion
+          digits_only="${exp_name//[^0-9]/}"
+          epoch_time="${digits_only:0:14}"
+        fi
+        
+        if [[ $epoch_time -gt $latest_timestamp ]]; then
+          latest_timestamp=$epoch_time
+          latest_experiment="$exp_name"
+        fi
+      fi
+    fi
+  done
+  
+  if [[ -n "$latest_experiment" ]]; then
+    echo "$latest_experiment"
+    return 0
+  fi
+  
+  return 1
+}
+
+find_latest_experiment_in_s3() {
+  local latest_experiment=""
+  local experiment_candidates
+
+  # Parse experiment prefixes from `aws s3 ls` output:
+  # PRE xp_YYYYMMDD_HHMMSS/
+  experiment_candidates=$("$AWS_CMD" s3 ls "s3://$DATA_LAKE_BUCKET_NAME/models/currency/" --region "$REGION" 2>/dev/null \
+    | sed -n 's/^[[:space:]]*PRE[[:space:]]\(xp_[0-9]\{8\}_[0-9]\{6\}\)\/[[:space:]]*$/\1/p' \
+    | sort)
+
+  latest_experiment=$(echo "$experiment_candidates" | sed '/^$/d' | tail -n 1)
+  latest_experiment="${latest_experiment//$'\r'/}"
+  latest_experiment="${latest_experiment//$'\n'/}"
+  if [[ -n "$latest_experiment" ]]; then
+    echo "$latest_experiment"
+    return 0
+  fi
+
+  return 1
+}
+
+verify_local_backup() {
+  echo "Checking for local model backup..."
+  
+  local backup_dir="$ROOT_DIR/s3_backup/models/currency"
+  
+  if [[ ! -d "$backup_dir" ]]; then
+    echo "❌ Local backup directory not found: $backup_dir"
+    return 1
+  fi
+  
+  echo "✅ Local backup directory found: $backup_dir"
+  
+  # Check for latest experiment locally and in S3.
+  local local_latest_experiment
+  local s3_latest_experiment
+  local latest_experiment
+  local_latest_experiment=$(find_latest_experiment)
+  s3_latest_experiment=$(find_latest_experiment_in_s3)
+
+  latest_experiment="$local_latest_experiment"
+  if [[ -n "$s3_latest_experiment" ]] && { [[ -z "$latest_experiment" ]] || [[ "$s3_latest_experiment" > "$latest_experiment" ]]; }; then
+    latest_experiment="$s3_latest_experiment"
+  fi
+
+  # If S3 has a newer experiment than local backup, sync only that experiment directory.
+  if [[ -n "$latest_experiment" ]] && [[ "$latest_experiment" == "$s3_latest_experiment" ]] && [[ ! -d "$backup_dir/$latest_experiment" ]]; then
+    echo "⬇️  Syncing latest experiment from S3: $latest_experiment"
+    if ! "$AWS_CMD" s3 sync \
+      "s3://$DATA_LAKE_BUCKET_NAME/models/currency/$latest_experiment/" \
+      "$backup_dir/$latest_experiment/" \
+      --region "$REGION"; then
+      echo "❌ Failed to sync latest experiment from S3: $latest_experiment"
+      return 1
+    fi
+  fi
+  
+  if [[ -n "$latest_experiment" ]]; then
+    local exp_dir="$backup_dir/$latest_experiment"
+    local model_count=$(find "$exp_dir" -name "*.pkl" 2>/dev/null | wc -l)
+    local metadata_count=$(find "$exp_dir" -name "model_metadata.json" 2>/dev/null | wc -l)
+    
+    if [[ $model_count -eq 0 ]]; then
+      echo "❌ Latest experiment directory has no model files: $exp_dir"
+      echo "❌ Refusing to continue with empty latest experiment."
+      return 1
+    fi
+    
+    echo "📁 Found latest experiment: $latest_experiment"
+    echo "  Model files: $model_count"
+    echo "  Metadata files: $metadata_count"
+    export LATEST_EXPERIMENT="$latest_experiment"
+    return 0
+  fi
+  
+  # Fallback: Check for model files directly (flat structure: {Currency Name}_{horizon}/)
+  local model_count
+  model_count=$(find "$backup_dir" -mindepth 2 -maxdepth 2 -name "*.pkl" 2>/dev/null | wc -l)
+  local metadata_count
+  metadata_count=$(find "$backup_dir" -mindepth 2 -maxdepth 2 -name "model_metadata.json" 2>/dev/null | wc -l)
+  
+  if [[ $model_count -gt 0 ]]; then
+    echo "📁 Found models in flat structure:"
+    echo "  Model files: $model_count"
+    echo "  Metadata files: $metadata_count"
+    return 0
+  fi
+  
+  echo "❌ No model files found in local backup"
+  return 1
+}
+
+build_lambda_image_with_models() {
+  local models_source_dir="$ROOT_DIR/s3_backup/models"
+  local temp_models_dir=""
+  
+  # Check if local models are available, otherwise download from S3
+  if [[ ! -d "$models_source_dir" ]]; then
+    echo "Local models not found, downloading from S3..."
+    mkdir -p "$models_source_dir"
+    
+    echo "Downloading models from s3://$DATA_LAKE_BUCKET_NAME/models/currency/ to $models_source_dir/currency/"
+    "$AWS_CMD" s3 sync "s3://$DATA_LAKE_BUCKET_NAME/models/currency/" "$models_source_dir/currency/" --region "$REGION"
+    
+    if [[ $? -ne 0 ]]; then
+      echo "❌ Failed to download models from S3"
+      exit 1
+    fi
+    
+    echo "✅ Models downloaded from S3"
+  fi
+  
+  # Verify s3_backup/models exists
+  if [[ ! -d "$models_source_dir" ]]; then
+    echo "❌ s3_backup/models directory not found"
+    exit 1
+  fi
+  
+  # Check if we have a latest experiment to use
+  local backup_dir="$ROOT_DIR/s3_backup/models/currency"
+  if [[ -n "$LATEST_EXPERIMENT" ]] && [[ -d "$backup_dir/$LATEST_EXPERIMENT" ]]; then
+    echo "Using models from latest experiment: $LATEST_EXPERIMENT"
+    
+    # Always isolate latest experiment to avoid stale nested directories
+    # (e.g. previous accidental models/models copies) from leaking into the image.
+    echo "Isolating latest experiment for Docker build: $LATEST_EXPERIMENT"
+    
+    # Create temporary directory with only the latest experiment's models
+    temp_models_dir=$(mktemp -d)
+    mkdir -p "$temp_models_dir/models/currency"
+    
+    # Copy only the latest experiment's models
+    echo "Copying models from $LATEST_EXPERIMENT to temporary directory..."
+    if ! cp -r "$backup_dir/$LATEST_EXPERIMENT" "$temp_models_dir/models/currency/" 2>/dev/null; then
+      echo "❌ Failed to copy experiment models to temporary directory"
+      echo "   Source: $backup_dir/$LATEST_EXPERIMENT"
+      echo "   Destination: $temp_models_dir/models/currency/"
+      rm -rf "$temp_models_dir"
+      exit 1
+    fi
+    
+    # Update models_source_dir to use temp directory
+    models_source_dir="$temp_models_dir/models"
+    echo "✅ Using latest experiment models only"
+  elif [[ -n "${LATEST_EXPERIMENT:-}" ]]; then
+    echo "❌ LATEST_EXPERIMENT is set but directory is missing: $backup_dir/$LATEST_EXPERIMENT"
+    echo "❌ Refusing to fall back to all models to avoid oversized Lambda images."
+    exit 1
+  else
+    echo "Using all models from s3_backup directory..."
+    models_source_dir="$ROOT_DIR/s3_backup/models"
+    temp_models_dir=""
+  fi
+  
+  # Verify models are available
+  local model_count
+  model_count=$(find "$models_source_dir" -name "*.pkl" 2>/dev/null | wc -l)
+  echo "📊 Total model files: $model_count"
+  
+  if [[ $model_count -eq 0 ]]; then
+    echo "❌ No model files found in $models_source_dir"
+    echo "   Expected structure: models/currency/{experiment_id}/{currency}_{horizon}/*.pkl"
+    [[ -n "$temp_models_dir" ]] && rm -rf "$temp_models_dir"
+    exit 1
+  fi
+  
+  # Verify model structure - check for expected pattern
+  local metadata_count
+  metadata_count=$(find "$models_source_dir" -name "model_metadata.json" 2>/dev/null | wc -l)
+  echo "📊 Model metadata files: $metadata_count"
+  
+  if [[ $metadata_count -eq 0 ]]; then
+    echo "❌ No model metadata files found in $models_source_dir"
+    echo "   Expected: models/currency/{experiment_id}/{currency}_{horizon}/model_metadata.json"
+    echo "   Actual structure:"
+    find "$models_source_dir" -type d -maxdepth 3 2>/dev/null | head -10
+    [[ -n "$temp_models_dir" ]] && rm -rf "$temp_models_dir"
+    exit 1
+  fi
+  
+  # Verify structure matches expected pattern (currency_{horizon} directories)
+  local currency_dirs
+  currency_dirs=$(find "$models_source_dir" -type d -name "*_*d" 2>/dev/null | wc -l)
+  if [[ $currency_dirs -eq 0 ]]; then
+    echo "⚠️  Warning: No currency directories found with pattern '*_*d'"
+    echo "   This may indicate a structure mismatch"
+    echo "   Sample directories found:"
+    find "$models_source_dir" -type d -maxdepth 3 2>/dev/null | head -5
+  else
+    echo "✅ Found $currency_dirs currency directories matching expected pattern"
+  fi
+  
+  # Get models directory size for progress indication (calculate before any copying)
+  local models_size_mb=0
+  if command -v du >/dev/null 2>&1; then
+    if [[ -d "$ROOT_DIR/s3_backup/models" ]]; then
+      models_size_mb=$(du -sm "$ROOT_DIR/s3_backup/models" 2>/dev/null | cut -f1 || echo "0")
+    elif [[ -d "$models_source_dir" ]]; then
+      models_size_mb=$(du -sm "$models_source_dir" 2>/dev/null | cut -f1 || echo "0")
+    fi
+  fi
+  
+  # If using temp directory, replace s3_backup/models temporarily
+  local original_models_backup=""
+  if [[ -n "$temp_models_dir" ]] && [[ -d "$temp_models_dir/models" ]]; then
+    # Backup original s3_backup/models if it exists
+    if [[ -d "$ROOT_DIR/s3_backup/models" ]]; then
+      original_models_backup="$ROOT_DIR/s3_backup/models.backup"
+      echo "Backing up existing s3_backup/models..."
+      rm -rf "$original_models_backup" 2>/dev/null || true
+      # Prefer move for speed/atomicity; fallback to copy+remove.
+      if mv "$ROOT_DIR/s3_backup/models" "$original_models_backup" 2>/dev/null; then
+        :
+      elif cp -a "$ROOT_DIR/s3_backup/models/." "$original_models_backup/" 2>/dev/null; then
+        rm -rf "$ROOT_DIR/s3_backup/models" 2>/dev/null || true
+      else
+        echo "❌ Failed to backup s3_backup/models - permission denied or files in use"
+        echo "   Try closing any applications that might be accessing the models directory"
+        rm -rf "$temp_models_dir"
+        exit 1
+      fi
+    fi
+    # Copy temp models to s3_backup location for Docker build (more reliable than move on Windows/WSL)
+    mkdir -p "$ROOT_DIR/s3_backup"
+    echo "Copying models to s3_backup/models for Docker build (this may take a few minutes for large directories)..."
+    
+    # Check if we can write to the destination
+    if [[ ! -w "$ROOT_DIR/s3_backup" ]] 2>/dev/null; then
+      echo "❌ No write permission to $ROOT_DIR/s3_backup"
+      echo "   Please check directory permissions or run with appropriate privileges"
+      if [[ -n "$original_models_backup" ]] && [[ -d "$original_models_backup" ]]; then
+        rm -rf "$ROOT_DIR/s3_backup/models" 2>/dev/null || true
+        mkdir -p "$ROOT_DIR/s3_backup/models"
+        cp -a "$original_models_backup/." "$ROOT_DIR/s3_backup/models/" 2>/dev/null || true
+        rm -rf "$original_models_backup" 2>/dev/null || true
+      fi
+      rm -rf "$temp_models_dir"
+      exit 1
+    fi
+    
+    # Use rsync if available (faster and more reliable), otherwise use cp
+    # Show progress for large directory copies
+    echo "Copying ${models_size_mb}MB of models (this may take several minutes)..."
+    
+    if command -v rsync >/dev/null 2>&1; then
+      # Use rsync with progress for large directories
+      if rsync -a --info=progress2 "$temp_models_dir/models/" "$ROOT_DIR/s3_backup/models/" 2>/dev/null; then
+        rm -rf "$temp_models_dir" 2>/dev/null || true
+        echo "✅ Models copied successfully"
+      else
+        echo "❌ Failed to copy models using rsync - trying cp..."
+        # Fallback to cp without progress (copy contents, not parent dir)
+        mkdir -p "$ROOT_DIR/s3_backup/models"
+        if ! cp -a "$temp_models_dir/models/." "$ROOT_DIR/s3_backup/models/" 2>/dev/null; then
+          echo "❌ Failed to copy models to s3_backup/models - permission denied or disk full"
+          echo "   Check:"
+          echo "   1. Disk space: df -h"
+          echo "   2. Directory permissions: ls -ld $ROOT_DIR/s3_backup"
+          echo "   3. Close any applications accessing the models directory"
+          # Try to restore backup if it existed
+          if [[ -n "$original_models_backup" ]] && [[ -d "$original_models_backup" ]]; then
+            rm -rf "$ROOT_DIR/s3_backup/models" 2>/dev/null || true
+            mkdir -p "$ROOT_DIR/s3_backup/models"
+            cp -a "$original_models_backup/." "$ROOT_DIR/s3_backup/models/" 2>/dev/null || true
+            rm -rf "$original_models_backup" 2>/dev/null || true
+          fi
+          rm -rf "$temp_models_dir"
+          exit 1
+        fi
+        rm -rf "$temp_models_dir" 2>/dev/null || true
+        echo "✅ Models copied successfully (using cp fallback)"
+      fi
+    else
+      # Fallback to cp if rsync not available
+      echo "Using cp to copy models (rsync not available)..."
+      mkdir -p "$ROOT_DIR/s3_backup/models"
+      if cp -a "$temp_models_dir/models/." "$ROOT_DIR/s3_backup/models/" 2>/dev/null; then
+        rm -rf "$temp_models_dir" 2>/dev/null || true
+        echo "✅ Models copied successfully"
+      else
+        echo "❌ Failed to copy models to s3_backup/models - permission denied or disk full"
+        echo "   Check:"
+        echo "   1. Disk space: df -h"
+        echo "   2. Directory permissions: ls -ld $ROOT_DIR/s3_backup"
+        echo "   3. Close any applications accessing the models directory"
+        # Try to restore backup if it existed
+        if [[ -n "$original_models_backup" ]] && [[ -d "$original_models_backup" ]]; then
+          rm -rf "$ROOT_DIR/s3_backup/models" 2>/dev/null || true
+          mkdir -p "$ROOT_DIR/s3_backup/models"
+          cp -a "$original_models_backup/." "$ROOT_DIR/s3_backup/models/" 2>/dev/null || true
+          rm -rf "$original_models_backup" 2>/dev/null || true
+        fi
+        rm -rf "$temp_models_dir"
+        exit 1
+      fi
+    fi
+  fi
+  
+  # Update models directory size after copying (if we copied models)
+  if [[ $models_size_mb -eq 0 ]] && command -v du >/dev/null 2>&1; then
+    if [[ -d "$ROOT_DIR/s3_backup/models" ]]; then
+      models_size_mb=$(du -sm "$ROOT_DIR/s3_backup/models" 2>/dev/null | cut -f1 || echo "0")
+    fi
+  fi
+  
+  # Verify model structure before building (after copying to s3_backup/models)
+  echo "Verifying model structure before Docker build..."
+  local metadata_files
+  metadata_files=$(find "$ROOT_DIR/s3_backup/models" -name "model_metadata.json" 2>/dev/null | wc -l)
+  if [[ $metadata_files -eq 0 ]]; then
+    echo "❌ No model_metadata.json files found in s3_backup/models"
+    echo "   Expected structure: s3_backup/models/currency/{experiment_id}/{currency}_{horizon}/model_metadata.json"
+    echo "   Actual structure:"
+    find "$ROOT_DIR/s3_backup/models" -type d -maxdepth 3 2>/dev/null | head -10
+    exit 1
+  fi
+  echo "✅ Found $metadata_files model metadata files - structure looks correct"
+  
+  # Verify at least one currency directory exists
+  local currency_model_dirs
+  currency_model_dirs=$(find "$ROOT_DIR/s3_backup/models" -type d -name "*_*d" 2>/dev/null | wc -l)
+  if [[ $currency_model_dirs -eq 0 ]]; then
+    echo "❌ No currency model directories found with pattern '*_*d'"
+    echo "   This indicates the model structure is incorrect"
+    echo "   Expected: s3_backup/models/currency/{experiment_id}/{currency}_{horizon}/"
+    echo "   Sample directories found:"
+    find "$ROOT_DIR/s3_backup/models" -type d -maxdepth 4 2>/dev/null | head -10
+    exit 1
+  fi
+  echo "✅ Found $currency_model_dirs currency model directories"
+  
+  # Build image with models using buildx for Lambda-compatible single-platform manifest
+  echo "Building Lambda container image with models..."
+  echo "Using buildx with --provenance=false for Lambda compatibility..."
+  if [[ $models_size_mb -gt 0 ]]; then
+    echo "Note: Copying models (${models_size_mb}MB) may take several minutes..."
+  else
+    echo "Note: Copying models may take several minutes..."
+  fi
+  
+  # Check if buildx is available
+  if ! command -v docker >/dev/null 2>&1 || ! docker buildx version >/dev/null 2>&1; then
+    echo "⚠️  Warning: docker buildx not available, falling back to standard docker build"
+    echo "   Note: This may create an incompatible manifest. Install buildx for Lambda compatibility."
+    USE_BUILDX=false
+  else
+    # Ensure default builder exists
+    if ! docker buildx ls | grep -q "default"; then
+      echo "Creating default buildx builder..."
+      docker buildx create --name default --use 2>/dev/null || true
+    fi
+    USE_BUILDX=true
+  fi
+  
+  # Backup original .dockerignore and copy the appropriate one for lambda
+  if [[ -f "$ROOT_DIR/.dockerignore" ]]; then
+    cp "$ROOT_DIR/.dockerignore" "$ROOT_DIR/.dockerignore.backup"
+  fi
+  cp "$ROOT_DIR/aws/lambdas/prediction/container/.dockerignore" "$ROOT_DIR/.dockerignore" 2>/dev/null || true
+  
+  # Use cache unless FORCE_REBUILD is set (faster subsequent builds)
+  local build_args=""
+  if [[ "${FORCE_REBUILD:-false}" == "true" ]]; then
+    build_args="--no-cache"
+    echo "⚠️  Force rebuild enabled - this will take longer"
+  else
+    echo "ℹ️  Using Docker layer cache - faster builds"
+  fi
+  
+  # Build with explicit platform for Lambda compatibility
+  # Lambda requires single-platform manifest without provenance (BuildKit v0.10+ adds provenance by default)
+  echo "Starting Docker build (this may take 10-30 minutes for large model directories)..."
+  echo "Progress will be shown below. The build may appear slow during:"
+  echo "  - COPY s3_backup/models (copying ${models_size_mb}MB of models)"
+  echo "  - pip install (ML library installation)"
+  echo ""
+  
+  if [[ "$USE_BUILDX" == "true" ]]; then
+    # Use buildx with --load to ensure single-platform manifest compatible with Lambda
+    # --provenance=false is required for Lambda (BuildKit v0.10+ adds provenance by default)
+    # --sbom=false also recommended for Lambda compatibility
+    if ! docker buildx build \
+      --platform linux/amd64 \
+      --progress=plain \
+      --load \
+      --provenance=false \
+      --sbom=false \
+      --tag "poeconomy-${ENVIRONMENT}-lambda:latest" \
+      --file "$ROOT_DIR/aws/lambdas/prediction/container/Dockerfile" \
+      $build_args \
+      "$ROOT_DIR"; then
+      echo "❌ Docker build failed"
+      echo "Common issues:"
+      echo "  - COPY operation timed out (models too large or network issues)"
+      echo "  - Out of disk space (check with: docker system df)"
+      echo "  - Permission denied (check s3_backup/models permissions)"
+      exit 1
+    fi
+  else
+    # Fallback to standard docker build (may not be Lambda-compatible)
+    echo "⚠️  Using standard docker build (buildx not available)"
+    echo "   This may create an incompatible manifest for Lambda"
+    if ! DOCKER_BUILDKIT=0 docker build \
+      --platform linux/amd64 \
+      --tag "poeconomy-${ENVIRONMENT}-lambda:latest" \
+      --file "$ROOT_DIR/aws/lambdas/prediction/container/Dockerfile" \
+      $build_args \
+      "$ROOT_DIR"; then
+      echo "❌ Docker build failed"
+      echo "Common issues:"
+      echo "  - COPY operation timed out (models too large or network issues)"
+      echo "  - Out of disk space (check with: docker system df)"
+      echo "  - Permission denied (check s3_backup/models permissions)"
+      exit 1
+    fi
+  fi
+  
+  if [[ $? -eq 0 ]]; then
+    echo "✅ Docker image built successfully"
+    
+    # Verify the image architecture
+    echo "Verifying image architecture..."
+    local image_arch
+    image_arch=$(docker inspect "poeconomy-${ENVIRONMENT}-lambda:latest" --format='{{.Architecture}}')
+    echo "Image architecture: $image_arch"
+    
+    if [[ "$image_arch" != "amd64" ]]; then
+      echo "❌ Image architecture is $image_arch, expected amd64"
+      exit 1
+    fi
+    
+    # Test the image can run (Lambda containers need handler argument, so test Python import instead)
+    echo "Testing image functionality..."
+    docker run --rm --entrypoint python "poeconomy-${ENVIRONMENT}-lambda:latest" -c "import sys; print(f'Python {sys.version}')"
+    if [[ $? -eq 0 ]]; then
+      echo "✅ Image test successful"
+    else
+      echo "❌ Image test failed"
+      exit 1
+    fi
+  else
+    echo "❌ Docker image build failed"
+    exit 1
+  fi
+  
+  # Restore original .dockerignore if it was backed up
+  if [[ -f "$ROOT_DIR/.dockerignore.backup" ]]; then
+    mv "$ROOT_DIR/.dockerignore.backup" "$ROOT_DIR/.dockerignore"
+  fi
+  
+  # Restore original s3_backup/models if we used temp directory
+  if [[ -n "$original_models_backup" ]] && [[ -d "$original_models_backup" ]]; then
+    echo "Restoring original s3_backup/models..."
+    # Remove current models directory
+    rm -rf "$ROOT_DIR/s3_backup/models" 2>/dev/null || {
+      echo "⚠️  Warning: Could not remove current models directory, attempting to restore anyway"
+    }
+    # Restore backup using copy + remove for better Windows/WSL compatibility
+    mkdir -p "$ROOT_DIR/s3_backup/models"
+    if cp -a "$original_models_backup/." "$ROOT_DIR/s3_backup/models/" 2>/dev/null; then
+      rm -rf "$original_models_backup" 2>/dev/null || {
+        echo "⚠️  Warning: Could not remove backup directory, but restoration successful"
+      }
+      echo "🧹 Restored original s3_backup/models directory"
+    else
+      echo "⚠️  Warning: Failed to restore original s3_backup/models - permission denied"
+      echo "   Backup is still available at: $original_models_backup"
+      echo "   You may need to manually restore it later"
+    fi
+  fi
+  
+  echo "🧹 Cleaned up temporary files"
+}
+
+
+
+
+build_and_push_feature_engineering_image() {
+  local repository="poeconomy-${ENVIRONMENT}-feature-engineering"
+  local timestamp=$(date +%Y%m%d%H%M%S)
+  local ecr_base="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
+  
+  ensure_ecr_repository "$repository"
+  
+  echo "Logging in to ECR ($ecr_base)"
+  "$AWS_CMD" ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ecr_base"
+  
+  echo "Building feature engineering container image"
+  # Backup original .dockerignore and copy the appropriate one for feature engineering
+  if [[ -f "$ROOT_DIR/.dockerignore" ]]; then
+    cp "$ROOT_DIR/.dockerignore" "$ROOT_DIR/.dockerignore.backup"
+  fi
+  cp "$ROOT_DIR/aws/feature-engineering/container/.dockerignore" "$ROOT_DIR/.dockerignore"
+  
+  docker build -t "poeconomy-${ENVIRONMENT}-feature-engineering:latest" \
+    -f "$ROOT_DIR/aws/feature-engineering/container/Dockerfile" \
+    "$ROOT_DIR"
+  
+  echo "Pushing feature engineering image to ECR"
+  docker tag "poeconomy-${ENVIRONMENT}-feature-engineering:latest" "$ecr_base/$repository:latest"
+  docker tag "poeconomy-${ENVIRONMENT}-feature-engineering:latest" "$ecr_base/$repository:$timestamp"
+  docker push "$ecr_base/$repository:latest"
+  docker push "$ecr_base/$repository:$timestamp"
+  
+  FEATURE_ENGINEERING_IMAGE_URI="$ecr_base/$repository:$timestamp"
+  
+  # Restore original .dockerignore if it was backed up
+  if [[ -f "$ROOT_DIR/.dockerignore.backup" ]]; then
+    mv "$ROOT_DIR/.dockerignore.backup" "$ROOT_DIR/.dockerignore"
+  fi
+}
+
+build_and_push_training_image() {
+  local repository="poeconomy-${ENVIRONMENT}-training"
+  local timestamp=$(date +%Y%m%d%H%M%S)
+  local ecr_base="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
+  
+  ensure_ecr_repository "$repository"
+  
+  echo "Logging in to ECR ($ecr_base)"
+  "$AWS_CMD" ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ecr_base"
+  
+  echo "Building training container image"
+  # Backup original .dockerignore and copy the appropriate one for training
+  if [[ -f "$ROOT_DIR/.dockerignore" ]]; then
+    cp "$ROOT_DIR/.dockerignore" "$ROOT_DIR/.dockerignore.backup"
+  fi
+  cp "$ROOT_DIR/aws/training/container/.dockerignore" "$ROOT_DIR/.dockerignore"
+  
+  docker build -t "poeconomy-${ENVIRONMENT}-training:latest" \
+    -f "$ROOT_DIR/aws/training/container/Dockerfile" \
+    "$ROOT_DIR"
+  
+  echo "Pushing training image to ECR"
+  docker tag "poeconomy-${ENVIRONMENT}-training:latest" "$ecr_base/$repository:latest"
+  docker tag "poeconomy-${ENVIRONMENT}-training:latest" "$ecr_base/$repository:$timestamp"
+  docker push "$ecr_base/$repository:latest"
+  docker push "$ecr_base/$repository:$timestamp"
+  
+  TRAINING_IMAGE_URI="$ecr_base/$repository:$timestamp"
+  
+  # Restore original .dockerignore if it was backed up
+  if [[ -f "$ROOT_DIR/.dockerignore.backup" ]]; then
+    mv "$ROOT_DIR/.dockerignore.backup" "$ROOT_DIR/.dockerignore"
+  fi
+}
 
 upload_training_data_if_needed() {
   echo "========================================"
@@ -323,6 +969,22 @@ resolve_training_public_subnet_ids() {
 update_env_file() {
   echo "Updating .env file with current stack outputs..."
 
+  # Preserve any manually set secrets from the existing .env before overwriting.
+  # Lines matching PRESERVED_SECRET_KEYS are carried forward verbatim.
+  PRESERVED_SECRET_KEYS=(
+    "CLOUDFLARE_CACHE_WARM_SECRET"
+  )
+  declare -A _preserved_secrets
+  if [[ -f "$ENV_FILE" ]]; then
+    for key in "${PRESERVED_SECRET_KEYS[@]}"; do
+      value=$(grep "^${key}=" "$ENV_FILE" | head -1 | cut -d'=' -f2-)
+      if [[ -n "$value" ]]; then
+        _preserved_secrets["$key"]="$value"
+      fi
+    done
+  fi
+
+  # Start building new .env file
   cat > "$ENV_FILE" << EOF
 # Generated by shared_config.sh - $(date)
 AWS_REGION=$REGION
@@ -523,6 +1185,15 @@ LATEST_TRAINING_IMAGE=${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/poeconomy-${
 ENVIRONMENT_NAME=${ENVIRONMENT}
 AWS_ACCOUNT_ID=${ACCOUNT_ID}
 EOF
+
+  # Re-append preserved secrets at the end of the regenerated file
+  if [[ ${#_preserved_secrets[@]} -gt 0 ]]; then
+    echo "" >> "$ENV_FILE"
+    echo "# Preserved secrets (not overwritten by deployment)" >> "$ENV_FILE"
+    for key in "${!_preserved_secrets[@]}"; do
+      echo "${key}=${_preserved_secrets[$key]}" >> "$ENV_FILE"
+    done
+  fi
 
   echo "✅ .env file updated successfully"
   echo "Updated .env file contents:"
