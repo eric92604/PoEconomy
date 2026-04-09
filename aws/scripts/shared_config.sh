@@ -9,8 +9,18 @@ set -euo pipefail
 ENVIRONMENT=${1:-production}
 REGION=${AWS_DEFAULT_REGION:-us-west-2}
 
-# AWS CLI command (handle Windows) - set early so it can be used below
-if command -v aws.exe >/dev/null 2>&1; then
+# AWS CLI command selection:
+# - In WSL, prefer Linux `aws` to avoid Windows path translation issues in `s3 sync`.
+# - Outside WSL, use `aws.exe` if available (Windows), otherwise `aws`.
+if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+  if command -v aws >/dev/null 2>&1; then
+    AWS_CMD="aws"
+  elif command -v aws.exe >/dev/null 2>&1; then
+    AWS_CMD="aws.exe"
+  else
+    AWS_CMD="aws"
+  fi
+elif command -v aws.exe >/dev/null 2>&1; then
   AWS_CMD="aws.exe"
 else
   AWS_CMD="aws"
@@ -189,6 +199,21 @@ build_and_push_lambda_image() {
   echo "Verifying pushed image manifest..."
   "$AWS_CMD" ecr describe-images --repository-name "$repository" --image-ids imageTag=latest --region "$REGION" --query 'imageDetails[0].{Digest:imageDigest,Size:imageSizeInBytes,PushedAt:imagePushedAt,ImageManifestMediaType:imageManifestMediaType}' --output table
   
+  # Resolve immutable image digest and use digest-pinned URI for Lambda deployments.
+  # This avoids tag-resolution races during CloudFormation updates.
+  local image_digest
+  image_digest=$("$AWS_CMD" ecr describe-images \
+    --repository-name "$repository" \
+    --image-ids imageTag="$timestamp" \
+    --region "$REGION" \
+    --query 'imageDetails[0].imageDigest' \
+    --output text)
+  
+  if [[ -z "$image_digest" ]] || [[ "$image_digest" == "None" ]]; then
+    echo "❌ Failed to resolve image digest for tag: $timestamp"
+    exit 1
+  fi
+  
   # Additional verification - check if the image can be pulled and inspected
   echo "Testing ECR image pull and inspection..."
   docker pull "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$repository:$timestamp"
@@ -203,7 +228,8 @@ build_and_push_lambda_image() {
   
   echo "✅ ECR image verification successful"
   
-  INFERENCE_IMAGE_URI="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$repository:$timestamp"
+  INFERENCE_IMAGE_URI="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$repository@$image_digest"
+  echo "Using immutable Lambda image URI: $INFERENCE_IMAGE_URI"
 }
 
 find_latest_experiment() {
@@ -252,6 +278,27 @@ find_latest_experiment() {
   return 1
 }
 
+find_latest_experiment_in_s3() {
+  local latest_experiment=""
+  local experiment_candidates
+
+  # Parse experiment prefixes from `aws s3 ls` output:
+  # PRE xp_YYYYMMDD_HHMMSS/
+  experiment_candidates=$("$AWS_CMD" s3 ls "s3://$DATA_LAKE_BUCKET_NAME/models/currency/" --region "$REGION" 2>/dev/null \
+    | sed -n 's/^[[:space:]]*PRE[[:space:]]\(xp_[0-9]\{8\}_[0-9]\{6\}\)\/[[:space:]]*$/\1/p' \
+    | sort)
+
+  latest_experiment=$(echo "$experiment_candidates" | sed '/^$/d' | tail -n 1)
+  latest_experiment="${latest_experiment//$'\r'/}"
+  latest_experiment="${latest_experiment//$'\n'/}"
+  if [[ -n "$latest_experiment" ]]; then
+    echo "$latest_experiment"
+    return 0
+  fi
+  
+  return 1
+}
+
 verify_local_backup() {
   echo "Checking for local model backup..."
   
@@ -264,14 +311,40 @@ verify_local_backup() {
   
   echo "✅ Local backup directory found: $backup_dir"
   
-  # Check for experiment directories (xp_* pattern)
+  # Check for latest experiment locally and in S3.
+  local local_latest_experiment
+  local s3_latest_experiment
   local latest_experiment
-  latest_experiment=$(find_latest_experiment)
+  local_latest_experiment=$(find_latest_experiment)
+  s3_latest_experiment=$(find_latest_experiment_in_s3)
+
+  latest_experiment="$local_latest_experiment"
+  if [[ -n "$s3_latest_experiment" ]] && { [[ -z "$latest_experiment" ]] || [[ "$s3_latest_experiment" > "$latest_experiment" ]]; }; then
+    latest_experiment="$s3_latest_experiment"
+  fi
+
+  # If S3 has a newer experiment than local backup, sync only that experiment directory.
+  if [[ -n "$latest_experiment" ]] && [[ "$latest_experiment" == "$s3_latest_experiment" ]] && [[ ! -d "$backup_dir/$latest_experiment" ]]; then
+    echo "⬇️  Syncing latest experiment from S3: $latest_experiment"
+    if ! "$AWS_CMD" s3 sync \
+      "s3://$DATA_LAKE_BUCKET_NAME/models/currency/$latest_experiment/" \
+      "$backup_dir/$latest_experiment/" \
+      --region "$REGION"; then
+      echo "❌ Failed to sync latest experiment from S3: $latest_experiment"
+      return 1
+    fi
+  fi
   
   if [[ -n "$latest_experiment" ]]; then
     local exp_dir="$backup_dir/$latest_experiment"
     local model_count=$(find "$exp_dir" -name "*.pkl" 2>/dev/null | wc -l)
     local metadata_count=$(find "$exp_dir" -name "model_metadata.json" 2>/dev/null | wc -l)
+    
+    if [[ $model_count -eq 0 ]]; then
+      echo "❌ Latest experiment directory has no model files: $exp_dir"
+      echo "❌ Refusing to continue with empty latest experiment."
+      return 1
+    fi
     
     echo "📁 Found latest experiment: $latest_experiment"
     echo "  Model files: $model_count"
@@ -328,18 +401,9 @@ build_lambda_image_with_models() {
   if [[ -n "$LATEST_EXPERIMENT" ]] && [[ -d "$backup_dir/$LATEST_EXPERIMENT" ]]; then
     echo "Using models from latest experiment: $LATEST_EXPERIMENT"
     
-    # Check if s3_backup/models already contains only this experiment (optimization)
-    local existing_experiments
-    existing_experiments=$(find "$backup_dir" -mindepth 1 -maxdepth 1 -type d -name "xp_*" 2>/dev/null | wc -l)
-    
-    if [[ $existing_experiments -eq 1 ]] && [[ -d "$backup_dir/$LATEST_EXPERIMENT" ]]; then
-      # Only one experiment exists and it's the one we want - no need to copy
-      echo "✅ s3_backup/models already contains only the latest experiment - skipping copy"
-      models_source_dir="$ROOT_DIR/s3_backup/models"
-      temp_models_dir=""
-    else
-      # Multiple experiments or different structure - need to isolate latest experiment
-      echo "Multiple experiments found, isolating latest experiment: $LATEST_EXPERIMENT"
+    # Always isolate latest experiment to avoid stale nested directories
+    # (e.g. previous accidental models/models copies) from leaking into the image.
+    echo "Isolating latest experiment for Docker build: $LATEST_EXPERIMENT"
       
       # Create temporary directory with only the latest experiment's models
       temp_models_dir=$(mktemp -d)
@@ -358,7 +422,10 @@ build_lambda_image_with_models() {
       # Update models_source_dir to use temp directory
       models_source_dir="$temp_models_dir/models"
       echo "✅ Using latest experiment models only"
-    fi
+  elif [[ -n "${LATEST_EXPERIMENT:-}" ]]; then
+    echo "❌ LATEST_EXPERIMENT is set but directory is missing: $backup_dir/$LATEST_EXPERIMENT"
+    echo "❌ Refusing to fall back to all models to avoid oversized Lambda images."
+    exit 1
   else
     echo "Using all models from s3_backup directory..."
     models_source_dir="$ROOT_DIR/s3_backup/models"
@@ -420,11 +487,12 @@ build_lambda_image_with_models() {
     if [[ -d "$ROOT_DIR/s3_backup/models" ]]; then
       original_models_backup="$ROOT_DIR/s3_backup/models.backup"
       echo "Backing up existing s3_backup/models..."
-      # Use copy + remove instead of move for better Windows/WSL compatibility
-      if cp -r "$ROOT_DIR/s3_backup/models" "$original_models_backup" 2>/dev/null; then
-        rm -rf "$ROOT_DIR/s3_backup/models" 2>/dev/null || {
-          echo "⚠️  Warning: Could not remove original models directory, but backup created successfully"
-        }
+      rm -rf "$original_models_backup" 2>/dev/null || true
+      # Prefer move for speed/atomicity; fallback to copy+remove.
+      if mv "$ROOT_DIR/s3_backup/models" "$original_models_backup" 2>/dev/null; then
+        :
+      elif cp -a "$ROOT_DIR/s3_backup/models/." "$original_models_backup/" 2>/dev/null; then
+        rm -rf "$ROOT_DIR/s3_backup/models" 2>/dev/null || true
       else
         echo "❌ Failed to backup s3_backup/models - permission denied or files in use"
         echo "   Try closing any applications that might be accessing the models directory"
@@ -442,7 +510,8 @@ build_lambda_image_with_models() {
       echo "   Please check directory permissions or run with appropriate privileges"
       if [[ -n "$original_models_backup" ]] && [[ -d "$original_models_backup" ]]; then
         rm -rf "$ROOT_DIR/s3_backup/models" 2>/dev/null || true
-        cp -r "$original_models_backup" "$ROOT_DIR/s3_backup/models" 2>/dev/null || true
+        mkdir -p "$ROOT_DIR/s3_backup/models"
+        cp -a "$original_models_backup/." "$ROOT_DIR/s3_backup/models/" 2>/dev/null || true
         rm -rf "$original_models_backup" 2>/dev/null || true
       fi
       rm -rf "$temp_models_dir"
@@ -460,8 +529,9 @@ build_lambda_image_with_models() {
         echo "✅ Models copied successfully"
       else
         echo "❌ Failed to copy models using rsync - trying cp..."
-        # Fallback to cp without progress (rsync progress might have failed)
-        if ! cp -r "$temp_models_dir/models" "$ROOT_DIR/s3_backup/models" 2>/dev/null; then
+        # Fallback to cp without progress (copy contents, not parent dir)
+        mkdir -p "$ROOT_DIR/s3_backup/models"
+        if ! cp -a "$temp_models_dir/models/." "$ROOT_DIR/s3_backup/models/" 2>/dev/null; then
           echo "❌ Failed to copy models to s3_backup/models - permission denied or disk full"
           echo "   Check:"
           echo "   1. Disk space: df -h"
@@ -470,7 +540,8 @@ build_lambda_image_with_models() {
           # Try to restore backup if it existed
           if [[ -n "$original_models_backup" ]] && [[ -d "$original_models_backup" ]]; then
             rm -rf "$ROOT_DIR/s3_backup/models" 2>/dev/null || true
-            cp -r "$original_models_backup" "$ROOT_DIR/s3_backup/models" 2>/dev/null || true
+            mkdir -p "$ROOT_DIR/s3_backup/models"
+            cp -a "$original_models_backup/." "$ROOT_DIR/s3_backup/models/" 2>/dev/null || true
             rm -rf "$original_models_backup" 2>/dev/null || true
           fi
           rm -rf "$temp_models_dir"
@@ -482,7 +553,8 @@ build_lambda_image_with_models() {
     else
       # Fallback to cp if rsync not available
       echo "Using cp to copy models (rsync not available)..."
-      if cp -r "$temp_models_dir/models" "$ROOT_DIR/s3_backup/models" 2>/dev/null; then
+      mkdir -p "$ROOT_DIR/s3_backup/models"
+      if cp -a "$temp_models_dir/models/." "$ROOT_DIR/s3_backup/models/" 2>/dev/null; then
         rm -rf "$temp_models_dir" 2>/dev/null || true
         echo "✅ Models copied successfully"
       else
@@ -494,7 +566,8 @@ build_lambda_image_with_models() {
         # Try to restore backup if it existed
         if [[ -n "$original_models_backup" ]] && [[ -d "$original_models_backup" ]]; then
           rm -rf "$ROOT_DIR/s3_backup/models" 2>/dev/null || true
-          cp -r "$original_models_backup" "$ROOT_DIR/s3_backup/models" 2>/dev/null || true
+          mkdir -p "$ROOT_DIR/s3_backup/models"
+          cp -a "$original_models_backup/." "$ROOT_DIR/s3_backup/models/" 2>/dev/null || true
           rm -rf "$original_models_backup" 2>/dev/null || true
         fi
         rm -rf "$temp_models_dir"
@@ -663,7 +736,8 @@ build_lambda_image_with_models() {
       echo "⚠️  Warning: Could not remove current models directory, attempting to restore anyway"
     }
     # Restore backup using copy + remove for better Windows/WSL compatibility
-    if cp -r "$original_models_backup" "$ROOT_DIR/s3_backup/models" 2>/dev/null; then
+    mkdir -p "$ROOT_DIR/s3_backup/models"
+    if cp -a "$original_models_backup/." "$ROOT_DIR/s3_backup/models/" 2>/dev/null; then
       rm -rf "$original_models_backup" 2>/dev/null || {
         echo "⚠️  Warning: Could not remove backup directory, but restoration successful"
       }

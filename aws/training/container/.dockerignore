@@ -11,6 +11,7 @@ aws/lambda/
 aws/feature-engineering/
 aws/cloudformation/
 aws/scripts/
+aws/dist/
 
 # Exclude cloudflare, frontend, and other non-essential directories
 cloudflare/
@@ -35,6 +36,7 @@ __pycache__/
 env/
 venv/
 .venv/
+.venv-wsl/
 pip-log.txt
 pip-delete-this-directory.txt
 .tox/

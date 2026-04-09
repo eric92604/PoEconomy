@@ -168,6 +168,24 @@ class _MockTrial:
         return self._lookup(name)
 
 
+def _is_catboost_regressor(model: Any) -> bool:
+    """True if *model* is a CatBoost ``CatBoostRegressor`` (optional dependency)."""
+    cls = type(model)
+    return cls.__name__ == "CatBoostRegressor" and getattr(cls, "__module__", "").startswith(
+        "catboost"
+    )
+
+
+def _first_metric_series_from_catboost_block(block: Any) -> List[float]:
+    """Return the first metric series from a ``get_evals_result()`` sub-dict (e.g. ``{'RMSE': [...]}``)."""
+    if not isinstance(block, dict) or not block:
+        return []
+    for series in block.values():
+        if isinstance(series, list):
+            return series
+    return []
+
+
 class BaseModel(ABC):
     """Abstract base class for ML models."""
     
@@ -202,7 +220,11 @@ class BaseModel(ABC):
     ) -> Dict[str, Any]:
         """
         Fit the model to training data.
-        
+
+        When validation data is present, LightGBM and CatBoost use the same
+        ``eval_set`` ordering (train then validation) and
+        ``ModelConfig.early_stopping_rounds`` for early stopping.
+
         Returns:
             Dictionary containing training history (losses per epoch) if available
         """
@@ -230,7 +252,7 @@ class BaseModel(ABC):
                     self.logger.debug(f"Applied median imputation for {self.get_model_type()} model and stored imputer for inference")
         
         if X_val is not None and y_val is not None:
-            # Always use early stopping when validation data exists
+            # Early stopping when validation data exists (same eval_set layout for LGBM and CatBoost).
             if isinstance(self.model, lgb.LGBMRegressor):
                 # LightGBM early stopping with history tracking
                 evals_result = {}
@@ -249,6 +271,27 @@ class BaseModel(ABC):
                         'train_loss': evals_result.get('training', {}).get('l2', []),
                         'val_loss': evals_result.get('validation', {}).get('l2', []),
                         'epochs': len(evals_result.get('validation', {}).get('l2', []))
+                    }
+            elif _is_catboost_regressor(self.model):
+                # CatBoost monitors the last eval set; order matches LightGBM (train, then validation).
+                self.model.fit(
+                    X,
+                    y,
+                    eval_set=[(X, y), (X_val, y_val)],
+                    early_stopping_rounds=self.config.early_stopping_rounds,
+                    verbose=False,
+                )
+                evals_result = self.model.get_evals_result()
+                if evals_result:
+                    train_loss = _first_metric_series_from_catboost_block(evals_result.get("learn", {}))
+                    val_block = evals_result.get("validation_1")
+                    if val_block is None:
+                        val_block = evals_result.get("validation")
+                    val_loss = _first_metric_series_from_catboost_block(val_block or {})
+                    training_history = {
+                        "train_loss": train_loss,
+                        "val_loss": val_loss,
+                        "epochs": len(val_loss) if val_loss else len(train_loss),
                     }
             else:
                 # Other models without early stopping
@@ -741,8 +784,11 @@ class LeagueWalkForwardSplit:
         for i in range(1, len(historical)):
             train_leagues = set(historical[:i])
             val_league = historical[i]
-            train_idx = self.df.index[self.df['league_name'].isin(train_leagues)].to_numpy()
-            val_idx = self.df.index[self.df['league_name'] == val_league].to_numpy()
+            # Positional indices so folds align with X/y arrays (always 0..n-1 after reset).
+            train_mask = self.df['league_name'].isin(train_leagues).to_numpy()
+            val_mask = (self.df['league_name'] == val_league).to_numpy()
+            train_idx = np.flatnonzero(train_mask)
+            val_idx = np.flatnonzero(val_mask)
             if len(train_idx) >= 10 and len(val_idx) >= 5:
                 folds.append((train_idx, val_idx))
         return folds
@@ -787,14 +833,22 @@ class HyperparameterOptimizer:
         # Pre-compute walk-forward folds outside the trial function (expensive).
         wf_folds: List[Tuple[np.ndarray, np.ndarray]] = []
         if use_walk_forward and train_df is not None:
-            splitter = LeagueWalkForwardSplit(train_df, min_leagues=min_wf_leagues)
-            if splitter.is_usable():
-                wf_folds = splitter.split()
-                if self.logger and wf_folds:
+            if len(train_df) != len(X):
+                if self.logger:
                     self.logger.debug(
-                        f"Using LeagueWalkForwardSplit for {currency}: "
-                        f"{len(wf_folds)} fold(s)"
+                        f"Skipping LeagueWalkForwardSplit for {currency}: "
+                        f"train_df has {len(train_df)} rows but X has {len(X)}; "
+                        "using TimeSeriesSplit or validation objective instead."
                     )
+            else:
+                splitter = LeagueWalkForwardSplit(train_df, min_leagues=min_wf_leagues)
+                if splitter.is_usable():
+                    wf_folds = splitter.split()
+                    if self.logger and wf_folds:
+                        self.logger.debug(
+                            f"Using LeagueWalkForwardSplit for {currency}: "
+                            f"{len(wf_folds)} fold(s)"
+                        )
 
         def objective(trial: Any) -> float:
             # Create model with trial parameters

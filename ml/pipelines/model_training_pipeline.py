@@ -943,6 +943,9 @@ class ModelTrainingPipeline:
             target_mask = ~pd.isna(y_h)
             X_h = X_h[target_mask]
             y_h = y_h[target_mask]
+            # Positional mask from y_h.values — use iloc so it matches X_h even if
+            # data has a non-RangeIndex.
+            train_df_for_hp = data.iloc[target_mask].reset_index(drop=True)
 
             if len(X_h) < 10:
                 self.logger.warning(
@@ -965,7 +968,7 @@ class ModelTrainingPipeline:
                 feature_names=h_feature_cols,
                 X_val=val['X_val'],
                 y_val=val['y_val'],
-                train_df=data,
+                train_df=train_df_for_hp,
             )
 
             if training_result is not None:

@@ -31,21 +31,35 @@ ECR_REPOSITORY_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$CONTAINER
 
 echo "Container URI: $ECR_REPOSITORY_URI"
 
+# Swap in ingestion-specific .dockerignore (Docker only reads the context root; same pattern as prediction Lambda)
+if [[ -f "$ROOT_DIR/.dockerignore" ]]; then
+  cp "$ROOT_DIR/.dockerignore" "$ROOT_DIR/.dockerignore.backup"
+fi
+cp "$ROOT_DIR/aws/lambdas/ingestion/container/.dockerignore" "$ROOT_DIR/.dockerignore"
+
+restore_root_dockerignore() {
+  if [[ -f "$ROOT_DIR/.dockerignore.backup" ]]; then
+    mv "$ROOT_DIR/.dockerignore.backup" "$ROOT_DIR/.dockerignore"
+  fi
+}
+trap restore_root_dockerignore EXIT
+
 # Build the container image with explicit platform for Lambda compatibility
 echo "Building Docker image with explicit platform..."
-DOCKER_BUILDKIT=0 docker build \
+if ! DOCKER_BUILDKIT=0 docker build \
   --platform linux/amd64 \
   --tag "$CONTAINER_NAME:$IMAGE_TAG" \
   --file "$SCRIPT_DIR/../lambdas/ingestion/container/Dockerfile" \
   --no-cache \
-  "$ROOT_DIR"
-
-if [ $? -ne 0 ]; then
-    echo "❌ Failed to build Docker image"
-    exit 1
+  "$ROOT_DIR"; then
+  echo "❌ Failed to build Docker image"
+  exit 1
 fi
 
 echo "✅ Docker image built successfully"
+
+trap - EXIT
+restore_root_dockerignore
 
 # Verify the image architecture
 echo "Verifying image architecture..."
