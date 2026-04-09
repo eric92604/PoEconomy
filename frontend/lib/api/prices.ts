@@ -62,7 +62,7 @@ export async function getHistoricalPrices(params: {
   if (params.end_date) searchParams.append("end_date", params.end_date);
   if (params.limit) searchParams.append("limit", params.limit.toString());
   
-  const response = await apiClient.get<HistoricalPricesResponse>(`/prices/historical?${searchParams}`);
+  const response = await apiClient.get<HistoricalPricesResponse>(`/prices/history?${searchParams}`);
   return response;
 }
 

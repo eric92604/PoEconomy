@@ -456,7 +456,8 @@ def _get_available_currencies(league: str) -> List[str]:
         }
         
         if has_league_attribute:
-            scan_params['FilterExpression'] = Key('league').eq(league)
+            # Scan FilterExpression must use Attr for non-key attributes; Key is for KeyConditionExpression only.
+            scan_params["FilterExpression"] = Attr("league").eq(league)
         
         response = _METADATA_TABLE.scan(**scan_params)
         

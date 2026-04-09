@@ -9,21 +9,22 @@ import { TrendingUp, Clock, BarChart3, Target } from "lucide-react";
 import { formatPercentage } from "@/lib/utils";
 import { useMemo } from "react";
 import { CurrencyIcon } from "@/components/currency/currency-icon";
+import { LATEST_PREDICTIONS_HORIZONS } from "@/lib/constants/predictions";
 
 export function LiveStatsBar() {
   const { data: currenciesData, isLoading: currenciesLoading } = useCurrencies();
   const { data: leaguesData, isLoading: leaguesLoading } = useLeagues();
   
-  // Get preferred league
+  // Match dashboard: first league from API (seasonal-first sort from backend)
   const preferredLeague = useMemo(() => {
     if (!leaguesData) return null;
     const leagues = Object.keys(leaguesData.leagues);
-    return leagues.includes("Keepers") ? "Keepers" : leagues[0];
+    return leagues[0] ?? null;
   }, [leaguesData]);
 
   const { data: predictionsData, isLoading: predictionsLoading } = useLatestPredictions({
     league: preferredLeague || undefined,
-    horizons: ["1d"],
+    horizons: [...LATEST_PREDICTIONS_HORIZONS],
     limit: 100,
     enabled: !!preferredLeague,
   });

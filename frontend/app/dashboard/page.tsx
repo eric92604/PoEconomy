@@ -17,6 +17,7 @@ import {
   Target,
   ArrowRight,
   BarChart3,
+  History,
   RefreshCw,
 } from "lucide-react";
 import { useCurrencies, useLeagues, useLatestPredictions } from "@/lib/hooks";
@@ -25,6 +26,7 @@ import { formatPercentage, formatConfidence, formatChaosPrice } from "@/lib/util
 import { CurrencyIcon } from "@/components/currency/currency-icon";
 import { ChaosPrice } from "@/components/currency/chaos-price";
 import { preloadAllCurrencyIcons } from "@/lib/utils/icon-preloader";
+import { LATEST_PREDICTIONS_HORIZONS } from "@/lib/constants/predictions";
 import type { CurrencyWithPredictions } from "@/types";
 
 export default function DashboardPage() {
@@ -53,7 +55,7 @@ export default function DashboardPage() {
   // Only fetch when we have a league to prevent multiple calls
   const { data: predictionsData, isLoading: predictionsLoading, isFetching: predictionsFetching } = useLatestPredictions({
     league: preferredLeague || undefined,
-    horizons: ["1d"], // Only 1d horizon for dashboard
+    horizons: [...LATEST_PREDICTIONS_HORIZONS],
     limit: 500, // Increase limit to get more currencies
     enabled: !!preferredLeague, // Only fetch when we have a league
   });
@@ -345,6 +347,18 @@ export default function DashboardPage() {
               <CardTitle>Live Prices</CardTitle>
               <CardDescription>
                 Track real-time currency prices and trends
+              </CardDescription>
+            </CardHeader>
+          </Link>
+        </Card>
+
+        <Card className="hover:bg-muted/50 transition-colors cursor-pointer">
+          <Link href="/league-history">
+            <CardHeader>
+              <History className="h-8 w-8 mb-2 text-primary" />
+              <CardTitle>League History</CardTitle>
+              <CardDescription>
+                Compare prices across previous leagues to spot recurring patterns
               </CardDescription>
             </CardHeader>
           </Link>

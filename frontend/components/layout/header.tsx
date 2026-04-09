@@ -16,6 +16,7 @@ const navigation = [
   { name: "Dashboard", href: "/dashboard" },
   { name: "Investments", href: "/investments" },
   { name: "Live Prices", href: "/prices" },
+  { name: "League History", href: "/league-history" },
 ];
 
 export function Header() {

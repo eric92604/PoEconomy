@@ -6,6 +6,8 @@ interface Env {
   CACHE_TTL?: string;
   RATE_LIMIT_PER_MINUTE?: string;
   DEBUG_MODE?: string;
+  CACHE_WARM_SECRET?: string;
+  CLOUDFLARE_WORKER_URL?: string;
   CACHE_KV: KVNamespace;
   RATE_LIMIT_KV: KVNamespace;
 }
@@ -16,12 +18,194 @@ interface CachedResponse {
 }
 
 const CACHEABLE_PATHS = new Set([
-  '/predict/currencies', 
+  '/predict/currencies',
   '/predict/leagues',
   '/predict/latest',
   '/predict/currency',
-  '/predict/batch'
+  '/predict/batch',
+  '/prices/leagues',        // league list from historical archive table
+  '/prices/league-history', // cross-league price comparison series
+  '/prices/history',        // daily aggregated prices for a single league
 ]);
+
+async function handleCacheWarm(request: Request, env: Env): Promise<Response> {
+  const secret = request.headers.get('x-cache-warm-secret');
+  if (!secret || secret !== env.CACHE_WARM_SECRET) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const body = await request.json() as { league?: string; leagues?: string[] };
+  const leagues: string[] = body.leagues ?? (body.league ? [body.league] : []);
+
+  const warmed: string[] = [];
+  const failed: string[] = [];
+  const baseUrl = env.CLOUDFLARE_WORKER_URL ?? 'https://api.poeconomy.com';
+
+  // Always warm static metadata endpoints
+  const staticEndpoints = ['/predict/currencies', '/predict/leagues'];
+  for (const path of staticEndpoints) {
+    try {
+      const resp = await fetch(`${baseUrl}${path}`);
+      if (resp.ok) warmed.push(path);
+      else failed.push(path);
+    } catch {
+      failed.push(path);
+    }
+  }
+
+  // Warm per-league prediction endpoints
+  for (const league of leagues) {
+    const paths = [
+      `/predict/latest?league=${encodeURIComponent(league)}&horizons=1d,3d,7d`,
+    ];
+    for (const path of paths) {
+      try {
+        const resp = await fetch(`${baseUrl}${path}`);
+        if (resp.ok) warmed.push(path);
+        else failed.push(path);
+      } catch {
+        failed.push(path);
+      }
+    }
+  }
+
+  return new Response(JSON.stringify({ warmed, failed }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+async function handleCacheWarmHistory(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const secret = request.headers.get('x-cache-warm-secret');
+  if (!secret || secret !== env.CACHE_WARM_SECRET) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const baseUrl = env.CLOUDFLARE_WORKER_URL ?? 'https://api.poeconomy.com';
+
+  // Fetch leagues and currencies in parallel, then fan out to all (currency, league) pairs.
+  // Each subrequest hits this same Worker so the existing KV caching logic fires automatically.
+  // Returns 202 immediately; the actual warming runs in the background via ctx.waitUntil.
+  async function warmAllPairs(): Promise<void> {
+    // 1. Enumerate leagues from /prices/leagues
+    let leagues: string[] = [];
+    try {
+      const leaguesResp = await fetch(`${baseUrl}/prices/leagues`);
+      if (leaguesResp.ok) {
+        const data = await leaguesResp.json() as { leagues: Record<string, unknown> };
+        leagues = Object.keys(data.leagues ?? {});
+      }
+    } catch (e) {
+      console.error('[cache-warm-history] Failed to fetch leagues:', e);
+    }
+
+    // 2. Enumerate currencies from /predict/currencies
+    let currencies: string[] = [];
+    try {
+      const currResp = await fetch(`${baseUrl}/predict/currencies`);
+      if (currResp.ok) {
+        const data = await currResp.json() as { currencies: Record<string, unknown> };
+        // currencies is keyed by league; collect unique currency names across all leagues
+        const currencySet = new Set<string>();
+        for (const leagueCurrencies of Object.values(data.currencies ?? {})) {
+          for (const name of Object.keys(leagueCurrencies as Record<string, unknown>)) {
+            currencySet.add(name);
+          }
+        }
+        currencies = Array.from(currencySet);
+      }
+    } catch (e) {
+      console.error('[cache-warm-history] Failed to fetch currencies:', e);
+    }
+
+    if (leagues.length === 0 || currencies.length === 0) {
+      console.error('[cache-warm-history] No leagues or currencies found, aborting.');
+      return;
+    }
+
+    // 3. Build all (currency, league) pairs
+    const pairs: { currency: string; league: string }[] = [];
+    for (const league of leagues) {
+      for (const currency of currencies) {
+        pairs.push({ currency, league });
+      }
+    }
+
+    console.log(`[cache-warm-history] Warming ${pairs.length} (currency, league) pairs across ${leagues.length} leagues and ${currencies.length} currencies`);
+
+    // 4. Fan out in batches of 10 to avoid overwhelming the origin Lambda
+    const BATCH_SIZE = 10;
+    let warmed = 0;
+    let failed = 0;
+    for (let i = 0; i < pairs.length; i += BATCH_SIZE) {
+      const batch = pairs.slice(i, i + BATCH_SIZE);
+      await Promise.all(
+        batch.map(async ({ currency, league }) => {
+          const path = `/prices/league-history?currency=${encodeURIComponent(currency)}&league=${encodeURIComponent(league)}`;
+          try {
+            const resp = await fetch(`${baseUrl}${path}`);
+            if (resp.ok) {
+              warmed++;
+            } else {
+              failed++;
+              console.warn(`[cache-warm-history] Non-OK response for ${path}: ${resp.status}`);
+            }
+          } catch (e) {
+            failed++;
+            console.error(`[cache-warm-history] Fetch failed for ${path}:`, e);
+          }
+        })
+      );
+    }
+
+    console.log(`[cache-warm-history] Complete — warmed: ${warmed}, failed: ${failed}, total: ${pairs.length}`);
+  }
+
+  ctx.waitUntil(warmAllPairs());
+
+  return new Response(
+    JSON.stringify({
+      status: 'accepted',
+      message: 'Historical cache warm started in background. Check Worker logs for progress.',
+    }),
+    { status: 202, headers: { 'Content-Type': 'application/json' } }
+  );
+}
+
+async function handleCacheClear(request: Request, env: Env): Promise<Response> {
+  const secret = request.headers.get('x-cache-warm-secret');
+  if (!secret || secret !== env.CACHE_WARM_SECRET) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const body = await request.json() as { prefix?: string };
+  const prefix = body.prefix ?? '';
+
+  let deleted = 0;
+  let cursor: string | undefined;
+  do {
+    const list = await env.CACHE_KV.list({ prefix, cursor, limit: 1000 });
+    for (const key of list.keys) {
+      await env.CACHE_KV.delete(key.name);
+      deleted++;
+    }
+    cursor = list.list_complete ? undefined : list.cursor;
+  } while (cursor);
+
+  return new Response(JSON.stringify({ deleted, prefix }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -37,6 +221,18 @@ export default {
     }
 
     const url = new URL(request.url);
+
+    // Admin endpoints — bypass rate limiting
+    if (url.pathname === '/admin/cache-warm' && request.method === 'POST') {
+      return handleCacheWarm(request, env);
+    }
+    if (url.pathname === '/admin/cache-warm-history' && request.method === 'POST') {
+      return handleCacheWarmHistory(request, env, ctx);
+    }
+    if (url.pathname === '/admin/cache-clear' && request.method === 'POST') {
+      return handleCacheClear(request, env);
+    }
+
     const perMinute = Number(env.RATE_LIMIT_PER_MINUTE ?? '60');
     if (perMinute > 0) {
       const rateResp = await kvRateLimit(request, env.RATE_LIMIT_KV, perMinute);
@@ -50,7 +246,6 @@ export default {
     const isCacheable = request.method === 'GET' && CACHEABLE_PATHS.has(url.pathname);
 
     if (isCacheable) {
-      // Generate cache key from URL and query parameters
       const cacheKey = `${url.pathname}${url.search}`;
       const cached = await env.CACHE_KV.get(cacheKey, 'json');
       if (cached) {
@@ -59,23 +254,26 @@ export default {
         headers.set('Access-Control-Allow-Origin', '*');
         headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key');
         headers.set('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-        
-        // Add cache headers for cached responses too
+
         let browserCacheTTL: number;
         if (url.pathname === '/predict/currencies' || url.pathname === '/predict/leagues') {
-          browserCacheTTL = 1800; // 30 minutes for metadata
+          browserCacheTTL = 1800;
+        } else if (url.pathname === '/prices/leagues' || url.pathname === '/prices/league-history') {
+          browserCacheTTL = 86400;
+        } else if (url.pathname === '/prices/history') {
+          browserCacheTTL = 3600;
         } else if (url.pathname.includes('/predict/')) {
-          browserCacheTTL = 600; // 10 minutes for predictions
+          browserCacheTTL = 300;
         } else {
-          browserCacheTTL = 600; // 10 minutes default
+          browserCacheTTL = 600;
         }
-        
+
         headers.set(
-          'Cache-Control', 
+          'Cache-Control',
           `public, max-age=${browserCacheTTL}, stale-while-revalidate=${browserCacheTTL * 2}`
         );
-        headers.set('X-Cache', 'HIT'); // Helpful for debugging
-        
+        headers.set('X-Cache', 'HIT');
+
         return new Response(JSON.stringify(body), { ...init, headers });
       }
     }
@@ -84,14 +282,13 @@ export default {
     const upstreamHeaders = new Headers();
     upstreamHeaders.set('x-api-key', env.AWS_API_KEY);
     upstreamHeaders.set('Content-Type', 'application/json');
-    
-    // Only forward the request body if it exists
+
     if (request.body) {
       upstreamHeaders.set('Content-Length', request.headers.get('content-length') || '0');
     }
 
     const debugMode = env.DEBUG_MODE === 'true';
-    
+
     if (debugMode) {
       console.log('=== REQUEST DEBUG ===');
       console.log('Method:', request.method);
@@ -108,7 +305,7 @@ export default {
       headers: upstreamHeaders,
       body: request.body,
     });
-    
+
     if (debugMode) {
       console.log('=== UPSTREAM REQUEST ===');
       console.log('URL:', upstreamRequest.url);
@@ -120,11 +317,11 @@ export default {
 
     let response: Response;
     let respBody: string;
-    
+
     try {
       response = await fetch(upstreamRequest);
       respBody = await response.text();
-      
+
       if (debugMode) {
         console.log('=== RESPONSE DEBUG ===');
         console.log('Status:', response.status, response.statusText);
@@ -133,16 +330,14 @@ export default {
         console.log('Headers received:', respHeadersObj);
         console.log('Body:', respBody.length > 500 ? respBody.substring(0, 500) + '...' : respBody);
       }
-      
-      // Log the actual response for debugging
+
       console.log('=== AWS API RESPONSE ===');
       console.log('Status:', response.status);
       console.log('Body:', respBody);
     } catch (error) {
-      // Always log errors (critical for debugging)
       console.error('=== FETCH ERROR ===');
       console.error('Error:', error);
-      return new Response(JSON.stringify({ 
+      return new Response(JSON.stringify({
         error: 'Failed to connect to API Gateway',
         details: debugMode && error instanceof Error ? error.message : 'Connection failed',
         targetUrl: debugMode ? targetUrl.toString() : undefined
@@ -159,47 +354,48 @@ export default {
     headers.set('Access-Control-Allow-Origin', '*');
     headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key');
     headers.set('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    headers.set('X-Cache', 'MISS'); // Helpful for debugging - fresh from origin
+    headers.set('X-Cache', 'MISS');
 
     if (isCacheable && response.ok) {
-      // Generate cache key for storage
       const cacheKey = `${url.pathname}${url.search}`;
-      
-      // Set different TTL based on endpoint type
-      let ttl: number;
+
+      let ttl: number | null;
       let browserCacheTTL: number;
-      
+
       if (url.pathname === '/predict/latest') {
-        ttl = 600; // 10 minutes for latest predictions (optimal for fresh data)
-        browserCacheTTL = 300; // 5 minutes browser cache
+        ttl = 600;
+        browserCacheTTL = 300;
       } else if (url.pathname === '/predict/currency') {
-        ttl = 600; // 10 minutes for currency-specific predictions (optimal for fresh data)
-        browserCacheTTL = 300; // 5 minutes browser cache
+        ttl = 600;
+        browserCacheTTL = 300;
       } else if (url.pathname === '/predict/batch') {
-        ttl = 600; // 10 minutes for batch predictions (optimal for fresh data)
-        browserCacheTTL = 300; // 5 minutes browser cache
+        ttl = 600;
+        browserCacheTTL = 300;
       } else if (url.pathname === '/predict/currencies' || url.pathname === '/predict/leagues') {
-        ttl = Number(env.CACHE_TTL ?? '1800'); // 30 minutes for metadata endpoints
-        browserCacheTTL = 1800; // 30 minutes browser cache - metadata changes rarely
+        ttl = Number(env.CACHE_TTL ?? '1800');
+        browserCacheTTL = 1800;
+      } else if (url.pathname === '/prices/leagues' || url.pathname === '/prices/league-history') {
+        ttl = null;     // permanent — immutable seeded data, cleared manually on new league
+        browserCacheTTL = 86400;
+      } else if (url.pathname === '/prices/history') {
+        ttl = 86400;    // 24h — daily aggregation appends one new row per day
+        browserCacheTTL = 3600;
       } else {
-        ttl = Number(env.CACHE_TTL ?? '1800'); // 1 hour for other endpoints
-        browserCacheTTL = 600; // 10 minutes browser cache
+        ttl = Number(env.CACHE_TTL ?? '1800');
+        browserCacheTTL = 600;
       }
-      
-      // Add Cache-Control headers for browser caching
-      // stale-while-revalidate allows serving stale content while fetching fresh data
+
       headers.set(
-        'Cache-Control', 
+        'Cache-Control',
         `public, max-age=${browserCacheTTL}, stale-while-revalidate=${browserCacheTTL * 2}`
       );
-      
-      // Add ETag for conditional requests (optional but recommended)
+
       const etag = `W/"${Date.now()}-${cacheKey.substring(0, 8)}"`;
       headers.set('ETag', etag);
-      
+
       const headersArray: [string, string][] = [];
       headers.forEach((value, key) => { headersArray.push([key, value]); });
-      
+
       const cacheData: CachedResponse = {
         body: JSON.parse(respBody),
         init: {
@@ -207,9 +403,10 @@ export default {
           headers: headersArray,
         },
       };
-      await env.CACHE_KV.put(cacheKey, JSON.stringify(cacheData), { expirationTtl: ttl });
+
+      const putOptions = ttl !== null ? { expirationTtl: ttl } : {};
+      await env.CACHE_KV.put(cacheKey, JSON.stringify(cacheData), putOptions);
     } else if (!response.ok) {
-      // Don't cache errors in browser
       headers.set('Cache-Control', 'no-store');
     }
 
