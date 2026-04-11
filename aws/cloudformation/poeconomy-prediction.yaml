@@ -16,6 +16,11 @@ Parameters:
   IngestionStackName:
     Type: String
     Description: Name of the ingestion stack to import DynamoDB tables from
+  CloudflareCacheWarmSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Shared secret for Cloudflare Worker cache-warm endpoint (passed from aws/.env, never stored in this file)
 
 Resources:
   # DynamoDB Table for Predictions
@@ -188,6 +193,8 @@ Resources:
               Fn::Sub: '${BaseStackName}-DataLakeBucket'
           STREAM_REFRESH_TTL_HOURS: '2'
           LOG_LEVEL: INFO
+          CLOUDFLARE_WORKER_URL: 'https://api.poeconomy.com'
+          CLOUDFLARE_CACHE_WARM_SECRET: !Ref CloudflareCacheWarmSecret
       Tags:
         - Key: App
           Value: PoEconomy

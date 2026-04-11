@@ -178,6 +178,43 @@ Resources:
         - Key: App
           Value: PoEconomy
 
+  HistoricalLeaguePricesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'poeconomy-${EnvironmentName}-historical-league-prices'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: currency_league
+          AttributeType: S
+        - AttributeName: date
+          AttributeType: S
+        - AttributeName: league
+          AttributeType: S
+      KeySchema:
+        - AttributeName: currency_league
+          KeyType: HASH
+        - AttributeName: date
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: league-date-index
+          KeySchema:
+            - AttributeName: league
+              KeyType: HASH
+            - AttributeName: date
+              KeyType: RANGE
+          Projection:
+            ProjectionType: INCLUDE
+            NonKeyAttributes:
+              - currency
+              - avg_price
+              - high_price
+              - low_price
+              - price_change_percent
+              - league_start_date
+      Tags:
+        - Key: App
+          Value: PoEconomy
+
   # IAM Roles
   IngestionLambdaRole:
     Type: AWS::IAM::Role
@@ -212,6 +249,8 @@ Resources:
                   - !GetAtt LivePricesTable.Arn
                   - !GetAtt LeagueMetadataTable.Arn
                   - !GetAtt DailyPricesTable.Arn
+                  - !GetAtt HistoricalLeaguePricesTable.Arn
+                  - !Sub '${HistoricalLeaguePricesTable.Arn}/index/league-date-index'
         - PolicyName: LambdaInvokeAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -333,6 +372,8 @@ Resources:
                   - !GetAtt LivePricesTable.Arn
                   - !GetAtt LeagueMetadataTable.Arn
                   - !GetAtt DailyPricesTable.Arn
+                  - !GetAtt HistoricalLeaguePricesTable.Arn
+                  - !Sub '${HistoricalLeaguePricesTable.Arn}/index/league-date-index'
       Tags:
         - Key: App
           Value: PoEconomy
@@ -474,7 +515,8 @@ Resources:
           LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
           DYNAMO_LEAGUE_METADATA_TABLE: !Ref LeagueMetadataTable
           DAILY_PRICES_TABLE: !Ref DailyPricesTable
-          DATA_LAKE_BUCKET: 
+          HISTORICAL_LEAGUE_PRICES_TABLE: !Ref HistoricalLeaguePricesTable
+          DATA_LAKE_BUCKET:
             Fn::ImportValue:
               Fn::Sub: '${BaseStackName}-DataLakeBucket'
           PREDICTION_REFRESH_FUNCTION_NAME: !Sub 'poeconomy-${EnvironmentName}-prediction-refresh'
@@ -642,6 +684,12 @@ Outputs:
     Value: !Ref DailyPricesTable
     Export:
       Name: !Sub '${AWS::StackName}-DailyPricesTable'
+
+  HistoricalLeaguePricesTableName:
+    Description: DynamoDB table for historical league prices (archived, no TTL)
+    Value: !Ref HistoricalLeaguePricesTable
+    Export:
+      Name: !Sub '${AWS::StackName}-HistoricalLeaguePricesTable'
 
   IngestionLambdaName:
     Description: Name of the ingestion Lambda function

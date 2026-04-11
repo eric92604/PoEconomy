@@ -201,3 +201,36 @@ export type ApiResponse<T> = {
   error: ApiError;
 };
 
+/**
+ * A single price point in a historical league series
+ */
+export interface LeagueHistoricalPrice {
+  date: string;
+  avg_price: number;
+}
+
+/**
+ * Data for one league within a league-history response
+ */
+export interface LeagueHistoricalSeries {
+  league_start_date: string | null;
+  count: number;
+  prices: LeagueHistoricalPrice[];
+  error?: string;
+}
+
+/**
+ * Response from GET /prices/league-history
+ */
+export interface LeagueHistoricalResponse {
+  currency: string;
+  leagues: Record<string, LeagueHistoricalSeries>;
+}
+
+/**
+ * Response from GET /prices/leagues
+ */
+export interface HistoricalLeaguesResponse {
+  leagues: Record<string, { league_start_date: string | null }>;
+}
+

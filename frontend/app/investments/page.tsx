@@ -28,6 +28,7 @@ import type { CurrencyWithPredictions, CurrencyFilters, ChartDataPoint } from "@
 import { filterCurrencies, countActiveFilters } from "@/lib/utils";
 import { preloadAllCurrencyIcons, preloadVisibleIcons } from "@/lib/utils/icon-preloader";
 import { PriceChart } from "@/components/charts";
+import { LATEST_PREDICTIONS_HORIZONS } from "@/lib/constants/predictions";
 
 export default function InvestmentsPage() {
   const queryClient = useQueryClient();
@@ -74,7 +75,7 @@ export default function InvestmentsPage() {
   // Load all currencies with all horizons for comprehensive investment analysis
   const { data: predictionsData, isLoading: predictionsLoading, isFetching: predictionsFetching } = useLatestPredictions({
     league: selectedLeague || undefined,
-    horizons: ["1d", "3d", "7d"], // All horizons for investment analysis
+    horizons: [...LATEST_PREDICTIONS_HORIZONS],
     limit: 500, // Increase limit to get more currencies
     enabled: !!selectedLeague, // Only fetch when we have a selected league
   });

@@ -12,6 +12,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from http import HTTPStatus
 from typing import Any, Dict, List, Optional, Tuple
@@ -36,11 +37,12 @@ _METADATA_TABLE = None
 _LEAGUE_METADATA_TABLE = None
 _PREDICTIONS_TABLE = None
 _PRICING_TABLE = None
+_HISTORICAL_LEAGUE_PRICES_TABLE = None
 
 
 def lambda_handler(event: dict, _context) -> dict:
     """Handle API Gateway proxy events."""
-    global _APP_ENV, _DYNAMO_RESOURCE, _METADATA_TABLE, _LEAGUE_METADATA_TABLE, _PREDICTIONS_TABLE, _PRICING_TABLE
+    global _APP_ENV, _DYNAMO_RESOURCE, _METADATA_TABLE, _LEAGUE_METADATA_TABLE, _PREDICTIONS_TABLE, _PRICING_TABLE, _HISTORICAL_LEAGUE_PRICES_TABLE
 
     if _APP_ENV is None:
         _APP_ENV = load_environment()
@@ -55,6 +57,8 @@ def lambda_handler(event: dict, _context) -> dict:
         else:
             raise RuntimeError("DYNAMO_PREDICTIONS_TABLE environment variable is required for the API handler")
         _PRICING_TABLE = _DYNAMO_RESOURCE.Table(_APP_ENV.live_prices_table)
+        if _APP_ENV.historical_league_prices_table:
+            _HISTORICAL_LEAGUE_PRICES_TABLE = _DYNAMO_RESOURCE.Table(_APP_ENV.historical_league_prices_table)
 
     request = ApiRequest.from_event(event)
     LOGGER.debug("Handling %s %s", request.http_method, request.path)
@@ -79,8 +83,12 @@ def lambda_handler(event: dict, _context) -> dict:
             response_body, status = _handle_latest_predictions(request.query_params)
         elif request.path == "/prices/live" and request.http_method == "GET":
             response_body, status = _handle_live_prices(request.query_params)
-        elif request.path == "/prices/historical" and request.http_method == "GET":
+        elif request.path == "/prices/history" and request.http_method == "GET":
             response_body, status = _handle_historical_prices(request.query_params)
+        elif request.path == "/prices/league-history" and request.http_method == "GET":
+            response_body, status = _handle_league_historical_prices(request.query_params)
+        elif request.path == "/prices/leagues" and request.http_method == "GET":
+            response_body, status = _handle_league_list()
         else:
             response_body = {"message": f"Unsupported route {request.http_method} {request.path}"}
             status = HTTPStatus.NOT_FOUND
@@ -289,7 +297,7 @@ def _handle_currency_predictions(query_params: Dict[str, str]) -> Tuple[Dict[str
             "total_horizons_requested": len(horizons),
             "predictions_found": len(predictions),
             "source": "cache",
-            "query_efficiency": "GSI-optimized"
+            "query_efficiency": "pk-optimized"
         }
     }, HTTPStatus.OK
 
@@ -307,10 +315,38 @@ def _handle_latest_predictions(query_params: Dict[str, str]) -> Tuple[Dict[str, 
     if not horizons:
         raise ClientFacingError("at least one horizon must be specified")
     
-    # Fetch fresh data from DynamoDB using efficient GSI queries
+    # Fetch fresh data from DynamoDB (partition key query per currency/league/horizon)
     predictions_data = _fetch_latest_predictions_from_db(league, horizons, limit)
     
     return predictions_data, HTTPStatus.OK
+
+
+def _currency_league_horizon_key(currency: str, league: str, horizon: str) -> str:
+    """Partition key for predictions table (matches ml.services.prediction_refresh)."""
+    return f"{currency}#{league}#{horizon}"
+
+
+def _fetch_latest_prediction_item_for_league(
+    currency: str,
+    league: str,
+    horizon: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the newest prediction row for (currency, league, horizon).
+
+    Queries the main table by ``currency_league_horizon`` so we never rely on
+    ``currency-horizon-index`` with ``Limit=1`` and ``FilterExpression`` on
+    ``league`` — DynamoDB applies ``Limit`` before filtering, which can skip
+    the correct row or return the wrong league's snapshot.
+    """
+    assert _PREDICTIONS_TABLE is not None
+    partition_key = _currency_league_horizon_key(currency, league, horizon)
+    response = _PREDICTIONS_TABLE.query(
+        KeyConditionExpression=Key("currency_league_horizon").eq(partition_key),
+        ScanIndexForward=False,
+        Limit=1,
+    )
+    items = response.get("Items", [])
+    return items[0] if items else None
 
 
 def _fetch_latest_predictions_from_db(
@@ -365,18 +401,8 @@ def _fetch_latest_predictions_from_db(
         
         for horizon in horizons:
             try:
-                # Use GSI for efficient querying
-                response = _PREDICTIONS_TABLE.query(
-                    IndexName='currency-horizon-index',
-                    KeyConditionExpression=Key('currency').eq(currency) & Key('horizon').eq(horizon),
-                    FilterExpression=Key('league').eq(league),
-                    ScanIndexForward=False,  # Most recent first
-                    Limit=1
-                )
-                
-                items = response.get("Items", [])
-                if items:
-                    item = items[0]
+                item = _fetch_latest_prediction_item_for_league(currency, league, horizon)
+                if item:
                     prediction_data = _format_prediction_item(item, currency, league, horizon)
                     currency_predictions[horizon] = prediction_data
                     prediction_timestamps.add(item.get("timestamp", 0))
@@ -406,7 +432,7 @@ def _fetch_latest_predictions_from_db(
             "total_currencies": len(all_predictions),
             "horizons_requested": horizons,
             "latest_prediction_time": latest_time_str,
-            "query_efficiency": "GSI-optimized"
+            "query_efficiency": "pk-optimized"
         }
     }
     
@@ -430,7 +456,8 @@ def _get_available_currencies(league: str) -> List[str]:
         }
         
         if has_league_attribute:
-            scan_params['FilterExpression'] = Key('league').eq(league)
+            # Scan FilterExpression must use Attr for non-key attributes; Key is for KeyConditionExpression only.
+            scan_params["FilterExpression"] = Attr("league").eq(league)
         
         response = _METADATA_TABLE.scan(**scan_params)
         
@@ -562,36 +589,32 @@ def _fetch_cached_prediction(currency: str, league: Optional[str], horizon: str)
     league_value = league or _infer_latest_league(currency)
     if not league_value:
         return None
-    
-    # Use the currency-horizon-index GSI for efficient queries
+
+    item = _fetch_latest_prediction_item_for_league(currency, league_value, horizon)
+    if item:
+        prediction_dict = _parse_prediction_data_from_item(item)
+        return _normalize_prediction_dict(prediction_dict, item, currency, league_value, horizon)
+
+    # Legacy fallback: GSI (older rows or atypical keys)
     try:
         response = _PREDICTIONS_TABLE.query(
             IndexName='currency-horizon-index',
             KeyConditionExpression=Key('currency').eq(currency) & Key('horizon').eq(horizon),
-            FilterExpression=Key('league').eq(league_value) if league_value else None,
-            ScanIndexForward=False,  # Most recent first
-            Limit=1
+            FilterExpression=Key('league').eq(league_value),
+            ScanIndexForward=False,
+            Limit=25,
         )
     except Exception as e:
-        LOGGER.warning(f"GSI query failed, falling back to main table query: {e}")
-        # Fallback to original query method if GSI is not available yet
-        # Use new key structure that includes horizon
-        currency_league_horizon = f"{currency}#{league_value}#{horizon}"
-        response = _PREDICTIONS_TABLE.query(
-            KeyConditionExpression=Key("currency_league_horizon").eq(currency_league_horizon),
-            ScanIndexForward=False,
-            Limit=1
-        )
-    
+        LOGGER.warning(f"GSI fallback query failed for {currency} {horizon}: {e}")
+        return None
+
     items = response.get("Items", [])
     if not items:
         return None
-    
-    item = items[0]  # Get the most recent prediction
-    
-    # Use shared formatting logic
-    prediction_dict = _parse_prediction_data_from_item(item)
-    return _normalize_prediction_dict(prediction_dict, item, currency, league_value, horizon)
+
+    legacy_item = items[0]
+    prediction_dict = _parse_prediction_data_from_item(legacy_item)
+    return _normalize_prediction_dict(prediction_dict, legacy_item, currency, league_value, horizon)
 
 
 def _infer_latest_league(currency: str) -> Optional[str]:
@@ -667,6 +690,15 @@ def _infer_latest_league(currency: str) -> Optional[str]:
     return None
 
 
+def _validate_date_param(value: Optional[str], param_name: str) -> None:
+    """Raise ClientFacingError if value is set but not a valid YYYY-MM-DD date."""
+    if value:
+        try:
+            datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            raise ClientFacingError(f"{param_name} must be in YYYY-MM-DD format")
+
+
 def _require_string(payload: Dict[str, Any], key: str) -> str:
     """Require a non-empty string from payload."""
     value = payload.get(key)
@@ -716,21 +748,9 @@ def _handle_historical_prices(query_params: Dict[str, str]) -> Tuple[Dict[str, A
     if not league:
         raise ClientFacingError("league parameter is required")
     
-    # Validate date format if provided
-    if start_date:
-        try:
-            from datetime import datetime
-            datetime.strptime(start_date, "%Y-%m-%d")
-        except ValueError:
-            raise ClientFacingError("start_date must be in YYYY-MM-DD format")
-    
-    if end_date:
-        try:
-            from datetime import datetime
-            datetime.strptime(end_date, "%Y-%m-%d")
-        except ValueError:
-            raise ClientFacingError("end_date must be in YYYY-MM-DD format")
-    
+    _validate_date_param(start_date, "start_date")
+    _validate_date_param(end_date, "end_date")
+
     # Validate limit
     if limit <= 0 or limit > 1000:
         raise ClientFacingError("limit must be between 1 and 1000")
@@ -952,6 +972,119 @@ def _get_latest_price_update_time() -> str:
         LOGGER.warning(f"Could not determine latest update time: {e}")
     
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+
+def _handle_league_list() -> Tuple[Dict[str, Any], HTTPStatus]:
+    """Return all leagues available in the historical_league_prices table."""
+    if _HISTORICAL_LEAGUE_PRICES_TABLE is None:
+        raise ClientFacingError(
+            "Historical league prices table not configured",
+            HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+
+    leagues_seen: Dict[str, Any] = {}
+    scan_kwargs: Dict[str, Any] = {
+        "IndexName": "league-date-index",
+        "ProjectionExpression": "league, league_start_date",
+    }
+    response = _HISTORICAL_LEAGUE_PRICES_TABLE.scan(**scan_kwargs)
+    while True:
+        for item in response.get("Items", []):
+            name = item.get("league")
+            if name and name not in leagues_seen:
+                leagues_seen[name] = {"league_start_date": item.get("league_start_date")}
+        if "LastEvaluatedKey" not in response:
+            break
+        response = _HISTORICAL_LEAGUE_PRICES_TABLE.scan(
+            **scan_kwargs, ExclusiveStartKey=response["LastEvaluatedKey"]
+        )
+
+    return {"leagues": leagues_seen}, HTTPStatus.OK
+
+
+def _handle_league_historical_prices(query_params: Dict[str, str]) -> Tuple[Dict[str, Any], HTTPStatus]:
+    """Handle cross-league historical price comparison endpoint.
+
+    Query params:
+      currency  (required)
+      league    (required, comma-separated for multiple leagues)
+      start_date (optional, YYYY-MM-DD)
+      end_date   (optional, YYYY-MM-DD)
+    """
+    if _HISTORICAL_LEAGUE_PRICES_TABLE is None:
+        raise ClientFacingError(
+            "Historical league prices table not configured",
+            HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+
+    currency = query_params.get("currency")
+    leagues_param = query_params.get("league", "")
+    start_date = query_params.get("start_date")
+    end_date = query_params.get("end_date")
+
+    if not currency:
+        raise ClientFacingError("currency parameter is required")
+
+    leagues = [lg.strip() for lg in leagues_param.split(",") if lg.strip()]
+    if not leagues:
+        raise ClientFacingError("league parameter is required (comma-separated list)")
+
+    _validate_date_param(start_date, "start_date")
+    _validate_date_param(end_date, "end_date")
+
+    results: Dict[str, Any] = {}
+    for league in leagues:
+        results[league] = _fetch_league_historical_series(currency, league, start_date, end_date)
+
+    return {"currency": currency, "leagues": results}, HTTPStatus.OK
+
+
+def _fetch_league_historical_series(
+    currency: str,
+    league: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> Dict[str, Any]:
+    """Query historical_league_prices for a single (currency, league) pair."""
+    assert _HISTORICAL_LEAGUE_PRICES_TABLE is not None
+    currency_league = f"{currency}#{league}"
+
+    try:
+        if start_date and end_date:
+            response = _HISTORICAL_LEAGUE_PRICES_TABLE.query(
+                KeyConditionExpression=Key("currency_league").eq(currency_league)
+                & Key("date").between(start_date, end_date),
+                ScanIndexForward=True,
+            )
+        elif start_date:
+            response = _HISTORICAL_LEAGUE_PRICES_TABLE.query(
+                KeyConditionExpression=Key("currency_league").eq(currency_league)
+                & Key("date").gte(start_date),
+                ScanIndexForward=True,
+            )
+        elif end_date:
+            response = _HISTORICAL_LEAGUE_PRICES_TABLE.query(
+                KeyConditionExpression=Key("currency_league").eq(currency_league)
+                & Key("date").lte(end_date),
+                ScanIndexForward=True,
+            )
+        else:
+            response = _HISTORICAL_LEAGUE_PRICES_TABLE.query(
+                KeyConditionExpression=Key("currency_league").eq(currency_league),
+                ScanIndexForward=True,
+            )
+
+        items = response.get("Items", [])
+        league_start_date = items[0].get("league_start_date") if items else None
+        prices = [
+            {"date": item["date"], "avg_price": float(item.get("avg_price", 0))}
+            for item in items
+        ]
+        return {"league_start_date": league_start_date, "count": len(prices), "prices": prices}
+
+    except Exception as exc:
+        LOGGER.error("Error fetching historical league prices for %s/%s: %s", currency, league, exc)
+        return {"league_start_date": None, "count": 0, "prices": [], "error": str(exc)}
 
 
 def _dynamodb_encoder(value: Any) -> Any:

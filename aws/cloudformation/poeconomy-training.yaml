@@ -33,7 +33,7 @@ Parameters:
     Description: Number of parallel currency workers for training
   MaxOptunaWorkers:
     Type: Number
-    Default: 2
+    Default: 1
     Description: Number of Optuna workers per currency for hyperparameter search
   ModelNJobs:
     Type: Number

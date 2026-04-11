@@ -4,7 +4,7 @@
  * Dynamic Price Chart - Shows historical prices and predictions
  */
 
-import { useMemo } from "react";
+import { useMemo, useState, useEffect } from "react";
 import {
   Line,
   XAxis,
@@ -15,11 +15,15 @@ import {
   ResponsiveContainer,
   Area,
   ComposedChart,
+  ReferenceArea,
 } from "recharts";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import type { ChartDataPoint } from "@/types";
 import { formatChaosPrice, formatChartDate } from "@/lib/utils";
 import { useTheme } from "@/lib/providers";
+import { CustomYAxisTick } from "./chart-primitives";
+import { ZoomOut } from "lucide-react";
 
 interface PriceChartProps {
   data: ChartDataPoint[];
@@ -27,31 +31,6 @@ interface PriceChartProps {
   timeRange?: string;
   showPredictionBands?: boolean;
 }
-
-// Custom Y-axis tick with chaos orb icon
-const CustomYAxisTick = ({ x, y, payload, isDark }: any) => {
-  return (
-    <g transform={`translate(${x},${y})`}>
-      <text
-        x={-18}
-        y={0}
-        dy={4}
-        textAnchor="end"
-        fill={isDark ? "#9ca3af" : "#6b7280"}
-        fontSize={12}
-      >
-        {formatChaosPrice(payload.value)}
-      </text>
-      <image
-        x={-14}
-        y={-6}
-        width={12}
-        height={12}
-        href="/images/chaos-orb.png"
-      />
-    </g>
-  );
-};
 
 export function PriceChart({
   data,
@@ -86,17 +65,61 @@ export function PriceChart({
     });
   }, [data, timeRange]);
 
-  // Calculate price range for Y-axis
+  // Zoom state
+  const [refAreaLeft,  setRefAreaLeft]  = useState<string | null>(null);
+  const [refAreaRight, setRefAreaRight] = useState<string | null>(null);
+  const [isSelecting,  setIsSelecting]  = useState(false);
+  const [zoomDomain,   setZoomDomain]   = useState<{ left: string; right: string } | null>(null);
+
+  // Reset zoom when data changes (e.g. currency switch)
+  useEffect(() => { setZoomDomain(null); }, [data]);
+
+  const handleMouseDown = (e: any) => {
+    if (!e?.activeLabel) return;
+    setRefAreaLeft(e.activeLabel);
+    setRefAreaRight(e.activeLabel);
+    setIsSelecting(true);
+  };
+
+  const handleMouseMove = (e: any) => {
+    if (!isSelecting || !e?.activeLabel) return;
+    setRefAreaRight(e.activeLabel);
+  };
+
+  const handleMouseUp = () => {
+    setIsSelecting(false);
+    if (!refAreaLeft || !refAreaRight) { setRefAreaLeft(null); setRefAreaRight(null); return; }
+    const li = chartData.findIndex((d) => d.date === refAreaLeft);
+    const ri = chartData.findIndex((d) => d.date === refAreaRight);
+    if (li === -1 || ri === -1 || li === ri) { setRefAreaLeft(null); setRefAreaRight(null); return; }
+    const [l, r] = li <= ri ? [refAreaLeft, refAreaRight] : [refAreaRight, refAreaLeft];
+    setZoomDomain({ left: l, right: r });
+    setRefAreaLeft(null);
+    setRefAreaRight(null);
+  };
+
+  const zoomedChartData = useMemo(() => {
+    if (!zoomDomain) return chartData;
+    const li = chartData.findIndex((d) => d.date === zoomDomain.left);
+    const ri = chartData.findIndex((d) => d.date === zoomDomain.right);
+    if (li === -1 || ri === -1) return chartData;
+    return chartData.slice(Math.min(li, ri), Math.max(li, ri) + 1);
+  }, [chartData, zoomDomain]);
+
+  // Calculate price range for Y-axis from visible data
   const priceRange = useMemo(() => {
-    const prices = data.map((d) => d.price);
+    const prices: number[] = [];
+    for (const d of zoomedChartData) {
+      if (d.historical != null) prices.push(d.historical);
+      if (d.predicted != null) prices.push(d.predicted);
+      if (Array.isArray(d.range)) prices.push(d.range[0], d.range[1]);
+    }
+    if (prices.length === 0) return { min: 0, max: 100 };
     const min = Math.min(...prices);
     const max = Math.max(...prices);
     const padding = (max - min) * 0.1;
-    return {
-      min: Math.max(0, min - padding),
-      max: max + padding,
-    };
-  }, [data]);
+    return { min: Math.max(0, min - padding), max: max + padding };
+  }, [zoomedChartData]);
 
   // Custom tooltip
   const CustomTooltip = ({ 
@@ -164,14 +187,28 @@ export function PriceChart({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{currencyName} Price History</CardTitle>
-        <CardDescription>
-          Historical prices and predictions over time
-        </CardDescription>
+        <div className="flex items-center justify-between">
+          <div>
+            <CardTitle>{currencyName} Price History</CardTitle>
+            <CardDescription>Historical prices and predictions over time</CardDescription>
+          </div>
+          {zoomDomain && (
+            <Button variant="outline" size="sm" onClick={() => setZoomDomain(null)}>
+              <ZoomOut className="h-4 w-4 mr-1" /> Reset zoom
+            </Button>
+          )}
+        </div>
       </CardHeader>
       <CardContent>
         <ResponsiveContainer width="100%" height={400}>
-          <ComposedChart data={chartData}>
+          <ComposedChart
+            data={zoomedChartData}
+            style={{ cursor: isSelecting ? "crosshair" : "default" }}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={() => { if (isSelecting) { setIsSelecting(false); setRefAreaLeft(null); setRefAreaRight(null); } }}
+          >
             <CartesianGrid
               strokeDasharray="3 3"
               stroke={isDark ? "#374151" : "#e5e7eb"}
@@ -234,6 +271,18 @@ export function PriceChart({
                 fill={isDark ? "#f59e0b" : "#fbbf24"}
                 fillOpacity={0.2}
                 name="Prediction Range"
+              />
+            )}
+
+            {/* Drag-to-zoom selection indicator */}
+            {isSelecting && refAreaLeft != null && refAreaRight != null && (
+              <ReferenceArea
+                x1={refAreaLeft}
+                x2={refAreaRight}
+                stroke={isDark ? "#94a3b8" : "#64748b"}
+                strokeOpacity={0.3}
+                fill={isDark ? "#94a3b8" : "#64748b"}
+                fillOpacity={0.15}
               />
             )}
           </ComposedChart>

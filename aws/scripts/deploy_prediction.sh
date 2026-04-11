@@ -41,7 +41,8 @@ if ! deploy_cloudformation_stack "$PREDICTION_STACK_NAME" "$PREDICTION_TEMPLATE"
   "EnvironmentName=$ENVIRONMENT" \
   "LambdaImageUri=$INFERENCE_IMAGE_URI" \
   "BaseStackName=$BASE_STACK_NAME" \
-  "IngestionStackName=$INGESTION_STACK_NAME"; then
+  "IngestionStackName=$INGESTION_STACK_NAME" \
+  "CloudflareCacheWarmSecret=${CLOUDFLARE_CACHE_WARM_SECRET:-}"; then
     echo "❌ Failed to deploy prediction infrastructure"
     exit 1
 fi

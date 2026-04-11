@@ -25,6 +25,7 @@ import sys
 import time
 from dataclasses import dataclass
 from decimal import Decimal
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
 
@@ -141,9 +142,12 @@ class DirectModelPredictor(ModelPredictor):
                         base_currency, suffix = _split_currency_label(currency_label)
                         bundle = registry.setdefault(base_currency, CurrencyModelBundle(primary=None, horizons={}))
                         if suffix and suffix in HORIZON_SUFFIXES:
-                            bundle.horizons[suffix] = artifact
+                            existing_artifact = bundle.horizons.get(suffix)
+                            if existing_artifact is None or self._is_newer_artifact(artifact, existing_artifact):
+                                bundle.horizons[suffix] = artifact
                         else:
-                            bundle.primary = artifact
+                            if bundle.primary is None or self._is_newer_artifact(artifact, bundle.primary):
+                                bundle.primary = artifact
                             
                     except Exception as exc:
                         self.logger.warning(f"Failed to process metadata {metadata_file}: {exc}")
@@ -171,6 +175,27 @@ class DirectModelPredictor(ModelPredictor):
                 self.logger.info(f"  Horizon '{horizon}': {artifact.model_dir}")
         
         return registry
+
+    def _artifact_timestamp(self, artifact: "DirectModelArtifact") -> float:
+        """Return comparable timestamp for artifact recency ordering."""
+        training_timestamp = artifact.metadata.get("training_timestamp")
+        if isinstance(training_timestamp, str):
+            try:
+                # Normalize trailing Z for Python ISO parser compatibility.
+                normalized = training_timestamp.replace("Z", "+00:00")
+                return datetime.fromisoformat(normalized).timestamp()
+            except ValueError:
+                pass
+        try:
+            return artifact.metadata_path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _is_newer_artifact(
+        self, candidate: "DirectModelArtifact", existing: "DirectModelArtifact"
+    ) -> bool:
+        """Choose the most recent artifact when multiple experiments exist."""
+        return self._artifact_timestamp(candidate) >= self._artifact_timestamp(existing)
     
     def _select_model(self, currency: str, horizon: str) -> Optional[DirectModelArtifact]:
         """Select the appropriate model artifact for the given currency and horizon."""
@@ -776,6 +801,37 @@ def _write_predictions(
     logger.info(f"Wrote {items_written} prediction records, {items_failed} failed", extra={"count": items_written, "failed": items_failed})
 
 
+def _warm_cloudflare_cache(leagues: List[str], logger: MLLogger) -> None:
+    """Call the Cloudflare Worker cache-warm endpoint after a successful refresh.
+
+    Non-fatal — a failure here does not affect prediction data correctness.
+    Uses urllib.request (stdlib) to avoid an external dependency.
+    """
+    import urllib.request as _urllib_request
+
+    worker_url = os.getenv("CLOUDFLARE_WORKER_URL", "https://api.poeconomy.com")
+    secret = os.getenv("CLOUDFLARE_CACHE_WARM_SECRET", "")
+    if not secret:
+        logger.info("CLOUDFLARE_CACHE_WARM_SECRET not set, skipping Cloudflare cache warm")
+        return
+    try:
+        payload = json.dumps({"leagues": leagues}).encode()
+        req = _urllib_request.Request(
+            f"{worker_url}/admin/cache-warm",
+            data=payload,
+            headers={"Content-Type": "application/json", "x-cache-warm-secret": secret},
+            method="POST",
+        )
+        with _urllib_request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read())
+            logger.info(
+                "Cloudflare cache warm complete",
+                extra={"warmed": result.get("warmed", []), "failed": result.get("failed", [])},
+            )
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning(f"Cloudflare cache warm failed (non-fatal): {exc}")
+
+
 def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
     """Shared implementation for Lambda handler and CLI."""
     logger = MLLogger("PredictionRefresh", level=os.getenv("LOG_LEVEL", "INFO"))
@@ -984,7 +1040,11 @@ def refresh_predictions(event: Optional[dict] = None, context=None) -> dict:
             dynamodb = boto3.resource("dynamodb", region_name=config.dynamo.region_name)
             predictions_table = dynamodb.Table(config.dynamo.predictions_table)
             _write_predictions(predictions_table, predictions, options.ttl_hours, logger)
-            
+
+            # Proactively warm Cloudflare KV cache with fresh prediction data
+            refreshed_leagues = list({p.league for p in predictions})
+            _warm_cloudflare_cache(refreshed_leagues, logger)
+
             logger.info(
                 "Prediction refresh completed successfully",
                 extra={
