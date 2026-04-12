@@ -327,80 +327,74 @@ class ModelTrainingPipeline:
                     progress.update()
             return
 
-        # Parallel processing
+        # Parallel processing: workers read shared parquet from processed_data_path.
+        # Use ProcessPoolExecutor as a context manager so shutdown(wait=True) runs before we
+        # unlink the temp file. shutdown(wait=False) + immediate delete caused races where
+        # queued workers started after the main process removed the file (ENOENT / no data).
         processed_data_path = self._get_processed_data_path()
         shared_data = {
             'config_dict': self.config.to_dict(),
             'processed_data_path': processed_data_path
         }
 
-        executor = None
         try:
-            executor = ProcessPoolExecutor(max_workers=max_workers)
-            future_to_currency = {
-                executor.submit(self._train_currency_worker, currency, shared_data): currency
-                for currency in target_currencies
-            }
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                future_to_currency = {
+                    executor.submit(self._train_currency_worker, currency, shared_data): currency
+                    for currency in target_currencies
+                }
 
-            self.logger.info(f"Submitted {len(future_to_currency)} training tasks to process pool")
+                self.logger.info(f"Submitted {len(future_to_currency)} training tasks to process pool")
 
-            completed_count = 0
-            total_tasks = len(future_to_currency)
+                completed_count = 0
+                total_tasks = len(future_to_currency)
 
-            for future in as_completed(future_to_currency):
-                currency = future_to_currency[future]
-                currency_name = currency.get('get_currency', 'Unknown')
-                completed_count += 1
+                for future in as_completed(future_to_currency):
+                    currency = future_to_currency[future]
+                    currency_name = currency.get('get_currency', 'Unknown')
+                    completed_count += 1
 
-                try:
-                    result = future.result()
-                    self._on_currency_complete(currency_name, result)
-                except Exception as e:
-                    error_msg = str(e)
-                    if "process pool was terminated" in error_msg:
-                        self.logger.error(f"{currency_name}: Process pool terminated - likely due to resource exhaustion")
-                    else:
-                        self.logger.error(f"{currency_name}: Training crashed - {error_msg}")
-                    self.failed_currencies.append({
-                        'currency': currency,
-                        'error': error_msg,
-                        'timestamp': datetime.now().isoformat()
-                    })
-                    self.processing_stats['failed_training'] += 1
-                finally:
-                    progress.update()
-                    if completed_count % 10 == 0 or completed_count == total_tasks:
-                        self.logger.debug(f"Completed {completed_count}/{total_tasks} currencies")
+                    try:
+                        result = future.result()
+                        self._on_currency_complete(currency_name, result)
+                    except Exception as e:
+                        error_msg = str(e)
+                        if "process pool was terminated" in error_msg:
+                            self.logger.error(f"{currency_name}: Process pool terminated - likely due to resource exhaustion")
+                        else:
+                            self.logger.error(f"{currency_name}: Training crashed - {error_msg}")
+                        self.failed_currencies.append({
+                            'currency': currency,
+                            'error': error_msg,
+                            'timestamp': datetime.now().isoformat()
+                        })
+                        self.processing_stats['failed_training'] += 1
+                    finally:
+                        progress.update()
+                        if completed_count % 10 == 0 or completed_count == total_tasks:
+                            self.logger.debug(f"Completed {completed_count}/{total_tasks} currencies")
 
-            remaining_futures = [f for f in future_to_currency.keys() if not f.done()]
-            if remaining_futures:
-                self.logger.warning(f"{len(remaining_futures)} futures still pending after as_completed loop")
-            else:
-                self.logger.info(f"All {completed_count} training tasks completed successfully")
+                remaining_futures = [f for f in future_to_currency.keys() if not f.done()]
+                if remaining_futures:
+                    self.logger.warning(f"{len(remaining_futures)} futures still pending after as_completed loop")
+                else:
+                    self.logger.info(f"All {completed_count} training tasks completed successfully")
 
         except Exception as e:
             self.logger.error(f"Process pool executor failed: {str(e)}")
-            if executor and 'future_to_currency' in locals():
+            if 'future_to_currency' in locals():
                 for future in future_to_currency:
                     if not future.done():
                         future.cancel()
         finally:
-            if executor:
-                try:
-                    self.logger.debug("Shutting down ProcessPoolExecutor...")
-                    executor.shutdown(wait=False)
-                    self.logger.debug("ProcessPoolExecutor shutdown completed")
-                except Exception as shutdown_error:
-                    self.logger.warning(f"Error during executor shutdown: {shutdown_error}")
-
             if processed_data_path and os.path.exists(processed_data_path):
                 try:
                     os.remove(processed_data_path)
                     temp_dir = os.path.dirname(processed_data_path)
                     if os.path.exists(temp_dir) and not os.listdir(temp_dir):
                         os.rmdir(temp_dir)
-                except Exception as e:
-                    self.logger.warning(f"Failed to clean up temporary file {processed_data_path}: {e}")
+                except Exception as cleanup_error:
+                    self.logger.warning(f"Failed to clean up temporary file {processed_data_path}: {cleanup_error}")
     
     @staticmethod
     def _train_currency_worker(currency: Dict[str, Any], shared_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
